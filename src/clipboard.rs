@@ -2,6 +2,12 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+const CLIPBOARD_TROUBLESHOOT: &str = "\
+Troubleshooting:
+  • Is wl-clipboard installed? (which wl-paste)
+  • Are you in a Wayland session? (echo $WAYLAND_DISPLAY)
+  • Is your compositor running?";
+
 pub struct Clipboard;
 
 impl Clipboard {
@@ -10,20 +16,26 @@ impl Clipboard {
         let mut child = Command::new("wl-copy")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            // Note: We use inherit() for stderr because wl-copy forks to background,
+            // and piped stderr would cause wait_with_output() to hang waiting for the
+            // forked child to close the pipe (which never happens).
+            .stderr(Stdio::inherit())
             .spawn()
-            .context("Failed to spawn wl-copy. Is wl-clipboard installed?")?;
+            .with_context(|| format!("Failed to run wl-copy.\n{}", CLIPBOARD_TROUBLESHOOT))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(content.as_bytes())
+        // Write content and close stdin to signal EOF to wl-copy
+        {
+            let mut stdin = child.stdin.take()
+                .context("Failed to get wl-copy stdin")?;
+            stdin.write_all(content.as_bytes())
                 .context("Failed to write to wl-copy stdin")?;
+            // stdin is dropped here, closing the pipe and sending EOF
         }
 
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("wl-copy failed: {}", stderr);
+        // Wait for wl-copy parent process to exit (it forks to background)
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!("wl-copy failed with status: {}", status);
         }
 
         Ok(())
@@ -48,7 +60,7 @@ impl Clipboard {
 
         let output = cmd
             .output()
-            .context("Failed to run wl-paste. Is wl-clipboard installed?")?;
+            .with_context(|| format!("Failed to run wl-paste.\n{}", CLIPBOARD_TROUBLESHOOT))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
