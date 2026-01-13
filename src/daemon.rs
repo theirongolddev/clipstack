@@ -1,7 +1,9 @@
 use crate::clipboard::Clipboard;
 use crate::storage::Storage;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,17 +13,57 @@ pub struct Daemon {
     storage: Storage,
     running: Arc<AtomicBool>,
     poll_interval: Duration,
+    _lock_file: File, // Keep lock file open to maintain lock
 }
 
 impl Daemon {
+    /// Get the default path to the daemon lock file
+    pub fn lock_file_path() -> PathBuf {
+        dirs::runtime_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("clipstack.lock")
+    }
+
+    /// Check if daemon is currently running by testing the lock file
+    pub fn is_running() -> bool {
+        let lock_path = Self::lock_file_path();
+        if let Ok(file) = File::open(&lock_path) {
+            // Try to acquire exclusive lock - if fails, daemon is running
+            file.try_lock_exclusive().is_err()
+        } else {
+            false
+        }
+    }
+
     pub fn new(storage_dir: Option<PathBuf>) -> Result<Self> {
+        Self::new_with_lock(storage_dir, false)
+    }
+
+    /// Create daemon with option to use local lock file (for tests)
+    pub fn new_with_lock(storage_dir: Option<PathBuf>, use_local_lock: bool) -> Result<Self> {
         let base_dir = storage_dir.unwrap_or_else(Storage::default_dir);
-        let storage = Storage::new(base_dir)?;
+        let storage = Storage::new(base_dir.clone())?;
+
+        // Use storage-local lock file only when explicitly requested (for tests),
+        // otherwise use global lock file path
+        let lock_path = if use_local_lock {
+            base_dir.join("clipstack.lock")
+        } else {
+            Self::lock_file_path()
+        };
+
+        // Acquire exclusive lock - fails if another daemon is running
+        let lock_file = File::create(&lock_path)
+            .with_context(|| format!("Failed to create lock file: {:?}", lock_path))?;
+        lock_file
+            .try_lock_exclusive()
+            .context("Daemon already running (lock file is held)")?;
 
         Ok(Self {
             storage,
             running: Arc::new(AtomicBool::new(false)),
             poll_interval: Duration::from_millis(250),
+            _lock_file: lock_file,
         })
     }
 
@@ -38,7 +80,7 @@ impl Daemon {
         let mut last_clipboard_hash: Option<Vec<u8>> = None;
         let mut last_primary_hash: Option<Vec<u8>> = None;
 
-        eprintln!("clipd daemon started, monitoring clipboard + primary selection...");
+        eprintln!("clipstack daemon started, monitoring clipboard + primary selection...");
 
         while self.running.load(Ordering::SeqCst) {
             // Check regular clipboard
@@ -50,7 +92,7 @@ impl Daemon {
             std::thread::sleep(self.poll_interval);
         }
 
-        eprintln!("clipd daemon stopped");
+        eprintln!("clipstack daemon stopped");
         Ok(())
     }
 
@@ -71,11 +113,13 @@ impl Daemon {
 
                     match self.storage.save_entry(&content) {
                         Ok(entry) => {
+                            // Use chars().take() for safe Unicode truncation
+                            let preview: String = entry.preview.chars().take(40).collect();
                             eprintln!(
                                 "[{}] Saved: {} bytes, preview: {}...",
                                 source,
                                 entry.size,
-                                &entry.preview[..entry.preview.len().min(40)]
+                                preview
                             );
                         }
                         Err(e) => {
@@ -109,14 +153,16 @@ mod tests {
     #[test]
     fn test_daemon_creation() {
         let dir = TempDir::new().unwrap();
-        let daemon = Daemon::new(Some(dir.path().to_path_buf())).unwrap();
+        // Use local lock file for test isolation
+        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), true).unwrap();
         assert!(!daemon.running.load(Ordering::SeqCst));
     }
 
     #[test]
     fn test_daemon_stop_handle() {
         let dir = TempDir::new().unwrap();
-        let daemon = Daemon::new(Some(dir.path().to_path_buf())).unwrap();
+        // Use local lock file for test isolation
+        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), true).unwrap();
 
         let handle = daemon.stop_handle();
         daemon.running.store(true, Ordering::SeqCst);
