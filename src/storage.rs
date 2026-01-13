@@ -1123,4 +1123,86 @@ mod tests {
         storage.toggle_pin(&entry1.id).unwrap();
         assert_eq!(storage.pinned_count().unwrap(), 1);
     }
+
+    #[test]
+    fn test_pinned_survives_pruning() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path().to_path_buf(), 5).unwrap(); // Small limit
+
+        // Create and pin an entry
+        let pinned_entry = storage.save_entry("keep me").unwrap();
+        storage.toggle_pin(&pinned_entry.id).unwrap();
+
+        // Fill beyond limit with sleeps to ensure unique timestamps
+        for i in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            storage.save_entry(&format!("filler {}", i)).unwrap();
+        }
+
+        // Verify pinned entry still exists
+        let index = storage.load_index().unwrap();
+        let found = index.entries.iter().find(|e| e.id == pinned_entry.id);
+        assert!(found.is_some(), "Pinned entry should survive pruning");
+        assert!(found.unwrap().pinned, "Should still be pinned");
+
+        // Verify unpinned count is at limit
+        let unpinned = index.entries.iter().filter(|e| !e.pinned).count();
+        assert_eq!(unpinned, 5, "Unpinned should be capped at max_entries");
+    }
+
+    #[test]
+    fn test_duplicate_preserves_pin_status() {
+        let (storage, _dir) = test_storage();
+
+        // Create and pin an entry
+        let original = storage.save_entry("duplicate me").unwrap();
+        storage.toggle_pin(&original.id).unwrap();
+
+        // Add other entries
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        storage.save_entry("other 1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        storage.save_entry("other 2").unwrap();
+
+        // Re-copy same content
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let dup = storage.save_entry("duplicate me").unwrap();
+
+        // Should be same entry, moved to front, still pinned
+        assert_eq!(dup.id, original.id, "Should return same entry ID");
+
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries[0].id, original.id, "Should be moved to front");
+        assert!(index.entries[0].pinned, "Pin status should be preserved");
+    }
+
+    #[test]
+    fn test_backwards_compat_missing_pinned_field() {
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path().join("index.json");
+
+        // Write old-format index (no pinned field)
+        std::fs::write(
+            &index_path,
+            r#"{
+            "max_entries": 100,
+            "entries": [{
+                "id": "12345",
+                "timestamp": 12345,
+                "size": 4,
+                "preview": "test",
+                "hash": "sha256:abc"
+            }]
+        }"#,
+        )
+        .unwrap();
+
+        std::fs::write(dir.path().join("12345.txt"), "test").unwrap();
+
+        let storage = Storage::new(dir.path().to_path_buf(), 100).unwrap();
+        let index = storage.load_index().unwrap();
+
+        assert_eq!(index.entries.len(), 1, "Should load old format");
+        assert!(!index.entries[0].pinned, "Should default to false");
+    }
 }

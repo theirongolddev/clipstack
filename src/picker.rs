@@ -872,7 +872,7 @@ impl Picker {
                 };
                 (
                     format!(
-                        "{} j/k:Nav  /:Search  Tab:Preview  Enter:Paste  d:Del  u:Undo  q:Quit",
+                        "{} j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit",
                         mode_indicator
                     ),
                     Style::default().fg(Color::DarkGray),

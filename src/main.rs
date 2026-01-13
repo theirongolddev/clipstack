@@ -168,6 +168,8 @@ fn main() -> Result<()> {
         Some(Commands::Stats) => {
             let index = storage.load_index()?;
             let total_size: usize = index.entries.iter().map(|e| e.size).sum();
+            let pinned_count = index.entries.iter().filter(|e| e.pinned).count();
+            let unpinned_count = index.entries.len() - pinned_count;
 
             // Determine source of max_entries setting
             let source = if std::env::var("CLIPSTACK_MAX_ENTRIES").is_ok() {
@@ -176,7 +178,9 @@ fn main() -> Result<()> {
                 ""
             };
 
-            println!("Entries:     {}/{}{}", index.entries.len(), storage.max_entries(), source);
+            println!("Entries:     {}", index.entries.len());
+            println!("  Pinned:    {} (protected)", pinned_count);
+            println!("  Regular:   {}/{}{}", unpinned_count, storage.max_entries(), source);
             println!("Total size:  {}", util::format_size(total_size));
 
             if let Some(oldest) = index.entries.last() {
