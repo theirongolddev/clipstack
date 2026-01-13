@@ -1,0 +1,19 @@
+[Unit]
+Description=Clipstack clipboard history daemon
+Documentation=https://github.com/user/clipstack
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/clipstack daemon
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/clipd
+
+[Install]
+WantedBy=graphical-session.target

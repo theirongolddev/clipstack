@@ -1,0 +1,21 @@
+#!/bin/sh
+# rcopy - Copy stdin to local clipboard over SSH tunnel
+# Usage: cat file | rcopy
+#        echo "text" | rcopy
+#        rcopy < file
+#
+# Requires: SSH connection with reverse tunnel on port 7779
+#   ssh -R 7779:localhost:7779 remote
+#
+# And local machine running: cb serve
+
+PORT="${CB_PORT:-7779}"
+
+if command -v nc >/dev/null 2>&1; then
+    cat | nc -q0 localhost "$PORT" 2>/dev/null || cat | nc localhost "$PORT"
+elif command -v ncat >/dev/null 2>&1; then
+    cat | ncat localhost "$PORT"
+else
+    echo "Error: nc (netcat) not found" >&2
+    exit 1
+fi
