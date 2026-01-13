@@ -85,16 +85,13 @@ impl Storage {
         hasher.update(content.as_bytes());
         let hash = format!("sha256:{:x}", hasher.finalize());
 
-        // Check for duplicate
+        // Check for duplicate - move existing entry to front instead of duplicating
         let mut index = self.load_index()?;
-        if index.entries.iter().any(|e| e.hash == hash) {
-            // Move existing entry to front instead of duplicating
-            if let Some(pos) = index.entries.iter().position(|e| e.hash == hash) {
-                let existing = index.entries.remove(pos);
-                index.entries.insert(0, existing.clone());
-                self.save_index(&index)?;
-                return Ok(existing);
-            }
+        if let Some(pos) = index.entries.iter().position(|e| e.hash == hash) {
+            let existing = index.entries.remove(pos);
+            index.entries.insert(0, existing.clone());
+            self.save_index(&index)?;
+            return Ok(existing);
         }
 
         // Create preview (first N chars, single line)
@@ -219,6 +216,93 @@ mod tests {
 
         let index = storage.load_index().unwrap();
         assert_eq!(index.entries.len(), 1); // Only one entry
+    }
+
+    #[test]
+    fn test_duplicate_moves_to_front() {
+        let (storage, _dir) = test_storage();
+
+        // Save three entries
+        storage.save_entry("first").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        storage.save_entry("second").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        storage.save_entry("third").unwrap();
+
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries.len(), 3);
+        assert_eq!(index.entries[0].preview, "third"); // Most recent first
+        assert_eq!(index.entries[2].preview, "first"); // Oldest last
+
+        // Re-save "first" - should move to front
+        storage.save_entry("first").unwrap();
+
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries.len(), 3); // Still 3 entries
+        assert_eq!(index.entries[0].preview, "first"); // Now at front
+        assert_eq!(index.entries[1].preview, "third");
+        assert_eq!(index.entries[2].preview, "second");
+    }
+
+    #[test]
+    fn test_unicode_content_handling() {
+        let (storage, _dir) = test_storage();
+        let content = "Hello 世界 🎉 émojis 日本語テスト";
+
+        let entry = storage.save_entry(content).unwrap();
+
+        // Verify content is saved and loaded correctly
+        let loaded = storage.load_content(&entry.id).unwrap();
+        assert_eq!(loaded, content);
+
+        // Verify preview handles Unicode without panic
+        assert!(!entry.preview.is_empty());
+        assert!(entry.preview.len() <= MAX_PREVIEW_LEN * 4); // UTF-8 can use up to 4 bytes per char
+    }
+
+    #[test]
+    fn test_long_unicode_content_preview_truncation() {
+        let (storage, _dir) = test_storage();
+        // Create content with 200 emoji characters (each is 4 bytes in UTF-8)
+        let content = "🎉".repeat(200);
+
+        let entry = storage.save_entry(&content).unwrap();
+
+        // Preview should be truncated to MAX_PREVIEW_LEN characters, not bytes
+        assert_eq!(entry.preview.chars().count(), MAX_PREVIEW_LEN);
+        // But full content should be preserved
+        let loaded = storage.load_content(&entry.id).unwrap();
+        assert_eq!(loaded, content);
+    }
+
+    #[test]
+    fn test_empty_and_whitespace_content() {
+        let (storage, _dir) = test_storage();
+
+        // Empty content should still be saved (edge case)
+        let entry = storage.save_entry("").unwrap();
+        assert_eq!(entry.size, 0);
+        assert!(entry.preview.is_empty());
+
+        let loaded = storage.load_content(&entry.id).unwrap();
+        assert!(loaded.is_empty());
+
+        // Whitespace-only content should be saved with sanitized preview
+        let ws_content = "   \n\t\r   ";
+        let ws_entry = storage.save_entry(ws_content).unwrap();
+        assert_eq!(ws_entry.size, ws_content.len());
+        // Control chars should be replaced with spaces in preview
+        assert!(!ws_entry.preview.contains('\n'));
+        assert!(!ws_entry.preview.contains('\t'));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_entry() {
+        let (storage, _dir) = test_storage();
+
+        // Deleting nonexistent entry should not error
+        let result = storage.delete_entry("nonexistent-id");
+        assert!(result.is_ok());
     }
 
     #[test]
