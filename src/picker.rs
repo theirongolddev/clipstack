@@ -151,14 +151,14 @@ impl Picker {
             }
 
             // Lazy load content only when needed
-            if let Ok(content) = self.storage.load_content(&entry.id) {
-                if let Some(score) = self.matcher.fuzzy_match(&content, query) {
-                    results.push(FilteredEntry {
-                        index: idx,
-                        score,
-                        match_location: MatchLocation::Content,
-                    });
-                }
+            if let Ok(content) = self.storage.load_content(&entry.id)
+                && let Some(score) = self.matcher.fuzzy_match(&content, query)
+            {
+                results.push(FilteredEntry {
+                    index: idx,
+                    score,
+                    match_location: MatchLocation::Content,
+                });
             }
         }
 

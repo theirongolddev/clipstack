@@ -7,8 +7,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAX_PREVIEW_LEN: usize = 100;
-const MAX_ENTRIES: usize = 100;
-
 // Configurable max entries constants
 const DEFAULT_MAX_ENTRIES: usize = 100;
 const ABSOLUTE_MAX_ENTRIES: usize = 10000; // Safety limit
@@ -35,7 +33,7 @@ pub struct ClipIndex {
 impl Default for ClipIndex {
     fn default() -> Self {
         Self {
-            max_entries: MAX_ENTRIES,
+            max_entries: DEFAULT_MAX_ENTRIES,
             entries: Vec::new(),
         }
     }
@@ -67,6 +65,7 @@ impl Storage {
     }
 
     /// Convenience constructor with default max_entries
+    #[allow(dead_code)]
     pub fn with_defaults(base_dir: PathBuf) -> Result<Self> {
         Self::new(base_dir, DEFAULT_MAX_ENTRIES)
     }
@@ -116,7 +115,7 @@ impl Storage {
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "tmp") {
+                if path.extension().is_some_and(|ext| ext == "tmp") {
                     eprintln!("[cleanup] Removing orphaned temp file: {:?}", path);
                     let _ = fs::remove_file(&path);
                 }
@@ -185,10 +184,10 @@ impl Storage {
             .with_context(|| format!("Failed to rename {:?} to {:?}", tmp_path, path))?;
 
         // Step 5: Sync parent directory for full durability
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
         }
 
         Ok(())
@@ -359,6 +358,7 @@ impl Storage {
     }
 
     /// Get count of pinned entries
+    #[allow(dead_code)]
     pub fn pinned_count(&self) -> Result<usize> {
         let index = self.load_index()?;
         Ok(index.entries.iter().filter(|e| e.pinned).count())
@@ -370,7 +370,10 @@ impl Storage {
             let path = self.content_path(&entry.id);
             let _ = fs::remove_file(path);
         }
-        self.save_index(&ClipIndex::default())
+        self.save_index(&ClipIndex {
+            max_entries: self.max_entries,
+            entries: Vec::new(),
+        })
     }
 
     /// Attempt to recover from corrupted storage.
@@ -412,7 +415,7 @@ impl Storage {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "txt") {
+            if path.extension().is_some_and(|ext| ext == "txt") {
                 let id = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -652,15 +655,15 @@ mod tests {
         let storage = Storage::with_defaults(dir.path().to_path_buf()).unwrap();
 
         // Save max_entries + 5 items
-        for i in 0..(MAX_ENTRIES + 5) {
+        for i in 0..(DEFAULT_MAX_ENTRIES + 5) {
             storage.save_entry(&format!("content {}", i)).unwrap();
         }
 
         let index = storage.load_index().unwrap();
-        assert_eq!(index.entries.len(), MAX_ENTRIES);
+        assert_eq!(index.entries.len(), DEFAULT_MAX_ENTRIES);
 
         // Oldest entries should be pruned
-        assert!(index.entries[0].preview.contains(&(MAX_ENTRIES + 4).to_string()));
+        assert!(index.entries[0].preview.contains(&(DEFAULT_MAX_ENTRIES + 4).to_string()));
     }
 
     #[test]
@@ -673,6 +676,20 @@ mod tests {
 
         let index = storage.load_index().unwrap();
         assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn test_clear_preserves_custom_max_entries() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path().to_path_buf(), 42).unwrap();
+
+        storage.save_entry("test").unwrap();
+        storage.clear().unwrap();
+
+        // Verify max_entries is preserved after clear
+        let index = storage.load_index().unwrap();
+        assert!(index.entries.is_empty());
+        assert_eq!(index.max_entries, 42, "clear() should preserve configured max_entries");
     }
 
     #[test]
