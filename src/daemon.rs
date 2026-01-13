@@ -35,14 +35,18 @@ impl Daemon {
         }
     }
 
-    pub fn new(storage_dir: Option<PathBuf>) -> Result<Self> {
-        Self::new_with_lock(storage_dir, false)
+    pub fn new(storage_dir: Option<PathBuf>, max_entries: usize) -> Result<Self> {
+        Self::new_with_lock(storage_dir, max_entries, false)
     }
 
     /// Create daemon with option to use local lock file (for tests)
-    pub fn new_with_lock(storage_dir: Option<PathBuf>, use_local_lock: bool) -> Result<Self> {
+    pub fn new_with_lock(
+        storage_dir: Option<PathBuf>,
+        max_entries: usize,
+        use_local_lock: bool,
+    ) -> Result<Self> {
         let base_dir = storage_dir.unwrap_or_else(Storage::default_dir);
-        let storage = Storage::new(base_dir.clone())?;
+        let storage = Storage::new(base_dir.clone(), max_entries)?;
 
         // Use storage-local lock file only when explicitly requested (for tests),
         // otherwise use global lock file path
@@ -154,7 +158,7 @@ mod tests {
     fn test_daemon_creation() {
         let dir = TempDir::new().unwrap();
         // Use local lock file for test isolation
-        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), true).unwrap();
+        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), 100, true).unwrap();
         assert!(!daemon.running.load(Ordering::SeqCst));
     }
 
@@ -162,7 +166,7 @@ mod tests {
     fn test_daemon_stop_handle() {
         let dir = TempDir::new().unwrap();
         // Use local lock file for test isolation
-        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), true).unwrap();
+        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), 100, true).unwrap();
 
         let handle = daemon.stop_handle();
         daemon.running.store(true, Ordering::SeqCst);

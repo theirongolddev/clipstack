@@ -21,6 +21,11 @@ struct Cli {
     #[arg(long, global = true)]
     storage_dir: Option<PathBuf>,
 
+    /// Maximum entries to store (1-10000, default: 100)
+    /// Can also be set via CLIPSTACK_MAX_ENTRIES environment variable
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=10000))]
+    max_entries: Option<u32>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -55,6 +60,9 @@ enum Commands {
     /// Check daemon status and system health
     Status,
 
+    /// Attempt to recover from corrupted storage
+    Recover,
+
     /// Start a TCP server for remote clipboard (use with SSH reverse tunnel)
     Serve {
         /// Port to listen on
@@ -84,8 +92,20 @@ fn main() -> Result<()> {
         check_dependencies()?;
     }
 
+    // Determine max_entries: CLI > env > default (100)
+    let max_entries = cli
+        .max_entries
+        .map(|n| n as usize)
+        .or_else(|| {
+            std::env::var("CLIPSTACK_MAX_ENTRIES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(100)
+        .clamp(1, 10000);
+
     let storage_dir = cli.storage_dir.unwrap_or_else(storage::Storage::default_dir);
-    let storage = storage::Storage::new(storage_dir)?;
+    let storage = storage::Storage::new(storage_dir, max_entries)?;
 
     match cli.command {
         None | Some(Commands::Pick) => {
@@ -136,7 +156,7 @@ fn main() -> Result<()> {
 
         Some(Commands::Daemon) => {
             // Use custom storage dir if provided, but always use global lock file
-            let daemon = daemon::Daemon::new(Some(storage.base_dir().to_path_buf()))?;
+            let daemon = daemon::Daemon::new(Some(storage.base_dir().to_path_buf()), max_entries)?;
 
             // Handle Ctrl+C
             let running = daemon.stop_handle();
@@ -149,20 +169,38 @@ fn main() -> Result<()> {
             let index = storage.load_index()?;
             let total_size: usize = index.entries.iter().map(|e| e.size).sum();
 
-            println!("Entries: {}", index.entries.len());
-            println!("Max entries: {}", index.max_entries);
-            println!("Total size: {}", util::format_size(total_size));
+            // Determine source of max_entries setting
+            let source = if std::env::var("CLIPSTACK_MAX_ENTRIES").is_ok() {
+                " (env)"
+            } else {
+                ""
+            };
+
+            println!("Entries:     {}/{}{}", index.entries.len(), storage.max_entries(), source);
+            println!("Total size:  {}", util::format_size(total_size));
 
             if let Some(oldest) = index.entries.last() {
-                println!("Oldest: {}", util::format_relative_time(oldest.timestamp));
+                println!("Oldest:      {}", util::format_relative_time(oldest.timestamp));
             }
             if let Some(newest) = index.entries.first() {
-                println!("Newest: {}", util::format_relative_time(newest.timestamp));
+                println!("Newest:      {}", util::format_relative_time(newest.timestamp));
             }
         }
 
         Some(Commands::Status) => {
             print_status(&storage)?;
+        }
+
+        Some(Commands::Recover) => {
+            match storage.attempt_recovery() {
+                Ok(count) => {
+                    println!("Recovery complete. Recovered {} entries.", count);
+                }
+                Err(e) => {
+                    eprintln!("Recovery failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
 
         Some(Commands::Serve { port }) => {
@@ -227,6 +265,18 @@ fn print_status(storage: &storage::Storage) -> Result<()> {
     if let Some(newest) = index.entries.first() {
         println!("Latest:  {}", util::format_relative_time(newest.timestamp));
     }
+
+    println!();
+
+    // Configuration info
+    println!("Config:");
+    let max_entries = storage.max_entries();
+    let source = if std::env::var("CLIPSTACK_MAX_ENTRIES").is_ok() {
+        "env"
+    } else {
+        "default"
+    };
+    println!("  Max entries: {} ({})", max_entries, source);
 
     println!();
 
