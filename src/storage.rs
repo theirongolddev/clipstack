@@ -451,12 +451,36 @@ impl Storage {
 
         eprintln!("[recovery] Found {} orphaned content files", orphan_count);
 
-        // Sort by timestamp descending
-        recovered_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Sort by timestamp descending, then by pinned (true first) to prefer pinned during dedup
+        recovered_entries.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.pinned.cmp(&a.pinned))
+        });
 
-        // Deduplicate by hash (keep most recent)
-        let mut seen_hashes = HashSet::new();
-        recovered_entries.retain(|e| seen_hashes.insert(e.hash.clone()));
+        // Deduplicate by hash, preferring pinned entries
+        // Use a map to track which entries we've seen, and prefer pinned ones
+        let mut hash_to_entry: std::collections::HashMap<String, ClipEntry> =
+            std::collections::HashMap::new();
+        for entry in recovered_entries {
+            match hash_to_entry.get(&entry.hash) {
+                Some(existing) if !existing.pinned && entry.pinned => {
+                    // Replace unpinned with pinned
+                    hash_to_entry.insert(entry.hash.clone(), entry);
+                }
+                None => {
+                    // First entry with this hash
+                    hash_to_entry.insert(entry.hash.clone(), entry);
+                }
+                _ => {
+                    // Already have a pinned entry or same pin state, keep existing
+                }
+            }
+        }
+
+        // Collect back into vec and sort by timestamp descending
+        let mut recovered_entries: Vec<ClipEntry> = hash_to_entry.into_values().collect();
+        recovered_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         let total = recovered_entries.len();
         eprintln!("[recovery] Total entries after dedup: {}", total);
