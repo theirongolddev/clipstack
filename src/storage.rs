@@ -1,6 +1,6 @@
+use crate::util;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -90,17 +90,8 @@ impl Storage {
         }
 
         // Prune UNPINNED entries if limit was reduced
-        // Only count unpinned entries against the limit
-        while index.entries.iter().filter(|e| !e.pinned).count() > self.max_entries {
-            // Find oldest (last) unpinned entry
-            if let Some(pos) = index.entries.iter().rposition(|e| !e.pinned) {
-                let old = index.entries.remove(pos);
-                let old_path = self.content_path(&old.id);
-                let _ = fs::remove_file(old_path);
-                changed = true;
-            } else {
-                break; // All entries are pinned
-            }
+        if self.prune_oldest_unpinned(&mut index) {
+            changed = true;
         }
 
         if changed {
@@ -124,21 +115,20 @@ impl Storage {
         Ok(())
     }
 
-    /// Prune old UNPINNED entries to stay within max_entries limit.
-    /// Pinned entries are never pruned by this method.
-    fn prune_unpinned_entries(&self, index: &mut ClipIndex) -> Result<()> {
-        // Only count unpinned entries against the limit
+    /// Remove oldest unpinned entries until within max_entries limit.
+    /// Returns true if any entries were removed.
+    fn prune_oldest_unpinned(&self, index: &mut ClipIndex) -> bool {
+        let mut changed = false;
         while index.entries.iter().filter(|e| !e.pinned).count() > self.max_entries {
-            // Find oldest (last) unpinned entry
             if let Some(pos) = index.entries.iter().rposition(|e| !e.pinned) {
                 let old = index.entries.remove(pos);
-                let old_path = self.content_path(&old.id);
-                let _ = fs::remove_file(old_path);
+                let _ = fs::remove_file(self.content_path(&old.id));
+                changed = true;
             } else {
                 break; // All entries are pinned
             }
         }
-        Ok(())
+        changed
     }
 
     /// Atomically write data to a file using write-then-rename pattern.
@@ -151,18 +141,12 @@ impl Storage {
     ///
     /// If interrupted at any point, the original file remains intact.
     fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
-        // Use unique temp file name to avoid race conditions when multiple threads
-        // write to the same target path. Format: originalname.UNIQUE.tmp
-        // This ensures .tmp extension is preserved for cleanup detection.
-        let file_stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file");
+        // Generate unique temp file name using nanosecond timestamp and process ID
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let tmp_name = format!("{}.{:?}_{}.tmp", file_stem, std::thread::current().id(), unique_id);
+        let tmp_name = format!("{}.{}.tmp", std::process::id(), unique_id);
         let tmp_path = path.with_file_name(tmp_name);
 
         // Step 1: Write to temporary file
@@ -248,11 +232,7 @@ impl Storage {
     pub fn save_entry(&self, content: &str) -> Result<ClipEntry> {
         let timestamp = chrono::Utc::now().timestamp_millis();
         let id = timestamp.to_string();
-
-        // Compute hash
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        let hash = format!("sha256:{:x}", hasher.finalize());
+        let hash = util::compute_hash_string(content);
 
         // Check for duplicate - move existing entry to front instead of duplicating
         let mut index = self.load_index()?;
@@ -286,8 +266,8 @@ impl Storage {
         // Update index
         index.entries.insert(0, entry.clone());
 
-        // Prune old UNPINNED entries only
-        self.prune_unpinned_entries(&mut index)?;
+        // Prune old unpinned entries only
+        self.prune_oldest_unpinned(&mut index);
 
         self.save_index(&index)?;
         Ok(entry)
@@ -428,11 +408,7 @@ impl Storage {
 
                 if let Ok(content) = fs::read_to_string(&path) {
                     let timestamp: i64 = id.parse().unwrap_or(0);
-
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let hash = format!("sha256:{:x}", hasher.finalize());
-
+                    let hash = util::compute_hash_string(&content);
                     let preview: String = content
                         .chars()
                         .take(MAX_PREVIEW_LEN)

@@ -80,7 +80,7 @@ impl Clipboard {
     where
         F: FnMut(String) -> Result<()>,
     {
-        use sha2::{Digest, Sha256};
+        use crate::util;
         use std::thread;
         use std::time::Duration;
 
@@ -89,10 +89,7 @@ impl Clipboard {
         loop {
             match Self::paste() {
                 Ok(content) if !content.is_empty() => {
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let hash = hasher.finalize().to_vec();
-
+                    let hash = util::compute_hash(&content);
                     if last_hash.as_ref() != Some(&hash) {
                         last_hash = Some(hash);
                         on_change(content)?;

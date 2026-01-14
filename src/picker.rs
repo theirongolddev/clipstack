@@ -415,16 +415,22 @@ impl Picker {
         self.status_message = Some((msg, level, Instant::now()));
     }
 
+    /// Format a status message with optional pin indicator
+    fn format_entry_message(action: &str, preview: &str, pinned: bool, suffix: &str) -> String {
+        let pin = if pinned { "★ " } else { "" };
+        if suffix.is_empty() {
+            format!("{} {}'{}'", action, pin, preview)
+        } else {
+            format!("{} {}'{}' - {}", action, pin, preview, suffix)
+        }
+    }
+
     fn delete_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.selected_entry().cloned() {
-            // Load content for undo
             let content = self.storage.load_content(&entry.id)?;
-
-            // Get preview for status message
             let preview: String = entry.preview.chars().take(30).collect();
             let was_pinned = entry.pinned;
 
-            // Store for undo
             self.last_deleted = Some(DeletedEntry {
                 entry: entry.clone(),
                 content,
@@ -432,17 +438,12 @@ impl Picker {
                 deleted_at: Instant::now(),
             });
 
-            // Delete from storage
             self.storage.delete_entry(&entry.id)?;
             self.entries.retain(|e| e.id != entry.id);
             self.update_filter();
             self.load_preview();
 
-            let msg = if was_pinned {
-                format!("Deleted ★ '{}' - 'u' to undo (5s)", preview)
-            } else {
-                format!("Deleted '{}' - 'u' to undo (5s)", preview)
-            };
+            let msg = Self::format_entry_message("Deleted", &preview, was_pinned, "'u' to undo (5s)");
             self.set_status(msg, StatusLevel::Warning);
         }
         Ok(())
@@ -451,29 +452,20 @@ impl Picker {
     fn undo_delete(&mut self) -> Result<()> {
         if let Some(deleted) = self.last_deleted.take() {
             if deleted.deleted_at.elapsed() < Duration::from_secs(5) {
-                // Get preview for status message
                 let preview: String = deleted.entry.preview.chars().take(30).collect();
-
-                // Restore the entry
                 let restored = self.storage.save_entry(&deleted.content)?;
 
-                // Restore pin state if it was pinned
                 if deleted.was_pinned {
                     let _ = self.storage.set_pinned(&restored.id, true);
                 }
 
-                // Reload entries
                 let index = self.storage.load_index()?;
                 self.entries = index.entries;
                 self.sort_entries_by_pin();
                 self.update_filter();
                 self.load_preview();
 
-                let msg = if deleted.was_pinned {
-                    format!("Restored ★ '{}'", preview)
-                } else {
-                    format!("Restored '{}'", preview)
-                };
+                let msg = Self::format_entry_message("Restored", &preview, deleted.was_pinned, "");
                 self.set_status(msg, StatusLevel::Success);
             } else {
                 self.set_status("Undo expired".to_string(), StatusLevel::Warning);
@@ -1020,17 +1012,14 @@ impl Picker {
 
             // Toggle focus between List and Preview
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::List => {
-                        self.load_preview_content();
-                        Focus::Preview
-                    }
-                    Focus::Preview => {
-                        self.preview_lines.clear();
-                        self.preview_scroll = 0;
-                        Focus::List
-                    }
-                };
+                if self.focus == Focus::List {
+                    self.load_preview_content();
+                    self.focus = Focus::Preview;
+                } else {
+                    self.preview_lines.clear();
+                    self.preview_scroll = 0;
+                    self.focus = Focus::List;
+                }
             }
 
             // Quick search - any other character starts search

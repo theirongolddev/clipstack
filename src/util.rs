@@ -1,4 +1,19 @@
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Compute SHA256 hash of content and return as raw bytes
+pub fn compute_hash(content: &str) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Compute SHA256 hash and return as formatted string (sha256:hex)
+pub fn compute_hash_string(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
 
 /// Format bytes into human-readable size
 pub fn format_size(bytes: usize) -> String {

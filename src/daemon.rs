@@ -1,8 +1,8 @@
 use crate::clipboard::Clipboard;
 use crate::storage::Storage;
+use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,9 +108,7 @@ impl Daemon {
     ) {
         match result {
             Ok(content) if !content.is_empty() => {
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let hash = hasher.finalize().to_vec();
+                let hash = util::compute_hash(&content);
 
                 if last_hash.as_ref() != Some(&hash) {
                     *last_hash = Some(hash);
