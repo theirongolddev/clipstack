@@ -108,3 +108,55 @@ fn serve_prints_migration_message_exits_2() {
     // Exits before opening (and so creating) the store
     assert!(!env.storage_dir.exists(), "serve opened the store");
 }
+
+fn status(env: &TestEnv) -> String {
+    let out = env.cmd().arg("status").output().expect("run clipstack status");
+    assert!(out.status.success(), "status failed: {out:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn status_line<'a>(status: &'a str, label: &str) -> &'a str {
+    status.lines().find(|l| l.starts_with(label)).unwrap_or_else(|| panic!("no {label} line in:\n{status}"))
+}
+
+#[test]
+fn status_reports_socket_reachable_and_capture_mode() {
+    let mut env = TestEnv::new();
+    let sock = env.socket_path().display().to_string();
+    let idle = status(&env);
+    assert!(status_line(&idle, "Daemon:").contains("not running"), "{idle}");
+    let line = status_line(&idle, "Socket:");
+    assert!(line.contains(&sock) && line.contains("not listening"), "{idle}");
+
+    // Running, watching
+    let pid = env.start_daemon();
+    env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon runs wl-paste --watch");
+    assert!(wait_until(Duration::from_secs(5), || env.socket_path().exists()));
+    let running = status(&env);
+    assert!(status_line(&running, "Daemon:").contains(&format!("running (pid {pid})")), "{running}");
+    let line = status_line(&running, "Socket:");
+    assert!(line.contains(&sock) && line.contains("reachable"), "{running}");
+    assert!(line.contains("capture=watch") && line.contains("pull=off"), "{running}");
+    env.signal(pid, "TERM");
+    env.wait_for_exit(pid, Duration::from_secs(3)).expect("daemon stops");
+
+    // Polling, pull allowed
+    env.write_config("[capture]\nmode = \"poll\"\n[socket]\nallow_pull = true\n");
+    let pid = env.start_daemon();
+    assert!(wait_until(Duration::from_secs(5), || env.socket_path().exists()));
+    let line = status(&env);
+    let line = status_line(&line, "Socket:");
+    assert!(line.contains("capture=poll") && line.contains("pull=on"), "{line}");
+    env.signal(pid, "TERM");
+    env.wait_for_exit(pid, Duration::from_secs(3)).expect("daemon stops");
+
+    // Lock held but nothing answers (an old daemon, or the socket disabled)
+    env.write_config("[socket]\nenabled = false\n");
+    let pid = env.start_daemon();
+    let line = status(&env);
+    assert!(status_line(&line, "Daemon:").contains("running"), "{line}");
+    let line = status_line(&line, "Socket:");
+    assert!(line.contains("capture=unknown"), "{line}");
+    env.signal(pid, "TERM");
+    env.wait_for_exit(pid, Duration::from_secs(3)).expect("daemon stops");
+}

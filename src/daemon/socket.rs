@@ -101,6 +101,16 @@ impl Handler {
     }
 }
 
+/// Ask the daemon listening at `path` for PING (used by `status`).
+pub fn ping(path: &Path, timeout: Duration) -> Result<Response> {
+    let mut stream =
+        UnixStream::connect(path).with_context(|| format!("Cannot connect to {}", path.display()))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    protocol::write_request(&mut stream, &Request::Ping)?;
+    Ok(protocol::read_response(&mut BufReader::new(stream), 4096)?)
+}
+
 /// How long shutdown waits for a request in progress (bounded by the
 /// request timeouts) before leaving the accept thread behind.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(2);

@@ -441,12 +441,18 @@ fn print_status(
     // Check daemon status
     let daemon_running = daemon::Daemon::is_running();
 
-    if daemon_running {
-        println!("Daemon:  \x1b[32mrunning\x1b[0m");
-    } else {
-        println!("Daemon:  \x1b[33mnot running\x1b[0m");
-        println!("         Start with: clipstack daemon");
-        println!("         Or just run: clipstack (auto-starts daemon)");
+    match daemon::Daemon::running_pid() {
+        Some(pid) => println!("Daemon:  \x1b[32mrunning (pid {pid})\x1b[0m"),
+        None if daemon_running => println!("Daemon:  \x1b[32mrunning\x1b[0m"),
+        None => {
+            println!("Daemon:  \x1b[33mnot running\x1b[0m");
+            println!("         Start with: clipstack daemon");
+            println!("         Or just run: clipstack (auto-starts daemon)");
+        }
+    }
+    match daemon::Daemon::socket_path() {
+        Ok(path) => println!("Socket:  {} ({})", path.display(), socket_state(&path, daemon_running)),
+        Err(e) => println!("Socket:  unavailable ({e:#})"),
     }
 
     println!();
@@ -605,6 +611,21 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
             .or_else(|| cause.downcast_ref::<serde_json::Error>().and_then(|e| e.io_error_kind()));
         kind == Some(io::ErrorKind::BrokenPipe)
     })
+}
+
+/// What PING on the daemon socket says, for `status`.
+fn socket_state(path: &Path, daemon_running: bool) -> String {
+    match daemon::socket::ping(path, std::time::Duration::from_secs(1)) {
+        Ok(resp @ protocol::Response::Ok { .. }) => format!(
+            "reachable, capture={}, pull={}",
+            resp.meta("capture").unwrap_or("unknown"),
+            if resp.meta("pull") == Some("1") { "on" } else { "off" }
+        ),
+        Ok(protocol::Response::Err { code, message }) => format!("error: {code} {message}"),
+        // An old daemon (no socket) or `[socket] enabled = false`
+        Err(_) if daemon_running => "not reachable; capture=unknown".to_string(),
+        Err(_) => "not listening".to_string(),
+    }
 }
 
 fn generate_completions(shell: Shell) {
