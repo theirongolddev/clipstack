@@ -8,14 +8,14 @@ use crate::protocol::{self, ErrCode, Request, Response};
 use crate::storage::{IngestOutcome, Source, Storage};
 use anyhow::{Context, Result};
 use rustix::event::{PollFd, PollFlags, Timespec};
-use std::io::{BufReader, ErrorKind};
+use std::io::{self, BufReader, ErrorKind, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often the accept loop checks `running` while idle.
 const ACCEPT_POLL: Timespec = Timespec { tv_sec: 0, tv_nsec: 100_000_000 };
@@ -168,13 +168,37 @@ fn accept_loop(listener: &UnixListener, handler: &Handler, running: &AtomicBool)
     }
 }
 
+/// Reads from the client with `timeout` per read and an overall deadline, so
+/// a client dripping one byte at a time can't hold the (only) socket thread.
+struct DeadlineReader<'a> {
+    stream: &'a UnixStream,
+    timeout: Duration,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::from(ErrorKind::TimedOut));
+        }
+        self.stream.set_read_timeout(Some(left.min(self.timeout)))?;
+        self.stream.read(buf)
+    }
+}
+
 fn serve_connection(stream: UnixStream, handler: &Handler) -> Result<()> {
     stream.set_nonblocking(false)?;
     let timeout = Duration::from_millis(handler.config.timeout_ms);
-    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let mut reader = BufReader::new(&stream);
-    let resp = match protocol::read_request(&mut reader, protocol::MAX_BODY) {
+    let mut reader = BufReader::new(DeadlineReader {
+        stream: &stream,
+        timeout,
+        deadline: Instant::now() + 2 * timeout,
+    });
+    // Larger pushes could never be stored; refuse them from the header
+    let max_body = handler.storage.policy().max_entry_bytes().min(protocol::MAX_BODY);
+    let resp = match protocol::read_request(&mut reader, max_body) {
         Ok(req) => handler.handle(req),
         Err(e) => {
             eprintln!("[socket] bad request: {e}");
