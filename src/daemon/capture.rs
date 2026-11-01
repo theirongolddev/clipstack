@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -272,6 +273,23 @@ impl WatchChild {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        let daemon = rustix::process::getpid();
+        // SAFETY: the closure runs in the forked child before exec, so it may
+        // only make async-signal-safe calls. It makes two raw syscalls through
+        // rustix (prctl, getppid), allocates nothing and touches no locks.
+        // PR_SET_PDEATHSIG fires when the thread that forked us exits, which
+        // is why the daemon spawns the watcher from its main thread. This is
+        // the project's one `unsafe` block.
+        unsafe {
+            cmd.pre_exec(move || {
+                rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))?;
+                // The daemon died between fork and prctl: the signal will never come
+                if rustix::process::getppid() != Some(daemon) {
+                    return Err(rustix::io::Errno::SRCH.into());
+                }
+                Ok(())
+            });
+        }
         let mut child = cmd.spawn()?;
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let forwarder = child.stderr.take().map(|stderr| {

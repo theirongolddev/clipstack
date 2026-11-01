@@ -659,7 +659,7 @@ src/clipboard.rs       Clipboard struct with bin paths; list_types(); paste_text
 **Capture with watch mode:**
 - The daemon spawns `wl-paste --no-newline --type text --watch <current_exe> --storage-dir <abs> [--config <abs>] __watch-hook` (`--no-newline` so a trailing newline in the copied text is stored as copied; `--config` only when one was given on the command line). wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`.
 - The spawn (and every supervisor restart) happens from the main daemon thread (it lives as long as the daemon) with `pre_exec` setting `PR_SET_PDEATHSIG = SIGTERM`. That pre_exec block is the one `unsafe` block in the project and is documented. PDEATHSIG fires when the spawning thread exits, so it must be a long-lived thread.
-- Crate: `rustix = { version = "1", features = ["process"] }`, already in the dependency tree through tempfile. Verified API: `rustix::process::set_parent_process_death_signal(Some(rustix::signal::Signal::TERM))`.
+- Crate: `rustix = { version = "1", features = ["process"] }`, already in the dependency tree through tempfile. Verified API: `rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))` (`rustix::signal` is private in 1.x; `Signal` is re-exported from `process`). After the prctl the child checks `getppid()` against the daemon's PID and fails the spawn if the daemon already died.
 - The hook writes directly to SQLite. This is consistent with having no single writer. It inherits the daemon's environment, so `CLIPSTACK_MAX_ENTRIES` resolves the same way in both.
 
 **Hidden `__watch-hook` subcommand** (`capture::run_hook`):
@@ -717,9 +717,9 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 1. `running = false`.
 2. Wait up to 2 s for the accept thread (it may be inside a request; the timeouts bound that), then carry on without it.
 3. `child.kill()` + `wait()` for the watch child.
-4. Unlink the socket. A Drop guard does this only if we bound it.
-5. Release the lock.
-6. Print `clipstack daemon stopped`.
+4. Unlink the socket. A Drop guard does this only if the path is still the socket we bound (same device and inode).
+5. Print `clipstack daemon stopped`.
+6. Release the lock (when `main` drops the `Daemon`, right after `run` returns).
 
 **Runtime dir:** `daemon::runtime_dir() -> Result<PathBuf>` returns `$XDG_RUNTIME_DIR`, or creates `/tmp/clipstack-<uid>` (`0700`) and verifies we own it. This replaces the shared `/tmp/clipstack.lock` fallback.
 

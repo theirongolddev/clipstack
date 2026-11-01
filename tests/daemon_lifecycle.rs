@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{wait_until, TestEnv};
+use common::{process_alive, wait_until, TestEnv};
 use std::time::Duration;
 
 #[test]
@@ -55,4 +55,36 @@ fn daemon_exits_zero_on_sigterm() {
         done.stderr
     );
     assert!(done.stderr.contains("daemon stopped"), "stderr: {}", done.stderr);
+}
+
+#[test]
+fn sigterm_stops_watch_child_and_removes_socket() {
+    let mut env = TestEnv::new();
+    let pid = env.start_daemon();
+    let watch = env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon runs wl-paste --watch");
+    let sock = env.socket_path();
+    assert!(wait_until(Duration::from_secs(5), || sock.exists()), "socket created");
+
+    env.signal(pid, "TERM");
+    let done = env.wait_for_exit(pid, Duration::from_secs(3)).expect("daemon exits after SIGTERM");
+    assert_eq!(done.status.code(), Some(0), "stderr: {}", done.stderr);
+    assert!(!process_alive(watch), "watch child {watch} still running after the daemon stopped");
+    assert!(!sock.exists(), "socket left behind at {}", sock.display());
+    assert!(done.stderr.trim_end().ends_with("clipstack daemon stopped"), "stderr: {}", done.stderr);
+}
+
+#[test]
+fn sigkill_daemon_terminates_watch_child() {
+    let mut env = TestEnv::new();
+    let pid = env.start_daemon();
+    let watch = env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon runs wl-paste --watch");
+    assert!(process_alive(watch));
+
+    // SIGKILL runs no cleanup: only PR_SET_PDEATHSIG can stop the child
+    env.signal(pid, "KILL");
+    env.wait_for_exit(pid, Duration::from_secs(3)).expect("daemon dies on SIGKILL");
+    assert!(
+        wait_until(Duration::from_secs(5), || !process_alive(watch)),
+        "watch child {watch} outlived the killed daemon"
+    );
 }

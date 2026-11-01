@@ -9,9 +9,9 @@ use crate::storage::{IngestOutcome, Source, Storage};
 use anyhow::{Context, Result};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use std::io::{self, BufReader, ErrorKind, Read};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -101,8 +101,15 @@ impl Handler {
     }
 }
 
-/// The listening socket and its accept thread.
+/// How long shutdown waits for a request in progress (bounded by the
+/// request timeouts) before leaving the accept thread behind.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The listening socket and its accept thread. Dropping it unlinks the
+/// socket, but only the one we bound (same device and inode).
 pub struct SocketServer {
+    path: PathBuf,
+    bound: (u64, u64),
     thread: Option<JoinHandle<()>>,
 }
 
@@ -110,19 +117,38 @@ impl SocketServer {
     /// Bind `path` (`0600`) and serve on a new thread until `running` is false.
     pub fn start(path: &Path, handler: Handler, running: Arc<AtomicBool>) -> Result<Self> {
         let listener = bind(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
+        let bound = (meta.dev(), meta.ino());
         listener.set_nonblocking(true)?;
         eprintln!("[socket] listening on {}", path.display());
         let thread = std::thread::Builder::new()
             .name("socket".into())
             .spawn(move || accept_loop(&listener, &handler, &running))
             .context("Cannot start the socket thread")?;
-        Ok(Self { thread: Some(thread) })
+        Ok(Self { path: path.to_path_buf(), bound, thread: Some(thread) })
     }
 
-    /// Wait for the accept thread (call after clearing `running`).
-    pub fn join(mut self) {
-        if let Some(thread) = self.thread.take() {
+    /// Wait up to `JOIN_TIMEOUT` for the accept thread (call after clearing
+    /// `running`), then carry on without it.
+    pub fn join(&mut self) {
+        let Some(thread) = self.thread.take() else { return };
+        let deadline = Instant::now() + JOIN_TIMEOUT;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if thread.is_finished() {
             let _ = thread.join();
+        } else {
+            eprintln!("[socket] a request is still running; not waiting for it");
+        }
+    }
+}
+
+impl Drop for SocketServer {
+    fn drop(&mut self) {
+        let ours = std::fs::symlink_metadata(&self.path).is_ok_and(|m| (m.dev(), m.ino()) == self.bound);
+        if ours && let Err(e) = std::fs::remove_file(&self.path) {
+            eprintln!("[socket] cannot remove {}: {e}", self.path.display());
         }
     }
 }

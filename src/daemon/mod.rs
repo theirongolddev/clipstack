@@ -135,11 +135,15 @@ impl Daemon {
             std::thread::sleep(tick);
         };
 
+        // Shutdown: stop accepting, stop the watcher, unlink the socket. The
+        // lock is released when the daemon is dropped.
         self.running.store(false, Ordering::SeqCst);
-        if let Some(server) = server {
+        let mut server = server;
+        if let Some(server) = &mut server {
             server.join();
         }
         capture.stop();
+        drop(server);
         eprintln!("clipstack daemon stopped");
         result
     }
