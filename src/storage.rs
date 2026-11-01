@@ -231,7 +231,14 @@ impl Storage {
 
     pub fn save_entry(&self, content: &str) -> Result<ClipEntry> {
         let timestamp = chrono::Utc::now().timestamp_millis();
-        let id = timestamp.to_string();
+        // Generate unique ID using timestamp + nanoseconds to prevent collisions
+        // within the same millisecond (e.g., rapid copies, concurrent daemon + picker)
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() % 1000) // Last 3 digits of nanoseconds
+            .unwrap_or(0);
+        let id = format!("{}_{:03}", timestamp, unique_suffix);
+
         let hash = util::compute_hash_string(content);
 
         // Check for duplicate - move existing entry to front instead of duplicating
