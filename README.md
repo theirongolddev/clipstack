@@ -263,7 +263,7 @@ if clipstack search "BEGIN CERTIFICATE" >/dev/null; then echo "a certificate is 
 
 ### Images
 
-When the clipboard offers a PNG and no text (a screenshot tool, "Copy image" in a browser), the daemon saves the PNG as an image entry. When both are offered, the text is saved. Only `image/png` is kept; the size comes from the PNG header, which is checked (an offer that isn't a PNG is skipped). Images up to `max_image_bytes` (8 MiB by default, and never more than `max_total_bytes`) are saved; they count towards `max_entries` and `max_total_bytes` like text, can be pinned and named, and are skipped when a password manager marks the copy secret. They are not searchable.
+When the clipboard offers a PNG and no text (a screenshot tool, "Copy image" in a browser), the daemon saves the PNG as an image entry. When both are offered, the text is saved (any type `wl-paste` reads as text counts, such as `text/html` or `application/json`). Only `image/png` is kept; the size comes from the PNG header, which is checked (an offer that isn't a PNG is skipped). Images up to `max_image_bytes` (8 MiB by default, and never more than `max_total_bytes`) are saved; they count towards `max_entries` and `max_total_bytes` like text, can be pinned and named, and are skipped when a password manager marks the copy secret. They are not searchable.
 
 - `clipstack get REF > file.png` writes the PNG. It refuses to write to a terminal (exit 2).
 - `clipstack get REF --copy` (and Enter in the picker) puts it back on the clipboard as `image/png`.

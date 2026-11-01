@@ -254,7 +254,7 @@ fn daemon_watch_captures_copy() {
     let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
     let watch = calls.lines().find(|l| l.contains("--watch")).expect("a --watch call");
     let storage = env.storage_dir.display().to_string();
-    assert!(watch.starts_with("--no-newline --type text --watch "), "{watch}");
+    assert!(watch.starts_with("--no-newline --watch "), "{watch}");
     assert!(watch.ends_with(&format!("--storage-dir {storage} __watch-hook")), "{watch}");
 
     env.set_clipboard("copied in a browser", TEXT_TYPES);
@@ -361,14 +361,37 @@ fn decode_image(entry: &serde_json::Value) -> Vec<u8> {
 }
 
 #[test]
+fn fake_watch_selection_follows_wl_paste_type_choice() {
+    // wl-paste 2.3 with --type text never runs the command for an offer
+    // with no text type; without --type it passes the first offered type
+    let mut env = TestEnv::new();
+    let log = env.fake_clip_dir.join("hook.log");
+    let script = format!("printf '%s:' \"$CLIPBOARD_STATE\" >> '{0}'; wc -c >> '{0}'", log.display());
+    let mut watch = env.fake_cmd("wl-paste");
+    watch.args(["--type", "text", "--watch", "sh", "-c", &script]);
+    let pid = env.spawn(watch);
+    assert_eq!(env.wait_for_watch_pid(Duration::from_secs(5)), Some(pid));
+    set_clipboard_bytes(&env, &common::test_png(2, 2, b""), &["image/png"]);
+    env.watch_event("selection");
+    let skips = env.fake_clip_dir.join("watch-skips.log");
+    assert!(wait_until(Duration::from_secs(5), || skips.exists()), "a PNG-only offer is skipped");
+    env.set_clipboard("abc", &["application/json"]);
+    env.watch_event("selection");
+    assert!(wait_until(Duration::from_secs(5), || std::fs::read_to_string(&log).is_ok_and(|s| s == "data:3\n")));
+    assert_eq!(std::fs::read_to_string(&skips).unwrap().lines().count(), 1);
+    env.signal(pid, "TERM");
+    env.wait_for_exit(pid, Duration::from_secs(2)).expect("watcher exits");
+}
+
+#[test]
 fn hook_saves_png_when_no_text_type_is_offered() {
     let env = TestEnv::new();
     let png = common::test_png(32, 16, b"screenshot");
     set_clipboard_bytes(&env, &png, &["image/png"]);
-    // wl-paste --type text --watch runs the hook with CLIPBOARD_STATE=nil
-    // for an offer that has no text type
-    let hook = run_hook(&env, Some("nil"), b"");
+    // Without --type, wl-paste --watch passes a PNG-only offer as data
+    let hook = run_hook(&env, Some("data"), &png);
     assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.wrote_all);
     let entries = env.export();
     assert_eq!(entries.len(), 1, "{}", hook.stderr);
     assert_eq!(entries[0]["kind"], "image");
@@ -378,46 +401,62 @@ fn hook_saves_png_when_no_text_type_is_offered() {
     assert!(hook.stderr.contains("saved image id:"), "{}", hook.stderr);
 
     // The same image again bumps it
-    let hook = run_hook(&env, Some("nil"), b"");
+    let hook = run_hook(&env, Some("data"), &png);
     assert!(hook.stderr.contains("bumped"), "{}", hook.stderr);
     assert_eq!(env.export().len(), 1);
+
+    // A PNG larger than max_entry_bytes is still an image, not "too large" text
+    env.write_config("[storage]\nmax_entry_bytes = 16\n");
+    let big = common::test_png(64, 64, &[b'x'; 100]);
+    set_clipboard_bytes(&env, &big, &["image/png"]);
+    let hook = run_hook(&env, Some("data"), &big);
+    assert!(hook.wrote_all);
+    assert!(hook.stderr.contains("saved image id:"), "{}", hook.stderr);
+    assert_eq!(env.export().len(), 2);
 }
 
 #[test]
 fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     let env = TestEnv::new();
     let png = common::test_png(4, 4, b"");
-    // Both offered: the text path saves the text; a nil event saves nothing
+    // Both offered: wl-paste passes the text, which is saved
     set_clipboard_bytes(&env, &png, &["image/png", "text/plain;charset=utf-8"]);
     let hook = run_hook(&env, Some("data"), b"caption text");
     assert!(hook.status.success(), "{}", hook.stderr);
+    // A type wl-paste counts as text (json) wins over the PNG as well
+    set_clipboard_bytes(&env, &png, &["image/png", "application/json"]);
+    let hook = run_hook(&env, Some("data"), b"{\"a\": 1}");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    // nil is an empty clipboard: nothing to save
+    set_clipboard_bytes(&env, &png, &["image/png"]);
     let hook = run_hook(&env, Some("nil"), b"");
     assert!(hook.status.success(), "{}", hook.stderr);
     let entries = env.export();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["kind"], "text");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(entries.iter().all(|e| e["kind"] == "text"), "{entries:?}");
     assert_eq!(entries[0]["content"], "caption text");
 
     set_clipboard_bytes(&env, &png, &["image/png", HINT]);
-    let hook = run_hook(&env, Some("nil"), b"");
+    let hook = run_hook(&env, Some("data"), &png);
     assert!(hook.stderr.contains("skipped: marked sensitive"), "{}", hook.stderr);
 
     set_clipboard_bytes(&env, b"GIF89a, not a png", &["image/png"]);
-    let hook = run_hook(&env, Some("nil"), b"");
+    let hook = run_hook(&env, Some("data"), b"GIF89a, not a png");
     assert!(hook.stderr.contains("skipped: not a PNG"), "{}", hook.stderr);
 
     env.write_config("[storage]\nmax_image_bytes = 10\n");
     set_clipboard_bytes(&env, &png, &["image/png"]);
-    let hook = run_hook(&env, Some("nil"), b"");
+    let hook = run_hook(&env, Some("data"), &png);
     assert!(hook.stderr.contains("max_image_bytes is 10"), "{}", hook.stderr);
 
     // Other image types are not stored, nor is an explicit clear
     std::fs::remove_file(env.config_home.join("clipstack/config.toml")).unwrap();
     set_clipboard_bytes(&env, &png, &["image/jpeg"]);
-    run_hook(&env, Some("nil"), b"");
+    let hook = run_hook(&env, Some("data"), &png);
+    assert!(hook.wrote_all);
     set_clipboard_bytes(&env, &png, &["image/png"]);
     run_hook(&env, Some("clear"), b"");
-    assert_eq!(env.export().len(), 1);
+    assert_eq!(env.export().len(), 2);
 }
 
 #[test]
@@ -427,10 +466,16 @@ fn daemon_watch_captures_image() {
     env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon should run wl-paste --watch");
     let png = common::test_png(8, 6, b"watched");
     set_clipboard_bytes(&env, &png, &["image/png"]);
-    env.watch_event("nil");
+    env.watch_event("selection");
     let entries = env.wait_for_entries(1);
     assert_eq!(entries[0]["kind"], "image");
     assert_eq!(decode_image(&entries[0]), png);
+
+    // Text offers still arrive as text
+    env.set_clipboard("text after the image", TEXT_TYPES);
+    env.watch_event("selection");
+    let entries = env.wait_for_entries(2);
+    assert_eq!(entries[1]["content"], "text after the image");
 }
 
 #[test]

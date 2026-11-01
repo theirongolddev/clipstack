@@ -675,7 +675,7 @@ src/clipboard.rs       Clipboard struct with bin paths; list_types(); paste_text
 ```
 
 **Capture with watch mode:**
-- The daemon spawns `wl-paste --no-newline --type text --watch <current_exe> --storage-dir <abs> [--config <abs>] __watch-hook` (`--no-newline` so a trailing newline in the copied text is stored as copied; `--config` only when one was given on the command line). wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`.
+- The daemon spawns `wl-paste --no-newline --watch <current_exe> --storage-dir <abs> [--config <abs>] __watch-hook` (`--no-newline` so a trailing newline in the copied text is stored as copied; `--config` only when one was given on the command line). wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`. *Amended in Step 5:* no `--type text`, because with it wl-paste never runs the hook for an offer without a text type (images); without it wl-paste passes a text type whenever one is offered (the same choice as `--type text`), else the first offered type.
 - The spawn (and every supervisor restart) happens from the main daemon thread (it lives as long as the daemon) with `pre_exec` setting `PR_SET_PDEATHSIG = SIGTERM`. That pre_exec block is the one `unsafe` block in the project and is documented. PDEATHSIG fires when the spawning thread exits, so it must be a long-lived thread.
 - Crate: `rustix = { version = "1", features = ["process"] }`, already in the dependency tree through tempfile. Verified API: `rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))` (`rustix::signal` is private in 1.x; `Signal` is re-exported from `process`). After the prctl the child checks `getppid()` against the daemon's PID and fails the spawn if the daemon already died.
 - The hook writes directly to SQLite. This is consistent with having no single writer. It inherits the daemon's environment, so `CLIPSTACK_MAX_ENTRIES` resolves the same way in both.
@@ -802,7 +802,7 @@ WantedBy=graphical-session.target
 | `scripts/rcopy` | Rewritten for the Unix socket (design in 3.1) |
 | `Cargo.toml` | `rustix` |
 | `systemd/clipd.service` → `systemd/clipstack.service` | Rewritten |
-| `tests/fakes/wl-paste` | Supports `--list-types` (prints `$FAKE_CLIP_DIR/types`), `--no-newline [--type T]` (prints `$FAKE_CLIP_DIR/content` or exits 1 "No selection"), `--type text --watch CMD…`. Watch mode writes its PID to `$FAKE_CLIP_DIR/watch.pid`, then reads lines `data <file>` / `sensitive <file>` / `nil` from FIFO `$FAKE_CLIP_DIR/events` and runs CMD with `CLIPBOARD_STATE` and stdin set. `FAKE_WATCH_UNSUPPORTED=1` makes watch exit 1 with the data-control message |
+| `tests/fakes/wl-paste` | Supports `--list-types` (prints `$FAKE_CLIP_DIR/types`), `--no-newline [--type T]` (prints `$FAKE_CLIP_DIR/content` or exits 1 "No selection"), `[--type T] --watch CMD…`. Watch mode writes its PID to `$FAKE_CLIP_DIR/watch.pid`, then reads lines `data <file>` / `sensitive <file>` / `nil` / `selection` (the current `content`/`types`, handled like wl-paste 2.3 handles `--type`) from FIFO `$FAKE_CLIP_DIR/events` and runs CMD with `CLIPBOARD_STATE` and stdin set. `FAKE_WATCH_UNSUPPORTED=1` makes watch exit 1 with the data-control message |
 | `tests/fakes/wl-copy` | stdin → `$FAKE_CLIP_DIR/content`; `--sensitive` also writes the hint to `types` |
 | `tests/watch_capture.rs`, `tests/socket_protocol.rs`, `tests/daemon_lifecycle.rs` | Rust integration tests |
 | `tests/e2e_daemon.sh` | New shell E2E (isolated), including the rcopy cases |
@@ -853,7 +853,7 @@ WantedBy=graphical-session.target
 
 #### 2.7 Risks and open questions
 
-- **`wl-paste --type text --watch` on non-text offers** (images): verify whether wl-paste skips the command or runs it with empty stdin. The hook handles both, because empty input is skipped.
+- **`wl-paste --type text --watch` on non-text offers** (images): *resolved in Step 5:* wl-clipboard 2.3.0 skips the command (`mime_type == NULL` in watch mode destroys the offer and returns), so the watcher now runs without `--type`.
 - **Compositor support:** Hyprland supports data-control; GNOME doesn't, which falls to polling. The `Auto` fallback covers this, and status shows the mode.
 - **Race:** the hook's `list_types()` runs after wl-paste has read the offer. If the selection changed in between, the types could belong to the next offer. Low impact, because `CLIPBOARD_STATE=sensitive` comes from the same offer and is authoritative.
 - **Self-capture:** PUSH → wl-copy → watch hook → `Bumped`. Harmless.
@@ -1150,10 +1150,14 @@ created as v1 and migrated, so the migration runs everywhere.
 - Daemon (watch and poll): after `list_types()`, if no text type is offered
   (`text/plain*`, `UTF8_STRING`, `STRING`, `TEXT`) and `image/png` is, fetch the PNG
   and call `ingest_image`. Text keeps priority whenever both are offered.
-  *As built:* any `text/*` type counts as text (so `text/html` alone also wins over
-  a PNG). The watch hook runs under `wl-paste --type text --watch`, which reports an
-  offer with no text type as `CLIPBOARD_STATE=nil`; on `nil` the hook lists the
-  types and fetches the PNG. Poll mode lists types whenever the text read is empty
+  *As built:* a type counts as text when wl-paste 2.3's `mime_type_is_text` says so
+  (`text/*`, the X11 names, `*json*`, `*script`, `*xml`, `*yaml`, `*csv`, `*ini`, PGP
+  keys), so `text/html` or `application/json` alone also wins over a PNG. The watcher
+  runs as `wl-paste --no-newline --watch` without `--type text`: with it, wl-paste
+  2.3 never runs the hook for an offer with no text type (it is not reported as
+  `nil`, which means an empty clipboard). Without it wl-paste still passes text
+  whenever text is offered, else the first offered type; the hook then lists the
+  types and, for a PNG-only offer, fetches the PNG itself. Poll mode lists types whenever the text read is empty
   and re-reads the PNG on each such poll, saving it only when its hash changes.
 - `tests/fakes` wl-paste/wl-copy learn `--type image/png` with binary payloads.
 

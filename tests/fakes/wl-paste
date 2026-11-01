@@ -10,11 +10,17 @@
 #   events     FIFO read by --watch, one event per line:
 #                data FILE | sensitive FILE   run CMD with FILE on stdin
 #                nil | clear                  run CMD with empty stdin
+#                selection                    a new selection: `content` and
+#                    `types` as offered, handled like wl-paste 2.3 does: no
+#                    selection runs CMD with nil; an offer with no type that
+#                    --type allows does not run CMD at all; otherwise CMD
+#                    gets `content` with data (sensitive with the hint)
 #   watch.pid  PID of the running --watch fake
+#   watch-skips.log  one line per selection event --watch did not run CMD for
 #
-# Supported: --version, --list-types, [--no-newline] [--type text|image/png],
-# --type text --watch CMD...  FAKE_WATCH_UNSUPPORTED=1 makes --watch fail
-# like a compositor without the data-control protocol. Like the real
+# Supported: --version, --list-types, [--no-newline] [--type text|image/png]
+# and the same with --watch CMD... FAKE_WATCH_UNSUPPORTED=1 makes --watch
+# fail like a compositor without the data-control protocol. Like the real
 # wl-paste, pasting fails with "not available as requested type" when
 # `types` offers no matching type (text: text/*, UTF8_STRING, STRING, TEXT);
 # image/png is written byte for byte.
@@ -52,12 +58,13 @@ all="$*"
 no_newline=0
 watch=0
 type=text
+explicit_type=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-newline) no_newline=1; shift ;;
         --type)
             case "${2:-}" in
-                text|image/png) type=$2 ;;
+                text|image/png) type=$2; explicit_type=$2 ;;
                 *) unsupported "$all" ;;
             esac
             shift 2
@@ -82,6 +89,26 @@ if [ "$watch" -eq 1 ]; then
             case "$state" in
                 data|sensitive) CLIPBOARD_STATE=$state "$@" < "$file" ;;
                 nil|clear) CLIPBOARD_STATE=$state "$@" < /dev/null ;;
+                selection)
+                    if [ ! -f "$dir/content" ]; then
+                        CLIPBOARD_STATE=nil "$@" < /dev/null
+                        continue
+                    fi
+                    # wl-paste's mime_type_is_text, and what --type allows
+                    text='^(text/.*|TEXT|STRING|UTF8_STRING|.*json.*|.*script|.*xml|.*yaml|.*csv|.*ini|.*application/vnd\.ms-publisher.*|.*pgp-keys)$'
+                    case $explicit_type in
+                        text) allowed=$text ;;
+                        '') allowed='.' ;;
+                        *) allowed="^$explicit_type\$" ;;
+                    esac
+                    if [ -f "$dir/types" ] && ! grep -Eq "$allowed" "$dir/types"; then
+                        echo "selection skipped: no type allowed by --type $explicit_type" >> "$dir/watch-skips.log"
+                        continue
+                    fi
+                    state=data
+                    ! grep -qx 'x-kde-passwordManagerHint' "$dir/types" 2>/dev/null || state=sensitive
+                    CLIPBOARD_STATE=$state "$@" < "$dir/content"
+                    ;;
                 *) echo "fake wl-paste: bad event: $state" >&2 ;;
             esac
         done < "$fifo"

@@ -26,7 +26,7 @@ fn harness_isolates_runtime_dir() {
     );
     let log = std::fs::read_to_string(&calls).unwrap();
     assert!(
-        log.lines().any(|l| l.starts_with("--no-newline --type text --watch ")),
+        log.lines().any(|l| l.starts_with("--no-newline --watch ")),
         "calls: {log:?}"
     );
 

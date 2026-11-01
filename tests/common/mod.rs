@@ -373,14 +373,15 @@ pub fn test_png(width: u32, height: u32, tag: &[u8]) -> Vec<u8> {
 impl TestEnv {
     /// Store `png` as an image entry the way the daemon would: a watch hook
     /// run with the fake clipboard offering only `image/png` (wl-paste
-    /// passes `CLIPBOARD_STATE=nil` when no text type is offered).
+    /// `--watch` without `--type` passes it as data on stdin).
     pub fn put_image(&self, png: &[u8]) {
         std::fs::write(self.fake_clip_dir.join("content"), png).expect("write fake content");
         std::fs::write(self.fake_clip_dir.join("types"), "image/png\n").expect("write fake types");
         let status = self
             .cmd()
             .arg("__watch-hook")
-            .env("CLIPBOARD_STATE", "nil")
+            .env("CLIPBOARD_STATE", "data")
+            .stdin(std::fs::File::open(self.fake_clip_dir.join("content")).expect("open fake content"))
             .status()
             .expect("run watch hook");
         assert!(status.success());

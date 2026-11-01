@@ -22,12 +22,23 @@ pub fn is_sensitive_offer(types: &[String]) -> bool {
     types.iter().any(|t| t == PASSWORD_HINT_MIME)
 }
 
-/// Whether an offer includes a text type (`text/*`, `UTF8_STRING`,
-/// `STRING`, `TEXT`): text is captured in preference to an image.
+/// Whether an offer includes a type wl-paste reads as text: text is
+/// captured in preference to an image.
 pub fn offers_text(types: &[String]) -> bool {
-    types
-        .iter()
-        .any(|t| t.starts_with("text/") || matches!(t.as_str(), "UTF8_STRING" | "STRING" | "TEXT"))
+    types.iter().any(|t| is_text_mime(t))
+}
+
+/// wl-clipboard 2.3's `mime_type_is_text`: `text/*`, `TEXT`, `STRING`,
+/// `UTF8_STRING`, anything with `json`, a `script`/`xml`/`yaml`/`csv`/`ini`
+/// suffix, and PGP/SSH keys. `wl-paste --type text` (and `--watch` without
+/// `--type`) picks such a type whenever one is offered, so the daemon must
+/// agree with it on whether an offer is text.
+pub fn is_text_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || matches!(mime, "TEXT" | "STRING" | "UTF8_STRING")
+        || mime.contains("json")
+        || ["script", "xml", "yaml", "csv", "ini", "pgp-keys"].iter().any(|s| mime.ends_with(s))
+        || mime.contains("application/vnd.ms-publisher")
 }
 
 /// Whether an offer is a PNG image and nothing that reads as text: the only
@@ -284,6 +295,11 @@ mod tests {
         assert!(!offers_only_png_image(&types(&["image/jpeg"])));
         assert!(!offers_only_png_image(&[]));
         assert!(!offers_text(&types(&["image/png", "application/x-text"])));
+        // wl-paste's own idea of text, so watch and poll agree on what wins
+        for text in ["application/json", "application/javascript", "application/xml", "text/csv", "application/x-yaml", "application/pgp-keys"] {
+            assert!(offers_text(&types(&[text])), "{text}");
+            assert!(!offers_only_png_image(&types(&["image/png", text])), "{text}");
+        }
     }
 
     #[test]

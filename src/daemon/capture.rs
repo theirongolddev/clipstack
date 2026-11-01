@@ -27,13 +27,16 @@ pub enum CaptureMode {
     Poll,
 }
 
-/// Handle one selection from `wl-paste --type text --watch`: `state` is
-/// `CLIPBOARD_STATE` and `input` the selection's text. wl-paste runs the
-/// hook with `nil` both for an empty clipboard and for an offer with no text
-/// type, so on `nil` an offer of only `image/png` is fetched and saved as an
-/// image. Never fails on bad input (it is logged, without content), so the
-/// caller can always exit 0 and wl-paste keeps running; stdin is always read
-/// to the end, so the source client never sees EPIPE.
+/// Handle one selection from `wl-paste --watch` (no `--type`): `state` is
+/// `CLIPBOARD_STATE` and `input` the selection. wl-paste 2.3 passes a text
+/// type whenever one is offered (the same choice as `--type text`), else the
+/// first offered type; with `--type text` it would not run the hook at all
+/// for an image-only offer. So when the offer has no text type and includes
+/// `image/png`, the PNG is fetched and saved as an image; other binary
+/// offers are skipped. `nil` is an empty clipboard. Never fails on bad input
+/// (it is logged, without content), so the caller can always exit 0 and
+/// wl-paste keeps running; stdin is always read to the end, so the source
+/// client never sees EPIPE.
 pub fn run_hook(
     storage: &Storage,
     clipboard: &Clipboard,
@@ -42,21 +45,7 @@ pub fn run_hook(
 ) -> Result<()> {
     match state {
         None | Some("data") => {}
-        Some("nil") => {
-            drain(input)?;
-            let types = clipboard.list_types().unwrap_or_else(|e| {
-                eprintln!("[watch] could not list offer types: {e:#}");
-                Vec::new()
-            });
-            if clipboard::offers_only_png_image(&types) {
-                let png = clipboard.paste_bytes(crate::png::MIME)?;
-                if !png.is_empty() {
-                    log_outcome("watch", storage, &storage.ingest_image(&png, Source::Watch, &types)?);
-                }
-            }
-            return Ok(());
-        }
-        Some("clear") => {
+        Some("nil" | "clear") => {
             drain(input)?;
             return Ok(());
         }
@@ -76,20 +65,34 @@ pub fn run_hook(
     let limit = storage.policy().max_entry_bytes();
     let mut buf = Vec::new();
     input.take(limit as u64 + 1).read_to_end(&mut buf)?;
-    if buf.len() > limit {
-        let size = buf.len() as u64 + drain(input)?;
+    let too_large = buf.len() > limit;
+    let rest = if too_large { drain(input)? } else { 0 };
+
+    let types = clipboard.list_types().unwrap_or_else(|e| {
+        eprintln!("[watch] could not list offer types: {e:#}");
+        Vec::new()
+    });
+    if clipboard::offers_only_png_image(&types) {
+        // stdin held whichever type wl-paste picked; ask for the PNG itself
+        let png = clipboard.paste_bytes(crate::png::MIME)?;
+        if !png.is_empty() {
+            log_outcome("watch", storage, &storage.ingest_image(&png, Source::Watch, &types)?);
+        }
+        return Ok(());
+    }
+    if too_large {
+        let size = buf.len() as u64 + rest;
         eprintln!("[watch] skipped: too large ({size} bytes; max_entry_bytes is {limit})");
+        return Ok(());
+    }
+    if !types.is_empty() && !clipboard::offers_text(&types) {
+        eprintln!("[watch] skipped: no text or PNG type offered");
         return Ok(());
     }
     let Ok(content) = String::from_utf8(buf) else {
         eprintln!("[watch] skipped: not UTF-8 text");
         return Ok(());
     };
-
-    let types = clipboard.list_types().unwrap_or_else(|e| {
-        eprintln!("[watch] could not list offer types: {e:#}");
-        Vec::new()
-    });
     log_outcome("watch", storage, &storage.ingest(&content, Source::Watch, &types)?);
     Ok(())
 }
@@ -293,10 +296,11 @@ pub struct WatchChild {
 }
 
 impl WatchChild {
-    /// `<paste_bin> --no-newline --type text --watch <hook...>`.
+    /// `<paste_bin> --no-newline --watch <hook...>`. No `--type text`:
+    /// wl-paste would then never run the hook for an image-only offer.
     pub fn spawn(clipboard: &Clipboard, hook: &[OsString]) -> io::Result<WatchChild> {
         let mut cmd = Command::new(&clipboard.paste_bin);
-        cmd.args(["--no-newline", "--type", "text", "--watch"])
+        cmd.args(["--no-newline", "--watch"])
             .args(hook)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
