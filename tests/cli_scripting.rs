@@ -391,3 +391,73 @@ fn alias_at_pin_limit_exits_1() {
     // An entry that is already pinned can still be named
     assert_eq!(code(&run(&env, &["alias", "2", "fine"], None)), 0);
 }
+
+/// A `PATH` dir holding only the fake wl-copy/wl-paste and the tools they
+/// use: no wtype, so `pick --paste` must copy and skip the paste.
+fn path_without_wtype(env: &TestEnv) -> std::path::PathBuf {
+    let bin = env.root().join("bin-no-wtype");
+    std::fs::create_dir_all(&bin).unwrap();
+    for fake in ["wl-copy", "wl-paste"] {
+        std::os::unix::fs::symlink(TestEnv::fakes_dir().join(fake), bin.join(fake)).unwrap();
+    }
+    let system = std::env::var_os("PATH").unwrap_or_default();
+    for tool in ["cat", "mv"] {
+        let real = std::env::split_paths(&system)
+            .map(|dir| dir.join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("{tool} not on PATH"));
+        std::os::unix::fs::symlink(real, bin.join(tool)).unwrap();
+    }
+    assert!(!bin.join("wtype").exists());
+    bin
+}
+
+#[test]
+fn pick_paste_without_wtype_still_copies() {
+    let env = TestEnv::new();
+    assert_eq!(code(&run(&env, &["copy"], Some("first"))), 0);
+    assert_eq!(code(&run(&env, &["copy"], Some("second"))), 0);
+    env.set_clipboard("something else", &["text/plain"]);
+
+    let out = env
+        .cmd()
+        .args(["pick", "--paste"])
+        .env("PATH", path_without_wtype(&env))
+        // Debug builds only: pick entry 2 without the TUI or daemon autostart
+        .env("CLIPSTACK_TEST_PICK", "2")
+        .output()
+        .unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("wtype not found"), "stderr: {}", stderr(&out));
+    assert_eq!(env.clipboard_content().as_deref(), Some("first"));
+    assert!(!env.lock_path().exists(), "the test hook starts no daemon");
+}
+
+#[test]
+fn pick_paste_types_the_configured_keys_with_wtype() {
+    let env = TestEnv::new();
+    assert_eq!(code(&run(&env, &["copy"], Some("text"))), 0);
+    env.write_config("[picker]\npaste_after_pick = true\npaste_keys = \"ctrl+shift+v\"\n");
+    // The fake wtype (first on PATH) only logs its arguments
+    let out = env.cmd().arg("pick").env("CLIPSTACK_TEST_PICK", "1").output().unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(env.clipboard_content().as_deref(), Some("text"));
+
+    // The helper runs detached after a short delay
+    let calls = env.fake_clip_dir.join("wtype.calls");
+    assert!(common::wait_until(std::time::Duration::from_secs(5), || calls.exists()), "wtype never ran");
+    assert!(common::wait_until(std::time::Duration::from_secs(2), || {
+        std::fs::read_to_string(&calls).is_ok_and(|c| c.ends_with('\n'))
+    }));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), "-M ctrl -M shift -k v -m shift -m ctrl\n");
+}
+
+#[test]
+fn pick_without_paste_never_runs_wtype() {
+    let env = TestEnv::new();
+    assert_eq!(code(&run(&env, &["copy"], Some("text"))), 0);
+    let out = env.cmd().arg("pick").env("CLIPSTACK_TEST_PICK", "1").output().unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(!env.fake_clip_dir.join("wtype.calls").exists());
+}

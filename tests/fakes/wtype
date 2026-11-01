@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake wtype for tests (first on PATH via TestEnv). It types nothing: it
+# only appends its arguments to $FAKE_CLIP_DIR/wtype.calls, so a test can
+# check the keystrokes of `pick --paste` without touching a real window.
+
+if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
+    echo "fake wtype: FAKE_CLIP_DIR is not set to a directory" >&2
+    exit 1
+fi
+printf '%s\n' "$*" >> "$FAKE_CLIP_DIR/wtype.calls"

@@ -47,7 +47,7 @@ fn run(cli: Cli) -> Result<()> {
     // Check dependencies on commands that need clipboard access
     if matches!(
         cli.command,
-        None | Some(Commands::Pick)
+        None | Some(Commands::Pick { .. })
             | Some(Commands::Copy)
             | Some(Commands::Paste)
             | Some(Commands::Daemon)
@@ -68,7 +68,8 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         // Default action: open picker
-        None | Some(Commands::Pick) => picker::pick_and_paste(storage, &config.picker).map(drop),
+        None => commands::pick(storage, &config.picker, false),
+        Some(Commands::Pick { paste }) => commands::pick(storage, &config.picker, paste),
         Some(Commands::Copy) => commands::copy(&storage),
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count, json, pinned }) => commands::list(&storage, count, json, pinned),

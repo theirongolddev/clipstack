@@ -138,6 +138,7 @@ impl TestEnv {
         let fake = match name {
             "wl-paste" => "wl-paste",
             "wl-copy" => "wl-copy",
+            "wtype" => "wtype",
             other => unreachable!("no fake named {other:?}"),
         };
         let mut cmd = Command::new(Self::fakes_dir().join(fake));

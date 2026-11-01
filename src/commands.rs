@@ -181,6 +181,41 @@ pub fn get(storage: &Storage, reference: &EntryRef, copy: bool) -> Result<()> {
     }
 }
 
+/// `pick [--paste]`: copy the entry chosen in the picker; with `paste` (or
+/// `[picker] paste_after_pick`), wtype then types the paste keys into the
+/// window that had focus. Without wtype it still copies and exits 0.
+pub fn pick(storage: Storage, config: &config::PickerConfig, paste: bool) -> Result<()> {
+    let paste = paste || config.paste_after_pick;
+    let Some(content) = choose(storage, config)? else {
+        return Ok(());
+    };
+    clipboard::Clipboard::system().copy(&content)?;
+    eprintln!("Copied {} bytes to clipboard", content.len());
+    if !paste {
+        return Ok(());
+    }
+    let argv = crate::picker::paste_command(&config.paste_keys).map_err(|e| config::ConfigError(format!("[picker] {e}")))?;
+    let args = argv.split_first().map_or(&[][..], |(_wtype, args)| args);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match util::find_in_path("wtype", &path) {
+        Some(wtype) => crate::picker::spawn_paste(&wtype, args).context("cannot start wtype")?,
+        None => eprintln!("wtype not found: copied but not pasted (install wtype for --paste)"),
+    }
+    Ok(())
+}
+
+/// The picker's choice. Debug builds take `CLIPSTACK_TEST_PICK=REF` instead,
+/// so tests can drive `pick` without a terminal or a daemon.
+fn choose(storage: Storage, config: &config::PickerConfig) -> Result<Option<String>> {
+    #[cfg(debug_assertions)]
+    if let Ok(reference) = std::env::var("CLIPSTACK_TEST_PICK") {
+        let reference: EntryRef = reference.parse().map_err(|e: String| CliError::new(Exit::Usage, e))?;
+        let entry = resolve(&storage, &reference)?;
+        return storage.load_content(entry.id).map(Some);
+    }
+    crate::picker::pick(storage, config)
+}
+
 /// `alias REF NAME` names the entry (pinning it if needed); with `name`
 /// `None` (`alias --remove REF`) the alias goes and the pin stays.
 pub fn alias(storage: &Storage, reference: &EntryRef, name: Option<&str>) -> Result<()> {
@@ -372,21 +407,11 @@ pub fn watch_hook(cli: &Cli) -> Result<()> {
     )
 }
 
-/// The first executable file named `name` in the `PATH`-style list `path`.
-/// Empty entries are skipped (not taken as the working dir).
-fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(path)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join(name))
-        .find(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
-}
-
 /// Check if required dependencies (wl-clipboard) are installed (exit 6 if not)
 pub fn check_dependencies() -> Result<()> {
     // Look wl-paste up on PATH ourselves: `which` isn't installed everywhere
     let path = std::env::var_os("PATH").unwrap_or_default();
-    match find_in_path("wl-paste", &path) {
+    match util::find_in_path("wl-paste", &path) {
         Some(_) => Ok(()),
         None => Err(clipboard::ClipboardError::from(anyhow::anyhow!(
             "wl-clipboard not found\n\n\
@@ -612,27 +637,3 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     .expect("Error setting signal handler");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn find_in_path_finds_executables_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join("tool"), "not executable").unwrap();
-        std::fs::write(b.join("tool"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(b.join("tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::create_dir(a.join("dir-tool")).unwrap();
-        std::fs::set_permissions(a.join("dir-tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let path = std::env::join_paths(["", "/nonexistent", a.to_str().unwrap(), b.to_str().unwrap()]).unwrap();
-        assert_eq!(find_in_path("tool", &path), Some(b.join("tool")));
-        assert_eq!(find_in_path("dir-tool", &path), None, "directories don't count");
-        assert_eq!(find_in_path("missing", &path), None);
-        assert_eq!(find_in_path("tool", std::ffi::OsStr::new("")), None);
-    }
-}

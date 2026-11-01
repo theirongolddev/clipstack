@@ -7,7 +7,7 @@
 #   "$CLIPSTACK" daemon & track_pid $!
 #
 # isolate_env points XDG_RUNTIME_DIR, XDG_DATA_HOME, XDG_CONFIG_HOME and HOME
-# at a fresh temp dir, puts tests/fakes first on PATH (fake wl-paste/wl-copy)
+# at a fresh temp dir, puts tests/fakes first on PATH (fake wl-paste/wl-copy/wtype)
 # and unsets WAYLAND_DISPLAY, so a suite can't reach the user's clipboard,
 # store (~/.local/share/clipd) or daemon lock. cleanup kills only the PIDs
 # recorded with track_pid. Never use pkill/killall in a suite.

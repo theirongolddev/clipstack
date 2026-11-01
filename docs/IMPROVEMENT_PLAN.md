@@ -199,7 +199,7 @@ pub struct StorageConfig {        // defaults in the TOML below
 }
 pub struct CaptureConfig { pub mode: CaptureMode /* Auto|Watch|Poll */, pub poll_interval_ms: u64 }
 pub struct SocketConfig  { pub enabled: bool, pub allow_pull: bool, pub timeout_ms: u64 }
-pub struct PickerConfig  { pub search_debounce_ms: u64 /* Step 4; paste keys in 4-10 */ }
+pub struct PickerConfig  { pub search_debounce_ms: u64, pub paste_after_pick: bool, pub paste_keys: String } // Step 4
 
 impl Config {
     pub fn load(explicit: Option<&Path>) -> Result<(Config, ConfigSource)>; // missing default file => defaults
@@ -494,13 +494,15 @@ timeout_ms = 5000
 
 [picker]                       # Step 4
 search_debounce_ms = 50
+paste_after_pick = false
+paste_keys = "shift+Insert"
 ```
 
 Validation (failure means config error, exit 5 in Step 3):
 - `max_entry_bytes` in `1..=64 MiB`, and `max_total_bytes >= max_entry_bytes`.
 - At most 64 user patterns, compiled with `RegexSetBuilder::size_limit(1 << 20)`.
 - Error messages name the bad pattern and its index.
-- `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`, `[picker] search_debounce_ms` in `0..=1000`.
+- `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`, `[picker] search_debounce_ms` in `0..=1000`, and `paste_keys` must parse (`paste_command`).
 
 Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----` (matches anywhere in the content; ` BLOCK` covers PGP private key blocks)
@@ -959,7 +961,7 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 **Module layout:**
 
 ```
-src/picker/mod.rs     Picker::run, terminal setup/teardown, suspend/resume helpers, pick_and_paste
+src/picker/mod.rs     Picker::run, terminal setup/teardown, suspend/resume helpers, pick() (copying and pasting are in commands::pick)
 src/picker/data.rs    PickerData { storage: Storage, entries: Vec<ClipEntry>, content_cache: Option<(EntryId, String)> }
 src/picker/state.rs   ViewState { mode, focus, selection: Option<EntryId>, query, pending_query_at, scroll, preview_scroll,
                       show_whitespace, show_line_numbers, prompt: Option<Prompt>, status }
@@ -1006,6 +1008,7 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 - `clipstack pick --paste`, or config `[picker] paste_after_pick = true` with `paste_keys = "shift+Insert"` (Shift+Insert pastes in terminals and most GUI apps).
 - After `wl-copy` succeeds, spawn `sh -c 'sleep 0.15; exec wtype -M shift -k Insert -m shift'` detached: `process_group(0)` (std `CommandExt`), stdin/stdout/stderr null, never waited on. Without that, the terminal closing with the picker sends it SIGHUP before the sleep ends. `paste_command(keys) -> Vec<String>` (pure) builds the argv. The delay lets the picker window close and focus return.
 - If wtype is missing, print a status message and still exit 0.
+- As built: `paste_command(keys) -> Result<Vec<String>, String>` accepts modifiers `shift`, `ctrl`/`control`, `alt`, `altgr`, `super`/`logo`/`win` and a key `Insert`, `Return`/`Enter` or one ASCII letter or digit; anything else (and a repeated modifier) is a config error. The helper is `sh -c 'sleep 0.15; exec "$@"' sh <wtype path> <args>`, with wtype found on `PATH` by `util::find_in_path` (moved from commands.rs). `commands::pick` copies and pastes; `picker::pick` only returns the choice. Debug builds read `CLIPSTACK_TEST_PICK=REF` instead of running the TUI (no daemon autostart), which the `cli_scripting` pick tests use with a fake `tests/fakes/wtype` that only logs its argv.
 
 **Config additions:** a `[picker]` section with `paste_after_pick` (default false), `paste_keys` (default "shift+Insert") and `search_debounce_ms` (default 50).
 

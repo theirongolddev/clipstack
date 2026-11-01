@@ -81,11 +81,15 @@ impl Default for SocketConfig {
 pub struct PickerConfig {
     /// Wait after the last keystroke before searching; 0 = every key
     pub search_debounce_ms: u64,
+    /// Paste into the previous window after picking, as with `pick --paste`
+    pub paste_after_pick: bool,
+    /// Keys wtype types to paste, e.g. "shift+Insert" or "ctrl+shift+v"
+    pub paste_keys: String,
 }
 
 impl Default for PickerConfig {
     fn default() -> Self {
-        Self { search_debounce_ms: 50 }
+        Self { search_debounce_ms: 50, paste_after_pick: false, paste_keys: "shift+Insert".to_string() }
     }
 }
 
@@ -176,7 +180,7 @@ impl Config {
             }
         };
         let config = Self::parse(&text)
-            .and_then(|c| c.check_ranges().map(|()| c))
+            .and_then(|c| c.check_sections().map(|()| c))
             .and_then(|c| c.ingest_policy().map(|_| c))
             .map_err(|e| ConfigError(format!("{}: {}", path.display(), e.0)))?;
         let source = if explicit {
@@ -192,8 +196,9 @@ impl Config {
         toml::from_str(text).map_err(|e| ConfigError(e.to_string().trim_end().to_string()))
     }
 
-    /// Check the numeric ranges in `[capture]`, `[socket]` and `[picker]`.
-    pub fn check_ranges(&self) -> Result<(), ConfigError> {
+    /// Check the values in `[capture]`, `[socket]` and `[picker]`.
+    pub fn check_sections(&self) -> Result<(), ConfigError> {
+        crate::picker::paste_command(&self.picker.paste_keys).map_err(|e| ConfigError(format!("[picker] {e}")))?;
         let debounce = self.picker.search_debounce_ms;
         if !SEARCH_DEBOUNCE_RANGE_MS.contains(&debounce) {
             return Err(ConfigError(format!(
@@ -409,6 +414,22 @@ mod tests {
         assert!(err.to_string().contains("search_debounce_ms"), "{err}");
         let err = Config::parse("[picker]\ndebounce = 3\n").unwrap_err();
         assert!(err.to_string().contains("debounce"), "{err}");
+    }
+
+    #[test]
+    fn picker_paste_defaults_and_validation() {
+        let picker = Config::default().picker;
+        assert!(!picker.paste_after_pick);
+        assert_eq!(picker.paste_keys, "shift+Insert");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[picker]\npaste_after_pick = true\npaste_keys = \"ctrl+shift+v\"\n").unwrap();
+        let (config, _) = Config::load_path(&path, true).unwrap();
+        assert!(config.picker.paste_after_pick);
+        assert_eq!(config.picker.paste_keys, "ctrl+shift+v");
+        std::fs::write(&path, "[picker]\npaste_keys = \"shift+F13\"\n").unwrap();
+        let err = Config::load_path(&path, true).unwrap_err();
+        assert!(err.to_string().contains("paste_keys") && err.to_string().contains("F13"), "{err}");
     }
 
     #[test]

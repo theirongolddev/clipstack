@@ -1,4 +1,5 @@
-//! Side effects the picker starts: editing an entry in `$EDITOR`.
+//! Side effects the picker starts: editing an entry in `$EDITOR`, and the
+//! wtype keystrokes of `pick --paste`.
 
 use crate::perms;
 use crate::storage::EntryId;
@@ -15,6 +16,68 @@ pub fn choose_editor(visual: Option<&str>, editor: Option<&str>) -> String {
         .find(|e| !e.trim().is_empty())
         .unwrap_or("vi")
         .to_string()
+}
+
+/// The wtype argv that types `keys` (`"shift+Insert"`, `"ctrl+shift+v"`):
+/// modifiers pressed in order and released in reverse around the key.
+pub fn paste_command(keys: &str) -> Result<Vec<String>, String> {
+    let bad = |why: String| format!("paste_keys = {keys:?}: {why}");
+    let mut parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+    let key = parts.pop().unwrap_or_default();
+    let mut modifiers: Vec<&str> = Vec::new();
+    for part in parts {
+        let modifier = match part.to_ascii_lowercase().as_str() {
+            "shift" => "shift",
+            "ctrl" | "control" => "ctrl",
+            "alt" => "alt",
+            "altgr" => "altgr",
+            "super" | "logo" | "win" => "logo",
+            _ => return Err(bad(format!("unknown modifier {part:?} (use shift, ctrl, alt, altgr or super)"))),
+        };
+        if modifiers.contains(&modifier) {
+            return Err(bad(format!("{part:?} given twice")));
+        }
+        modifiers.push(modifier);
+    }
+    let key = match key.to_ascii_lowercase().as_str() {
+        "insert" => "Insert".to_string(),
+        "return" | "enter" => "Return".to_string(),
+        k if k.len() == 1 && k.bytes().all(|b| b.is_ascii_alphanumeric()) => k.to_string(),
+        _ => return Err(bad(format!("unknown key {key:?} (use Insert, Return, or one letter or digit)"))),
+    };
+    let mut argv = vec!["wtype".to_string()];
+    for m in &modifiers {
+        argv.extend(["-M".to_string(), m.to_string()]);
+    }
+    argv.extend(["-k".to_string(), key]);
+    for m in modifiers.iter().rev() {
+        argv.extend(["-m".to_string(), m.to_string()]);
+    }
+    Ok(argv)
+}
+
+/// How long the paste helper waits, so the picker's window can close and
+/// focus return to the previous window.
+pub const PASTE_DELAY: &str = "0.15";
+
+/// Run `wtype args` after `PASTE_DELAY`, detached: its own process group
+/// (closing the terminal must not SIGHUP it), null stdio, never waited on.
+pub fn spawn_paste(wtype: &Path, args: &[String]) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    // Never waited on: init reaps it once clipstack exits, a moment from now
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("sleep {PASTE_DELAY}; exec \"$@\""))
+        .arg("sh")
+        .arg(wtype)
+        .args(args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
 }
 
 /// Removes the edit file however editing ends.
@@ -129,6 +192,33 @@ mod tests {
         std::fs::set_permissions(&expected, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(edit_in_editor("secret", "true", dir.path(), 42).is_err());
         assert_eq!(std::fs::read_to_string(&expected).unwrap(), "planted");
+    }
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn paste_command_for_shift_insert() {
+        let shift_insert = argv(&["wtype", "-M", "shift", "-k", "Insert", "-m", "shift"]);
+        assert_eq!(paste_command("shift+Insert").unwrap(), shift_insert);
+        assert_eq!(paste_command(" Shift + insert ").unwrap(), shift_insert, "case and spaces");
+        assert_eq!(
+            paste_command("ctrl+shift+v").unwrap(),
+            argv(&["wtype", "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]),
+            "modifiers are released in reverse"
+        );
+        assert_eq!(paste_command("super+V").unwrap(), argv(&["wtype", "-M", "logo", "-k", "v", "-m", "logo"]));
+        assert_eq!(paste_command("Insert").unwrap(), argv(&["wtype", "-k", "Insert"]));
+        assert_eq!(paste_command("control+alt+Return").unwrap()[6], "Return");
+    }
+
+    #[test]
+    fn paste_command_rejects_unknown_key() {
+        for keys in ["", "shift+", "+Insert", "shift+F13", "hyper+v", "shift+shift+v", "ctrl+v+x", "shift+Ins;rm", "ctrl+é"] {
+            let err = paste_command(keys).unwrap_err();
+            assert!(err.contains("paste_keys"), "{keys:?}: {err}");
+        }
     }
 
     #[test]

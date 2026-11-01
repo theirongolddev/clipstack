@@ -69,6 +69,8 @@ sudo dnf install wl-clipboard
 
 **Note**: ClipStack requires a Wayland session (Sway, Hyprland, GNOME Wayland, etc.). X11 is not supported.
 
+**Optional:** [wtype](https://github.com/atx/wtype) for `clipstack pick --paste`, which pastes the chosen entry into the window you were in (`sudo pacman -S wtype`, `sudo apt install wtype`, `sudo dnf install wtype`). It needs a compositor with the virtual-keyboard protocol (Hyprland, Sway and other wlroots compositors; not GNOME). Without it `--paste` still copies.
+
 ### Build Dependencies
 
 - Rust 1.89+ (2024 edition)
@@ -106,6 +108,7 @@ cp target/release/clipstack ~/.cargo/bin/
 |---------|-------------|
 | `clipstack` | Open the picker UI (default action) |
 | `clipstack pick` | Open the picker UI |
+| `clipstack pick --paste` | Open the picker; after copying, paste into the window that had focus (needs `wtype`; see [Paste after picking](#paste-after-picking)) |
 | `clipstack copy` | Copy stdin to clipboard |
 | `clipstack paste` | Paste clipboard contents to stdout |
 | `clipstack list [-c N] [--json] [--pinned]` | List the last N entries, newest first (default: 10); `--json` prints a JSON array, `--pinned` only pinned entries |
@@ -467,6 +470,8 @@ To bind the picker to a hotkey, add to `~/.config/hypr/bindings.conf`:
 
 ```bash
 bind = $mainMod CTRL, B, exec, [float;size 800 600;center] alacritty --class clipstack-picker -e clipstack pick
+# Or pick and paste straight into the window you were in (needs wtype)
+bind = $mainMod CTRL, V, exec, [float;size 800 600;center] alacritty --class clipstack-picker -e clipstack pick --paste
 ```
 
 And add window rules to `~/.config/hypr/hyprland.conf`:
@@ -484,8 +489,14 @@ Add to `~/.config/sway/config`:
 ```bash
 exec clipstack daemon
 bindsym $mod+Ctrl+b exec alacritty --class clipstack-picker -e clipstack pick
+# Or pick and paste straight into the window you were in (needs wtype)
+bindsym $mod+Ctrl+v exec alacritty --class clipstack-picker -e clipstack pick --paste
 for_window [app_id="clipstack-picker"] floating enable, resize set 800 600
 ```
+
+### Paste after picking
+
+`clipstack pick --paste` (or `paste_after_pick = true` under `[picker]` in the config file) copies the entry you choose, closes the picker, and 150 ms later types `paste_keys` with wtype, by default `shift+Insert`, which pastes the clipboard in terminals and most GUI apps. The delay lets the picker's window close and focus go back to the window you came from. If that window pastes something else on Shift+Insert (xterm pastes the primary selection), set `paste_keys = "ctrl+shift+v"` for terminals or `"ctrl+v"` for GUI apps. `paste_keys` is modifiers (`shift`, `ctrl`, `alt`, `altgr`, `super`) and one key (`Insert`, `Return`, or a letter or digit), joined with `+`. Without wtype the entry is still copied, and ClipStack says it didn't paste. Cancelling the picker pastes nothing.
 
 ## Remote Clipboard (SSH)
 
@@ -703,6 +714,14 @@ timeout_ms = 5000
 [picker]
 # The picker searches once you stop typing for this long (0 to 1000; 0 = on every key).
 search_debounce_ms = 50
+
+# Paste into the previous window after picking, as with `clipstack pick --paste` (needs wtype).
+paste_after_pick = false
+
+# Keys wtype types to paste: modifiers (shift, ctrl, alt, altgr, super) and Insert, Return
+# or one letter or digit, joined with +. Use "ctrl+shift+v" where Shift+Insert pastes the
+# primary selection (xterm).
+paste_keys = "shift+Insert"
 ```
 
 **Built-in secret patterns** (Rust regex syntax). The private-key header is skipped wherever it appears in a copy. Every other pattern must match the whole copy, apart from surrounding whitespace: a copy that is nothing but a token is skipped, while prose or a script that contains one (for example a shell script with `export GITHUB_TOKEN=ghp_...` in it) is still saved. Use `ignore_patterns` if you want those skipped too.
@@ -835,7 +854,7 @@ This helps diagnose issues with:
 ClipStack is built around several core principles:
 
 **Simplicity Over Features**
-- Single binary with zero runtime dependencies (besides wl-clipboard)
+- Single binary with zero runtime dependencies (besides wl-clipboard; wtype only for `pick --paste`)
 - One SQLite file, inspectable with `clipstack export | jq` or `sqlite3 -readonly`
 - No database server, no background services (except the daemon), an optional config file
 
@@ -1008,7 +1027,7 @@ cargo build --release
 for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
 ```
 
-Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; every shell suite sources `tests/lib.sh` and calls `isolate_env`. The shell suites build old-format stores and check the import through `clipstack export | jq`. `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
+Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; every shell suite sources `tests/lib.sh` and calls `isolate_env`. The shell suites build old-format stores and check the import through `clipstack export | jq`. `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy`/`wtype` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
 
 ### Building
 
@@ -1040,8 +1059,8 @@ clipstack/
 │   │   └── socket.rs    # Unix socket server (PUSH/PULL/PING)
 │   ├── perms.rs         # Private (0700/0600) storage permissions
 │   ├── picker/          # TUI history picker
-│   │   ├── mod.rs       # Picker: actions, event loop, terminal setup, pick_and_paste
-│   │   ├── actions.rs   # Edit in $EDITOR
+│   │   ├── mod.rs       # Picker: actions, event loop, terminal setup and suspend
+│   │   ├── actions.rs   # Edit in $EDITOR, wtype paste keys
 │   │   ├── data.rs      # Entries, content cache, undo
 │   │   ├── state.rs     # View state: mode, focus, selection (by id), prompt, toggles
 │   │   ├── search.rs    # Fuzzy preview match + full-content search, debounce
@@ -1063,7 +1082,7 @@ clipstack/
 │   ├── cli_scripting.rs     # get, list/search --json, alias and exit code tests
 │   ├── watch_capture.rs     # Watch hook, watch capture and polling fallback tests
 │   ├── socket_protocol.rs   # Socket PUSH/PULL/PING, timeouts and stale-socket tests
-│   ├── fakes/           # Fake wl-paste/wl-copy (never touch the real clipboard)
+│   ├── fakes/           # Fake wl-paste/wl-copy/wtype (never touch the real clipboard or type keys)
 │   ├── lib.sh           # isolate_env/cleanup for shell suites
 │   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, unit; e2e_remote.sh: rcopy, rpaste)
 │   └── integration/     # Shell integration suites

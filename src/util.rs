@@ -36,9 +36,40 @@ pub fn format_relative_time(timestamp: i64) -> String {
     }
 }
 
+/// The first executable file named `name` in the `PATH`-style list `path`.
+/// Empty entries are skipped (not taken as the working dir).
+pub fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_in_path_finds_executables_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("tool"), "not executable").unwrap();
+        std::fs::write(b.join("tool"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(b.join("tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir(a.join("dir-tool")).unwrap();
+        std::fs::set_permissions(a.join("dir-tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path = std::env::join_paths(["", "/nonexistent", a.to_str().unwrap(), b.to_str().unwrap()]).unwrap();
+        assert_eq!(find_in_path("tool", &path), Some(b.join("tool")));
+        assert_eq!(find_in_path("dir-tool", &path), None, "directories don't count");
+        assert_eq!(find_in_path("missing", &path), None);
+        assert_eq!(find_in_path("tool", std::ffi::OsStr::new("")), None);
+    }
+
 
     #[test]
     fn test_format_size() {

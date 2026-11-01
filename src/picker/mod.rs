@@ -2,6 +2,7 @@
 //! `search` the filter, `keys` the key handling and `render` the drawing.
 
 mod actions;
+pub use actions::{paste_command, spawn_paste};
 mod data;
 mod keys;
 mod render;
@@ -9,7 +10,6 @@ mod search;
 mod state;
 mod text;
 
-use crate::clipboard::Clipboard;
 use crate::config::PickerConfig;
 use crate::daemon::Daemon;
 use crate::storage::{ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
@@ -628,32 +628,14 @@ fn ensure_daemon_running(storage_dir: &std::path::Path) {
     std::thread::sleep(Duration::from_millis(200));
 }
 
-/// Run the picker and paste the selected content to clipboard
-pub fn pick_and_paste(storage: Storage, config: &PickerConfig) -> Result<bool> {
-    // Ensure daemon is running before showing picker
+/// Run the picker (starting the daemon if needed); the chosen content, or
+/// `None` if the user cancelled.
+pub fn pick(storage: Storage, config: &PickerConfig) -> Result<Option<String>> {
     ensure_daemon_running(storage.base_dir());
-
     let mut picker = Picker::new(storage)?;
     picker.debounce = config.search_debounce();
-
-    match picker.run() {
-        Ok(Some(content)) => {
-            // Content was selected
-            Clipboard::system().copy(&content)?;
-            eprintln!("Copied {} bytes to clipboard", content.len());
-            Ok(true)
-        }
-        Ok(None) => {
-            // User cancelled (ESC/q)
-            Ok(false)
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            Err(e)
-        }
-    }
+    picker.run()
 }
-
 
 #[cfg(test)]
 pub(super) mod tests {

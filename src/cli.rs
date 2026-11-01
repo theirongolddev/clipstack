@@ -41,7 +41,12 @@ pub enum Commands {
     Paste,
 
     /// Open picker UI to select from history
-    Pick,
+    Pick {
+        /// After copying, paste into the window that had focus (needs wtype;
+        /// keys from `[picker] paste_keys`)
+        #[arg(long)]
+        paste: bool,
+    },
 
     /// List clipboard history, newest first
     List {
