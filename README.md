@@ -1,6 +1,6 @@
 # ClipStack
 
-A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack keeps its history in a single SQLite database and provides vim-style navigation, fuzzy search with full-content matching, and remote copy from SSH sessions over a forwarded Unix socket.
+A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack keeps its history in a single SQLite database and provides vim-style navigation, fuzzy search with full-content matching, a scriptable command line (`get`, `search`, JSON output, stable exit codes), and remote copy and paste from SSH sessions over a forwarded Unix socket.
 
 Built for developers who live in the terminal and want a clipboard manager that stays out of the way until needed.
 
@@ -10,7 +10,9 @@ Built for developers who live in the terminal and want a clipboard manager that 
 - **Clipboard History**: Automatically saves clipboard entries with SHA256 deduplication; event-driven through `wl-paste --watch`, with polling where the compositor can't watch
 - **Pinned Entries**: Mark important items with `p` to protect them from automatic pruning
 - **TUI Picker**: Fuzzy-searchable history picker with live preview and vim keybindings
-- **Remote Clipboard**: Copy from SSH sessions to your local clipboard with `rcopy` over a forwarded Unix socket
+- **Remote Clipboard**: Copy from SSH sessions to your local clipboard with `rcopy`, and paste from it with `rpaste` (opt-in), over a forwarded Unix socket
+- **Scripting**: `get` an entry by position, id or alias, `list --json`, `search --json` over the full-content index, and stable exit codes
+- **Named Snippets**: `clipstack alias 3 sig` pins an entry as `@sig`; `clipstack get @sig` prints it
 - **Secret Filtering**: Password-manager copies are never saved; built-in patterns skip private keys and API tokens; add your own regexes in the config file
 - **Retention and Size Caps**: Optionally expire old entries and cap entry and total size
 
@@ -106,9 +108,13 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack pick` | Open the picker UI |
 | `clipstack copy` | Copy stdin to clipboard |
 | `clipstack paste` | Paste clipboard contents to stdout |
-| `clipstack list [-c N]` | List last N entries (default: 10) |
+| `clipstack list [-c N] [--json] [--pinned]` | List the last N entries, newest first (default: 10); `--json` prints a JSON array, `--pinned` only pinned entries |
+| `clipstack get REF [--copy]` | Print one entry's content exactly as stored, no newline added; `--copy` also puts it on the clipboard and makes it the newest entry. `REF` is `N` (position, 1 = newest), `id:ID` or `@alias` |
+| `clipstack search QUERY... [-c N] [--json]` | Entries containing every word, pinned first, then newest (default: 10 matches); exits 1 when nothing matches |
+| `clipstack alias REF NAME` | Name an entry `@NAME`, pinning it if needed |
+| `clipstack alias --remove REF` | Remove an entry's alias; it stays pinned |
 | `clipstack clear` | Clear clipboard history, pinned entries included, and delete any `legacy-backup-*` directories |
-| `clipstack daemon` | Run the background daemon: clipboard capture and the `rcopy` socket |
+| `clipstack daemon` | Run the background daemon: clipboard capture and the `rcopy`/`rpaste` socket |
 | `clipstack kill` | Stop the running daemon (it also stops its watcher and removes its socket) |
 | `clipstack stats` | Show storage statistics |
 | `clipstack status` | Check daemon, socket, capture mode and system health |
@@ -145,6 +151,17 @@ clipstack paste | grep "pattern" | clipstack copy
 # View recent history
 clipstack list -c 20
 
+# Print the second-newest entry, or copy it back to the clipboard
+clipstack get 2
+clipstack get 2 --copy
+
+# Find entries mentioning both words
+clipstack search docker compose
+
+# Name a snippet and use it
+clipstack alias 1 sig
+clipstack get @sig
+
 # Use custom max entries limit
 clipstack --max-entries 500 daemon
 
@@ -161,6 +178,69 @@ clipstack stats
 
 # Check system health
 clipstack status
+```
+
+### Scripting
+
+`get`, `list --json`, `search --json` and `alias` are meant for scripts. Their output and exit codes are stable.
+
+**Entry references.** `get` and `alias` take a `REF`:
+
+| Form | Means |
+|------|-------|
+| `N` | Position in the history, newest first: `1` is the most recently used entry, as in `list` |
+| `id:ID` | The entry's id, which never changes and is never reused (`list --json` shows it) |
+| `@NAME` | The pinned entry named `NAME` with `clipstack alias` |
+
+Positions shift as you copy; use `id:ID` or an alias to keep referring to the same entry. (Not `#42`: a shell treats a word starting with `#` as a comment.) Alias names are 1-32 characters from `a-z`, `0-9`, `_` and `-`, starting with a letter or digit. An alias pins its entry, so at most 25 entries can have one.
+
+**JSON.** `list --json` and `search --json` print one JSON array on one line. Each element is an entry without its content (use `get` or `export` for that):
+
+```json
+[{"position":1,"id":42,"created_at":1761998400000,"last_used":1762001234567,"size":118,
+  "preview":"git log --oneline | head","pinned":true,"alias":"gl","source":"watch",
+  "mime":"text/plain;charset=utf-8"}]
+```
+
+| Field | Meaning |
+|-------|---------|
+| `position` | Position in the full history, newest first (`get N` prints this entry). With `--pinned` and in search results it is still the position in the whole history |
+| `id` | Entry id (`get id:ID`) |
+| `created_at`, `last_used` | Unix time in milliseconds: first saved, and last copied (the sort key) |
+| `size` | Content size in bytes |
+| `preview` | First 100 characters, control characters replaced by spaces |
+| `pinned`, `alias` | Pin state, and the alias or `null` |
+| `source` | How it was saved: `watch`, `poll`, `copy`, `remote`, `picker`, `edit`, `import` or `unknown` |
+| `mime` | The text type it was copied as |
+
+An empty history prints `[]` and exits 0; a search with no match prints `[]` and exits 1. `search` lists pinned entries first, then the newest.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | OK |
+| 1 | Not found or no match (like grep): `get` with no such entry, `search` with no match (silent), `alias` with the name taken or 25 entries already pinned; also any failure not listed below |
+| 2 | Usage error: bad arguments, an invalid `REF` or alias name, an empty search, `serve` |
+| 3 | Daemon or socket unavailable (`rcopy` and `rpaste`; no `clipstack` command needs the daemon) |
+| 4 | Storage error: database locked past the 5 s busy timeout, damaged (`check`), or written by a newer ClipStack |
+| 5 | Config file error |
+| 6 | `wl-copy` or `wl-paste` failed or isn't installed |
+
+**Examples:**
+
+```bash
+# Paste a named snippet into a command
+git commit -m "$(clipstack get @msg)"
+
+# Copy the newest entry that mentions "ssh-ed25519" back to the clipboard
+id=$(clipstack search ssh-ed25519 --json -c 1 | jq -r '.[0].id') && clipstack get "id:$id" --copy
+
+# Pinned entries and their aliases
+clipstack list --pinned --json -c 25 | jq -r '.[] | "\(.alias // "-")\t\(.preview)"'
+
+# Branch on whether something is in the history
+if clipstack search "BEGIN CERTIFICATE" >/dev/null; then echo "a certificate is in the history"; fi
 ```
 
 ### Shell Completions
@@ -273,6 +353,7 @@ Pin frequently-used text to protect it from automatic pruning:
 - Pinned entries always appear at the top of the list (most recently used first)
 - Maximum 25 pinned entries allowed
 - Pinned entries survive when the history limit is exceeded
+- Name a pinned entry with `clipstack alias REF NAME` and print it with `clipstack get @NAME` (see [Scripting](#scripting)); unpinning removes the name
 - Re-copying pinned content moves it to the top while preserving pin status
 
 ## Running the Daemon
@@ -301,7 +382,7 @@ It also applies retention and the size caps once a minute, so old entries are de
 
 ### The daemon socket
 
-The daemon listens on `$XDG_RUNTIME_DIR/clipstack.sock` (usually `/run/user/<uid>/clipstack.sock`), next to its lock file `clipstack.lock`. Without `XDG_RUNTIME_DIR` both go in `/tmp/clipstack-<uid>/`, which ClipStack creates `0700` and refuses to use if another user owns it or it is accessible to others. The socket is `0600`, so only your user can connect. It serves [remote copy](#remote-clipboard-ssh) (`rcopy`) and `clipstack status`. Set `[socket] enabled = false` to turn it off.
+The daemon listens on `$XDG_RUNTIME_DIR/clipstack.sock` (usually `/run/user/<uid>/clipstack.sock`), next to its lock file `clipstack.lock`. Without `XDG_RUNTIME_DIR` both go in `/tmp/clipstack-<uid>/`, which ClipStack creates `0700` and refuses to use if another user owns it or it is accessible to others. The socket is `0600`, so only your user can connect. It serves [remote copy and paste](#remote-clipboard-ssh) (`rcopy`, `rpaste`) and `clipstack status`. Set `[socket] enabled = false` to turn it off.
 
 A socket left behind by a daemon that crashed is replaced at the next start. A path that isn't a socket, or a socket another process is listening on, is left alone: the daemon then runs without a socket and logs `[socket] disabled: ...`.
 
@@ -391,7 +472,12 @@ for_window [app_id="clipstack-picker"] floating enable, resize set 800 600
 
 ## Remote Clipboard (SSH)
 
-`rcopy` copies text from a remote shell to your local clipboard. ssh forwards the daemon's Unix socket to the remote host, and `rcopy` sends its stdin over it. The text is copied to your clipboard and saved to the history (subject to the same ignore rules as any other copy).
+Two small POSIX `sh` scripts work from a remote shell through ssh:
+
+- `rcopy` copies its stdin to your local clipboard. The text is also saved to the history, subject to the same ignore rules as any other copy.
+- `rpaste` prints your local clipboard. It is off until you set `allow_pull = true` locally (see [Security](#security)).
+
+ssh forwards the daemon's Unix socket to the remote host, and the scripts talk to the daemon over it. There is no TCP port.
 
 ### Setup
 
@@ -404,26 +490,43 @@ Host myserver
     RemoteForward /home/myuser/.clipstack.sock /run/user/1000/clipstack.sock
 ```
 
-The first path is on the remote host (where `rcopy` looks by default); the second is your local socket (`clipstack status` prints it; `1000` is your local uid, from `id -u`).
+The first path is on the remote host (where the scripts look by default); it must be absolute, so write out the remote home dir. The second is your local socket (`clipstack status` prints it; `1000` is your local uid, from `id -u`).
 
-**On the remote server**, let sshd replace a socket left by an earlier connection, in `/etc/ssh/sshd_config` (then reload sshd):
+To use `rpaste`, also allow pulls in your local `~/.config/clipstack/config.toml` and restart the daemon (`clipstack kill`, then start it again):
+
+```toml
+[socket]
+allow_pull = true
+```
+
+**On the remote server**, let sshd replace a socket left by an earlier connection, in `/etc/ssh/sshd_config` (then reload sshd). Without it, every login after the first finds the old socket in the way and the forward fails:
 
 ```
 StreamLocalBindUnlink yes
 ```
 
-and install `rcopy` (from this repo). It needs `socat`, or `nc` with Unix socket support (`-U`, OpenBSD netcat), or `ncat`:
+and install the scripts (from this repo's `scripts/`). They need `socat`, or `nc` with Unix socket support (`-U`, OpenBSD netcat), or `ncat`. BusyBox `nc` has no `-U`, so install `socat` there:
 
 ```bash
-install -m 0755 scripts/rcopy ~/.local/bin/rcopy   # or /usr/local/bin
+install -m 0755 scripts/rcopy scripts/rpaste ~/.local/bin/   # or /usr/local/bin
 
 # Usage examples:
 echo "text from remote" | rcopy
 head -50 /var/log/syslog | rcopy
 rcopy < /etc/hostname
+
+rpaste                      # print the local clipboard
+rpaste > notes.txt          # exactly as copied, no newline added
+rpaste | sh                 # run what you copied locally (think first)
 ```
 
-`rcopy` reads `CLIPSTACK_SOCK` for the socket path (default `$HOME/.clipstack.sock`). It exits 0 when the text was copied, and also says so on stderr when the history didn't keep it (`rcopy: copied, but not saved to history (ignored)`); 1 when the daemon refused it (for example `not_utf8`); 3 when there is no socket, no daemon behind it, or no `socat`/`nc`/`ncat`.
+Both scripts read `CLIPSTACK_SOCK` for the socket path (default `$HOME/.clipstack.sock`), so a forward to a different remote path works with `export CLIPSTACK_SOCK=/path/to/socket`.
+
+| Exit | `rcopy` | `rpaste` |
+|------|---------|----------|
+| 0 | Copied. If the history didn't keep it, stderr says why (`rcopy: copied, but not saved to history (ignored)`) | Printed the clipboard (nothing for an empty clipboard) |
+| 1 | The daemon refused it (for example `not_utf8`) | The daemon refused: `forbidden pull disabled (set socket.allow_pull = true)`, or `sensitive` for a password manager's copy |
+| 3 | No socket, no daemon behind it, or no `socat`/`nc`/`ncat` | Same |
 
 **Migrating from `clipstack serve`:** the TCP server (port 7779, `CB_PORT`) is gone, and `clipstack serve` now only prints where the socket is and exits 2. Replace `RemoteForward 7779 localhost:7779` with the socket line above, and install the new `rcopy` on each remote host.
 
@@ -431,16 +534,16 @@ rcopy < /etc/hostname
 
 1. The daemon listens on `$XDG_RUNTIME_DIR/clipstack.sock` (`0600`, in a `0700` dir)
 2. `RemoteForward` makes sshd on the remote host create `~/.clipstack.sock` and forward connections to it through your ssh connection to the local socket
-3. `rcopy` sends `CLIPSTACK/1 PUSH <length>`, a newline and its input
-4. The daemon saves the text (unless the ignore rules skip it), copies it with `wl-copy`, and replies `OK 0 stored=1 id=<id>`, `OK 0 stored=0 reason=<why>` or `ERR <code> <message>`
+3. `rcopy` sends `CLIPSTACK/1 PUSH <length>`, a newline and its input. The daemon saves the text (unless the ignore rules skip it), copies it with `wl-copy`, and replies `OK 0 stored=1 id=<id>`, `OK 0 stored=0 reason=<why>` or `ERR <code> <message>`
+4. `rpaste` sends `CLIPSTACK/1 PULL 0`. The daemon reads the clipboard with `wl-paste` and replies `OK <length>`, a newline and the text, or `ERR forbidden ...` / `ERR sensitive ...`. A pull is never saved to the history
 
-Each connection carries one request. The header is one line of at most 256 bytes; the body is exactly `<length>` bytes, at most `max_entry_bytes`. `PING` reports the version and capture mode (`OK 0 version=0.1.0 capture=watch pull=0`). `PULL`, which reads the local clipboard, is refused unless `[socket] allow_pull = true` (it is for `rpaste`, which isn't released yet).
+Each connection carries one request. The header is one line of at most 256 bytes; the body is exactly `<length>` bytes, at most `max_entry_bytes` for a push. `PING` reports the version, capture mode and whether pulls are allowed (`OK 0 version=0.1.0 capture=watch pull=0`). Requests are length-prefixed, so the server knows where one ends and clients never need to half-close (`nc -U` works without `-N`).
 
 ### Security
 
 - Only your user can connect to the local socket (`0600` in a `0700` runtime dir). There is no TCP port.
 - On the remote host, the forwarded socket is created by sshd as your remote user, `0600` by default (`StreamLocalBindMask`). Anyone who is root there can still use it to put text on your clipboard, so only forward it to hosts you trust.
-- Reading your clipboard from the remote side is off by default (`allow_pull = false`), and refused for offers marked sensitive even when on.
+- **`allow_pull = true` lets anything on the remote host that can reach the forwarded socket read your local clipboard** while you are connected: your remote user's processes and the remote root. That is why it is off by default. Copies a password manager marks as secret are refused even when it is on, but anything else you copy (a password typed into a terminal, a token from a web page) can be read. Turn it on only for hosts you trust as much as your local machine, or forward the socket only in the sessions where you need it (`ssh -o RemoteForward=... myserver`).
 - A client gets `timeout_ms` (5 s) per read and twice that for the whole request, so a stuck connection can't block the socket for long. Oversized pushes are refused from the header alone; non-UTF-8 text is refused.
 
 ## Storage
@@ -570,10 +673,11 @@ mode = "auto"
 poll_interval_ms = 250
 
 [socket]
-# Serve $XDG_RUNTIME_DIR/clipstack.sock for rcopy and `clipstack status`.
+# Serve $XDG_RUNTIME_DIR/clipstack.sock for rcopy, rpaste and `clipstack status`.
 enabled = true
 
-# Let socket clients read the local clipboard (PULL). Off by default.
+# Let socket clients read the local clipboard (PULL); rpaste needs this. Off by default:
+# anyone who can reach a forwarded socket could read your clipboard.
 allow_pull = false
 
 # Per-read timeout for a socket client (100 to 60000); a whole request gets twice this.
@@ -599,7 +703,7 @@ When a `clipstack copy` isn't saved because of these settings, the text is still
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CLIPSTACK_MAX_ENTRIES` | Maximum entries to store (1-10000); overridden by `--max-entries` | saved limit, else `100` |
-| `CLIPSTACK_SOCK` | Socket `rcopy` connects to (on the remote host) | `$HOME/.clipstack.sock` |
+| `CLIPSTACK_SOCK` | Socket `rcopy` and `rpaste` connect to (on the remote host) | `$HOME/.clipstack.sock` |
 
 ### Recommended Setup
 
@@ -653,8 +757,10 @@ This helps diagnose issues with:
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ClipStack                                │
 ├─────────────────────────────────────────────────────────────────┤
-│  CLI (main.rs)                                                  │
+│  CLI (main.rs → cli.rs: clap, REF, exit codes; commands.rs)     │
 │  ├── copy/paste    → clipboard.rs (wl-copy/wl-paste wrapper)   │
+│  ├── get/search    → storage/ (by position, id:ID, @alias; FTS)│
+│  ├── alias         → Name (and pin) an entry                   │
 │  ├── pick          → picker.rs (TUI with ratatui)              │
 │  ├── daemon        → daemon/ (capture, socket, PID lock file)  │
 │  ├── __watch-hook  → Run by wl-paste --watch per selection     │
@@ -667,7 +773,7 @@ This helps diagnose issues with:
 │  ├── mod.rs        → Main loop, runtime dir, lock, expiry      │
 │  ├── capture.rs    → wl-paste --watch supervisor, poll fallback│
 │  └── socket.rs     → clipstack.sock: PUSH/PULL/PING (0600)     │
-│  protocol.rs       → CLIPSTACK/1 framing (socket, rcopy)       │
+│  protocol.rs       → CLIPSTACK/1 framing (rcopy, rpaste)       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Config (config.rs)                                             │
 │  └── config.toml   → retention, size caps, ignore patterns     │
@@ -829,7 +935,7 @@ clipstack check --repair
 
 If `check` reports database damage, it prints what to do: save what can still be read with `clipstack export -o backup.jsonl`, then rebuild the database with the `sqlite3` command it shows.
 
-### Remote copy not working
+### Remote copy or paste not working
 
 ```bash
 # On local: the daemon serves its socket
@@ -843,7 +949,9 @@ printf 'CLIPSTACK/1 PING 0\n' | socat - UNIX-CONNECT:$HOME/.clipstack.sock
 # OK 0 version=0.1.0 capture=watch pull=0
 ```
 
-`rcopy` exiting 3 means it found no socket, no daemon behind it, or no `socat`/`nc -U`/`ncat`. A missing `~/.clipstack.sock` usually means the `RemoteForward` line is wrong, or a stale socket from an earlier login is in the way: set `StreamLocalBindUnlink yes` in the remote `sshd_config`, or delete the stale file. If ssh prints `remote port forwarding failed for listen path`, that is the same stale socket.
+`rpaste` exiting 1 with `forbidden` means the local daemon has `allow_pull = false` (the default): set it to `true` in the local config and restart the daemon (`PING` then shows `pull=1`).
+
+`rcopy` or `rpaste` exiting 3 means it found no socket, no daemon behind it, or no `socat`/`nc -U`/`ncat`. A missing `~/.clipstack.sock` usually means the `RemoteForward` line is wrong, or a stale socket from an earlier login is in the way: set `StreamLocalBindUnlink yes` in the remote `sshd_config`, or delete the stale file. If ssh prints `remote port forwarding failed for listen path`, that is the same stale socket.
 
 ### Picker UI looks broken
 
@@ -872,8 +980,9 @@ cargo test --release -- --ignored perf_
 # skipped unless CLIPSTACK_REAL_CLIPBOARD_TESTS is set, even with --ignored.
 CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored test_copy_and_paste test_large_content test_unicode_content
 
-# Shell suites (need a release build and jq; e2e_daemon.sh also uses socat,
-# nc -U and systemd-analyze when installed, and skips those checks otherwise)
+# Shell suites (need a release build and jq). e2e_daemon.sh also uses socat,
+# nc -U and systemd-analyze, and e2e_remote.sh (rcopy/rpaste) socat and nc -U,
+# when installed, and skip those checks otherwise; e2e_remote.sh needs one of the two.
 cargo build --release
 for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
 ```
@@ -899,7 +1008,9 @@ cargo clippy
 clipstack/
 ├── Cargo.toml           # Dependencies and metadata
 ├── src/
-│   ├── main.rs          # CLI entry point, subcommands
+│   ├── main.rs          # Entry point: parse, open storage, dispatch, exit code
+│   ├── cli.rs           # clap definitions, entry references (N, id:ID, @alias), exit codes
+│   ├── commands.rs      # One function per subcommand
 │   ├── clipboard.rs     # Wayland clipboard operations
 │   ├── config.rs        # config.toml loading and validation
 │   ├── daemon/          # Background daemon
@@ -920,14 +1031,16 @@ clipstack/
 │   ├── common/mod.rs    # TestEnv isolation harness for binary tests
 │   ├── daemon_lifecycle.rs  # Daemon start/stop, shutdown, status and serve stub tests
 │   ├── migration_cli.rs     # Import, config, export and check CLI tests
+│   ├── cli_scripting.rs     # get, list/search --json, alias and exit code tests
 │   ├── watch_capture.rs     # Watch hook, watch capture and polling fallback tests
 │   ├── socket_protocol.rs   # Socket PUSH/PULL/PING, timeouts and stale-socket tests
 │   ├── fakes/           # Fake wl-paste/wl-copy (never touch the real clipboard)
 │   ├── lib.sh           # isolate_env/cleanup for shell suites
-│   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, rcopy, unit)
+│   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, unit; e2e_remote.sh: rcopy, rpaste)
 │   └── integration/     # Shell integration suites
 ├── scripts/
-│   └── rcopy            # Remote copy over the forwarded daemon socket
+│   ├── rcopy            # Remote copy over the forwarded daemon socket
+│   └── rpaste           # Remote paste (needs allow_pull = true)
 └── systemd/
     └── clipstack.service # Systemd user service file
 ```

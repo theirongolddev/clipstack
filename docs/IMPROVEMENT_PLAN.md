@@ -872,9 +872,9 @@ fn exit_code_for(err: &anyhow::Error) -> Exit; // first cause in the chain: CliE
 
 | Command | Behaviour |
 |---------|-----------|
-| `list [-c N] [--json] [--pinned]` | Human output unchanged. `--json` prints a JSON array of `ClipEntry` + `"position"`. Empty history prints `[]` and exits 0 |
+| `list [-c N] [--json] [--pinned]` | Human output unchanged. `--json` prints a JSON array of `ClipEntry` + `"position"`. Empty history prints `[]` and exits 0. `--pinned` keeps each entry's position in the whole history, so `get N` still finds it |
 | `get <REF> [--copy]` | Raw content to stdout, no added newline. `--copy` also runs wl-copy and bumps the entry itself via `ingest(Source::Copy)` (works without a daemon; the watch hook's later bump is a no-op). Missing entry → stderr `no entry for <REF>`, exit 1 |
-| `search <QUERY> [-c N] [--json]` | `Storage::search`. Human output in the same format as `list`. No match → exit 1 (and `[]` with `--json`) |
+| `search <QUERY>... [-c N] [--json]` | `Storage::search` over the words joined by spaces (so `search docker compose` needs no quotes). Human output in the same format as `list`; positions are those in the whole history. No match → exit 1 (and `[]` with `--json`) |
 | `alias <REF> <NAME>` | `set_alias`, pinning if needed. Name rule `^[a-z0-9][a-z0-9_-]{0,31}$`. Conflict → exit 1 `alias @x already used by id:12`. Pin limit → exit 1 |
 | `alias --remove <REF>` | Clears the alias and keeps the pin |
 
@@ -884,7 +884,7 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 - Socket path: `CLIPSTACK_SOCK`, default `$HOME/.clipstack.sock`.
 - Transport preference: `socat - UNIX-CONNECT:$SOCK`, then `nc -U $SOCK` (OpenBSD), then `ncat -U $SOCK`; exit 3 if none is available.
 - `rcopy`: `umask 077; tmp=$(mktemp)`, stdin → tmp, `n=$(wc -c <tmp)`, then `{ printf 'CLIPSTACK/1 PUSH %s\n' "$n"; cat "$tmp"; } | transport`. Parse the first response line; `OK` → exit 0 (print `reason=…` to stderr when `stored=0`), `ERR` → print the message, exit 1. Unreachable socket → exit 3. A trap removes tmp.
-- `rpaste`: `printf 'CLIPSTACK/1 PULL 0\n' | transport | { IFS= read -r hdr; case $hdr in OK*) cat ;; *) echo "${hdr#ERR }" >&2; exit 1 ;; esac; }`. POSIX `read` doesn't over-read from a pipe.
+- `rpaste`: `[ -S "$SOCK" ]` or exit 3, then `printf 'CLIPSTACK/1 PULL 0\n' | transport | { IFS= read -r hdr; case $hdr in OK*) cat ;; ERR*) echo "rpaste: ${hdr#ERR }" >&2; exit 1 ;; "") exit 3 ;; *) exit 1 ;; esac; }`. An empty reply means no daemon behind the socket (a stale forward), so it exits 3 like rcopy. POSIX `read` doesn't over-read from a pipe.
 - SSH setup (README):
   ```
   Host myserver

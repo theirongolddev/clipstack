@@ -1,6 +1,6 @@
 # ClipStack Implementation Specification
 
-> **Historical.** This document describes the old JSON store (`index.json` plus one file per entry, `index.lock`, write-then-rename and `recover`). Since IMPROVEMENT_PLAN Step 1 ClipStack stores its history in SQLite; Since Step 2 the daemon is `src/daemon/` (watch capture, Unix socket) rather than `src/daemon.rs`. See the README and `docs/IMPROVEMENT_PLAN.md` for the current design.
+> **Historical.** This document describes the old JSON store (`index.json` plus one file per entry, `index.lock`, write-then-rename and `recover`). Since IMPROVEMENT_PLAN Step 1 ClipStack stores its history in SQLite; Since Step 2 the daemon is `src/daemon/` (watch capture, Unix socket) rather than `src/daemon.rs`; since Step 3 the CLI is `src/cli.rs` (clap definitions) and `src/commands.rs` (one function per subcommand) rather than `src/main.rs`. See the README and `docs/IMPROVEMENT_PLAN.md` for the current design.
 
 > **Status**: Implementation-Ready
 > **Last Updated**: 2026-01-13
