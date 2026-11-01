@@ -1,6 +1,5 @@
 //! Socket protocol v1: one length-prefixed request and one response per
-//! connection. Std-only, so integration tests and the Step 3 client can
-//! include it with `#[path]`.
+//! connection. Std-only, so integration tests can include it with `#[path]`.
 //!
 //! ```text
 //! request  = "CLIPSTACK/1" SP verb SP length LF body

@@ -1,8 +1,8 @@
 //! Config file: `--config PATH`, else `$XDG_CONFIG_HOME/clipstack/config.toml`.
 //!
 //! Every key is optional. A missing default file means defaults; a missing
-//! `--config` file is an error. Invalid values are config errors (exit 5 in
-//! Step 3), and messages name the bad key or pattern.
+//! `--config` file is an error. Invalid values are config errors (exit code
+//! 5), and messages name the bad key or pattern.
 
 pub use crate::daemon::capture::CaptureMode;
 use crate::storage::IngestPolicy;
@@ -90,7 +90,7 @@ pub enum ConfigSource {
     Defaults(Option<PathBuf>),
 }
 
-/// A bad config file or value. Step 3 maps this to exit code 5.
+/// A bad config file or value (exit code 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError(pub String);
 

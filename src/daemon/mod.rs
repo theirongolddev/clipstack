@@ -175,8 +175,8 @@ impl Daemon {
         }
     }
 
-    /// Stop the daemon
-    #[allow(dead_code)]
+    /// Stop the daemon (the binary stops it through `stop_handle`)
+    #[cfg(test)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }

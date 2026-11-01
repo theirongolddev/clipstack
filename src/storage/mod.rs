@@ -10,7 +10,7 @@ pub use ingest::{DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestOutcome
 
 use std::fmt;
 
-/// Storage failures callers may need to tell apart (exit 4 in Step 3).
+/// Storage failures callers may need to tell apart (`cli::exit_code_for`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
     /// The database was written by a newer ClipStack.
