@@ -23,7 +23,7 @@ use keys::Action;
 use data::{DeletedEntry, PickerData, UNDO_WINDOW, order_pinned_first};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use search::{FilteredEntry, IDLE_POLL, MatchLocation, SearchState, search_timeout};
-use state::{Focus, Mode, PreviewKey, StatusLevel, ViewState};
+use state::{Focus, Mode, PreviewKey, Prompt, StatusLevel, ViewState};
 use std::io::{Stdout, stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -118,11 +118,9 @@ impl Picker {
 
         match self.data.storage.toggle_pin(entry_id) {
             Ok(is_pinned) => {
-                // Update local state
+                // Update local state (unpinning drops the alias)
                 self.data.entries[idx].pinned = is_pinned;
-                if !is_pinned {
-                    self.data.entries[idx].alias = None;
-                }
+                let dropped = if is_pinned { None } else { self.data.entries[idx].alias.take() };
 
                 // Re-sort: pinned entries first
                 self.sort_entries_by_pin();
@@ -131,8 +129,13 @@ impl Picker {
                     self.load_preview();
                 }
 
-                let msg = if is_pinned { "★ Pinned" } else { "Unpinned" };
-                self.view.set_status(msg.to_string(), StatusLevel::Success);
+                match (is_pinned, dropped) {
+                    (true, _) => self.view.set_status("★ Pinned".to_string(), StatusLevel::Success),
+                    (false, Some(alias)) => self
+                        .view
+                        .set_status(format!("Unpinned (alias @{alias} removed)"), StatusLevel::Warning),
+                    (false, None) => self.view.set_status("Unpinned".to_string(), StatusLevel::Success),
+                }
             }
             Err(e) => {
                 self.view.set_status(e.to_string(), StatusLevel::Warning);
@@ -143,6 +146,45 @@ impl Picker {
 
     /// Sort entries: pinned first, each group kept in recency (index) order.
     /// The selection is an entry id, so it follows its entry.
+    /// Save the prompt's alias (pinning the entry), or remove the alias if
+    /// the input is empty. A refused name (invalid, taken, pin limit) shows
+    /// in the status line and leaves the prompt open to fix it.
+    fn submit_alias(&mut self) {
+        let Some(prompt) = &self.view.prompt else {
+            return;
+        };
+        let id = prompt.id;
+        let input = prompt.input.trim();
+        let name = input.strip_prefix('@').unwrap_or(input).to_string();
+        let Some(idx) = self.data.entries.iter().position(|e| e.id == id) else {
+            self.view.prompt = None;
+            return;
+        };
+        let alias = if name.is_empty() { None } else { Some(name.as_str()) };
+        if alias.is_none() && self.data.entries[idx].alias.is_none() {
+            self.view.prompt = None;
+            return;
+        }
+        if let Err(e) = self.data.storage.set_alias(id, alias) {
+            self.view.set_status(e.to_string(), StatusLevel::Warning);
+            return;
+        }
+        self.view.prompt = None;
+        let entry = &mut self.data.entries[idx];
+        match alias {
+            Some(name) => {
+                entry.pinned = true;
+                entry.alias = Some(name.to_string());
+                self.view.set_status(format!("★ Pinned as @{name}"), StatusLevel::Success);
+                self.sort_entries_by_pin();
+            }
+            None => {
+                let old = entry.alias.take().unwrap_or_default();
+                self.view.set_status(format!("Alias @{old} removed (still pinned)"), StatusLevel::Success);
+            }
+        }
+    }
+
     fn sort_entries_by_pin(&mut self) {
         order_pinned_first(&mut self.data.entries);
         self.update_filter();
@@ -385,6 +427,24 @@ impl Picker {
             Action::ScrollBottom => self.view.preview_scroll = self.view.max_preview_scroll(),
             Action::ToggleWhitespace => self.view.show_whitespace = !self.view.show_whitespace,
             Action::ToggleLineNumbers => self.view.show_line_numbers = !self.view.show_line_numbers,
+            Action::OpenAliasPrompt => {
+                if let Some(entry) = self.selected_entry() {
+                    let input = entry.alias.clone().unwrap_or_default();
+                    self.view.prompt = Some(Prompt { id: entry.id, input });
+                }
+            }
+            Action::PromptInput(c) => {
+                if let Some(prompt) = &mut self.view.prompt {
+                    prompt.input.push(c);
+                }
+            }
+            Action::PromptBackspace => {
+                if let Some(prompt) = &mut self.view.prompt {
+                    prompt.input.pop();
+                }
+            }
+            Action::PromptSubmit => self.submit_alias(),
+            Action::PromptCancel => self.view.prompt = None,
         }
         Ok(None)
     }
@@ -637,6 +697,80 @@ pub(super) mod tests {
         assert_eq!(picker.view.mode, Mode::Normal);
         assert_eq!(previews(&picker), vec!["docker ps"], "Esc leaves search mode, the filter stays");
         assert_eq!(press(&mut picker, "q"), Some(Outcome::Cancelled));
+    }
+
+    fn key(picker: &mut Picker, code: KeyCode) -> Option<Outcome> {
+        picker.handle_key(KeyEvent::new(code, KeyModifiers::NONE)).unwrap()
+    }
+
+    fn status(picker: &Picker) -> &str {
+        picker.view.status.as_ref().map_or("", |(msg, _, _)| msg.as_str())
+    }
+
+    #[test]
+    fn alias_prompt_sets_alias_and_pins() {
+        let (_temp, storage) = create_test_storage(&["old", "new"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let id = picker.selected_entry().unwrap().id;
+        press(&mut picker, "P");
+        assert!(picker.view.prompt.is_some(), "P opens the alias prompt");
+        // Every letter is text in the prompt (q does not quit, d does not arm)
+        assert_eq!(press(&mut picker, "@qd-1"), None);
+        key(&mut picker, KeyCode::Enter);
+        assert!(picker.view.prompt.is_none());
+        let entry = picker.data.storage.by_alias("qd-1").unwrap().expect("alias saved");
+        assert_eq!(entry.id, id);
+        assert!(entry.pinned, "naming pins");
+        assert_eq!(picker.selected_entry().map(|e| (e.id, e.alias.as_deref())), Some((id, Some("qd-1"))));
+        assert!(status(&picker).contains("@qd-1"), "{}", status(&picker));
+
+        // Reopening shows the alias; clearing it removes the alias and keeps the pin
+        press(&mut picker, "P");
+        assert_eq!(picker.view.prompt.as_ref().map(|p| p.input.as_str()), Some("qd-1"));
+        for _ in 0..4 {
+            key(&mut picker, KeyCode::Backspace);
+        }
+        key(&mut picker, KeyCode::Enter);
+        let entry = picker.data.storage.get(id).unwrap().unwrap();
+        assert_eq!((entry.alias, entry.pinned), (None, true));
+        assert_eq!(picker.selected_entry().unwrap().alias, None);
+
+        // Esc cancels without saving
+        press(&mut picker, "Pzzz");
+        key(&mut picker, KeyCode::Esc);
+        assert!(picker.view.prompt.is_none());
+        assert_eq!(picker.data.storage.by_alias("zzz").unwrap(), None);
+        assert_eq!(picker.view.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn invalid_alias_shows_error() {
+        let (_temp, storage) = create_test_storage(&["old", "new"]);
+        let mut picker = Picker::new(storage).unwrap();
+        press(&mut picker, "PBad");
+        key(&mut picker, KeyCode::Enter);
+        assert!(picker.view.prompt.is_some(), "the prompt stays open to fix the name");
+        assert!(status(&picker).contains("1-32 characters"), "{}", status(&picker));
+        assert!(!picker.selected_entry().unwrap().pinned, "nothing saved");
+
+        key(&mut picker, KeyCode::Esc);
+        press(&mut picker, "Pwork");
+        key(&mut picker, KeyCode::Enter);
+        press(&mut picker, "jPwork");
+        key(&mut picker, KeyCode::Enter);
+        assert!(status(&picker).contains("already used"), "{}", status(&picker));
+        assert!(picker.view.prompt.is_some());
+    }
+
+    #[test]
+    fn unpin_warns_that_the_alias_goes() {
+        let (_temp, storage) = create_test_storage(&["a"]);
+        let mut picker = Picker::new(storage).unwrap();
+        press(&mut picker, "Pwork");
+        key(&mut picker, KeyCode::Enter);
+        press(&mut picker, "p");
+        assert_eq!(status(&picker), "Unpinned (alias @work removed)");
+        assert_eq!(picker.data.storage.by_alias("work").unwrap(), None);
     }
 
     // ======== Daemon auto-start Tests ========

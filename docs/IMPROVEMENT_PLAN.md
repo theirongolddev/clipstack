@@ -989,7 +989,8 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 **[9] Aliases:**
 - `P` opens `Prompt::Alias` in the search-box area.
 - Enter calls `set_alias`, which pins if needed. Validation and pin-limit errors appear in the status line. Esc cancels.
-- The list shows `@name` in accent colour after the pin star.
+- The list shows `@name` in accent colour where the preview text starts (after the age and size columns, so they stay aligned).
+- The prompt opens with the entry's current alias; an empty input removes it (the pin stays). A refused name keeps the prompt open.
 - Unpinning with `p` warns `Unpinned (alias @x removed)`.
 
 **[10] Edit in `$EDITOR`:**

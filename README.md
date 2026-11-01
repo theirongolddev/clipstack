@@ -279,7 +279,7 @@ Launch with `clipstack` or `clipstack pick`:
 │      3h [  12B] quick text   ││                          │
 │     40d [3.1KB] import React ││                          │
 └──────────────────────────────┘└──────────────────────────┘
-[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit
+[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit
 ```
 
 The picker uses vim-style modal navigation. In normal mode every letter is a command, so typing a word there never filters (or deletes): press `/` first to search.
@@ -294,7 +294,8 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `Ctrl+D` / `Page Down` | Jump down 10 entries |
 | `Ctrl+U` / `Page Up` | Jump up 10 entries |
 | `/` | Enter search mode |
-| `p` | Toggle pin on selected entry (★) |
+| `p` | Toggle pin on selected entry (★); unpinning removes its alias |
+| `P` | Name the selected entry `@name` (pins it); see the alias prompt below |
 | `dd` | Delete selected entry (a single `d` only arms it) |
 | `u` | Undo delete (5 second window) |
 | `Tab` | Enter preview scroll mode |
@@ -312,6 +313,14 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `Esc` | Leave search mode; the filter stays (Backspace it away, or `/` to edit) |
 | `Ctrl+C` | Exit without copying |
 
+**Alias prompt** (after `P`; it replaces the search box):
+| Key | Action |
+|-----|--------|
+| _type_ | The name: 1-32 characters from `a-z`, `0-9`, `_` and `-`, starting with a letter or digit (a leading `@` is ignored); it starts with the entry's current name |
+| `Enter` | Save the name and pin the entry; with the name cleared, remove the alias. A refused name (invalid, taken, 25 entries already pinned) is reported in the status line and the prompt stays open |
+| `Esc` | Cancel |
+| `Ctrl+C` | Exit without copying |
+
 **Preview Mode** (after pressing `Tab`):
 | Key | Action |
 |-----|--------|
@@ -326,7 +335,7 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 
 **Visual Features:**
 - Mode indicator shows `[NORMAL]`, `[SEARCH]`, or `[PREVIEW]` in status bar
-- Pinned entries show `★` indicator and appear at the top of the list
+- Pinned entries show `★` indicator and appear at the top of the list; named ones show `@name` in green
 - Matched characters highlighted in **yellow** during fuzzy search
 - `[content]` indicator for matches found in full content (not just preview)
 - Scrollbar shows position in long lists
@@ -357,7 +366,8 @@ Pin frequently-used text to protect it from automatic pruning:
 - Pinned entries always appear at the top of the list (most recently used first)
 - Maximum 25 pinned entries allowed
 - Pinned entries survive when the history limit is exceeded
-- Name a pinned entry with `clipstack alias REF NAME` and print it with `clipstack get @NAME` (see [Scripting](#scripting)); unpinning removes the name
+- Press `P` to name the selected entry (pinning it); the list shows the name as `@name` before the preview text. Clear the name in the prompt to remove it (the entry stays pinned). From the shell: `clipstack alias REF NAME`, then `clipstack get @NAME` (see [Scripting](#scripting))
+- Unpinning removes the name; the picker warns `Unpinned (alias @name removed)`
 - Re-copying pinned content moves it to the top while preserving pin status
 
 ## Running the Daemon
@@ -1026,7 +1036,14 @@ clipstack/
 │   │   ├── capture.rs   # wl-paste --watch supervisor, watch hook, polling fallback
 │   │   └── socket.rs    # Unix socket server (PUSH/PULL/PING)
 │   ├── perms.rs         # Private (0700/0600) storage permissions
-│   ├── picker.rs        # TUI history picker
+│   ├── picker/          # TUI history picker
+│   │   ├── mod.rs       # Picker: actions, event loop, terminal setup, pick_and_paste
+│   │   ├── data.rs      # Entries, content cache, undo
+│   │   ├── state.rs     # View state: mode, focus, selection (by id), prompt, toggles
+│   │   ├── search.rs    # Fuzzy preview match + full-content search, debounce
+│   │   ├── keys.rs      # map_key: key -> action (pure)
+│   │   ├── render.rs    # Drawing
+│   │   └── text.rs      # Wrapping by display width, whitespace, line numbers, ages
 │   ├── protocol.rs      # Socket protocol v1 framing
 │   ├── storage/         # SQLite storage
 │   │   ├── mod.rs       # Storage: open, pin/alias/delete/clear, check

@@ -4,6 +4,8 @@
 //! `d` only arms delete (`dd` deletes).
 
 use super::state::{Focus, Mode, ViewState};
+#[cfg(test)]
+use super::state::Prompt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a key press asks the picker to do.
@@ -36,12 +38,20 @@ pub enum Action {
     ScrollBottom,
     ToggleWhitespace,
     ToggleLineNumbers,
+    OpenAliasPrompt,
+    PromptInput(char),
+    PromptBackspace,
+    PromptSubmit,
+    PromptCancel,
 }
 
 /// The action for `key` in the current mode and focus.
 pub fn map_key(view: &ViewState, key: KeyEvent) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::Quit;
+    }
+    if view.prompt.is_some() {
+        return prompt_key(key);
     }
     match (view.mode, view.focus) {
         (Mode::Search, _) => search_key(key),
@@ -89,6 +99,7 @@ fn list_key(pending: Option<char>, key: KeyEvent) -> Action {
         (_, Some(p @ ('g' | 'd'))) => Action::Pending(p),
         (_, Some('/')) => Action::EnterSearch,
         (_, Some('p')) => Action::TogglePin,
+        (_, Some('P')) => Action::OpenAliasPrompt,
         (_, Some('u')) => Action::Undo,
         _ => Action::None,
     }
@@ -113,6 +124,17 @@ fn search_key(key: KeyEvent) -> Action {
 }
 
 /// Normal mode, preview focus: scrolling.
+/// The alias prompt: every printable key is text.
+fn prompt_key(key: KeyEvent) -> Action {
+    match (key.code, plain(key)) {
+        (KeyCode::Enter, _) => Action::PromptSubmit,
+        (KeyCode::Esc, _) => Action::PromptCancel,
+        (KeyCode::Backspace, _) => Action::PromptBackspace,
+        (KeyCode::Char(_), Some(c)) => Action::PromptInput(c),
+        _ => Action::None,
+    }
+}
+
 fn preview_key(key: KeyEvent) -> Action {
     match (key.code, plain(key)) {
         (KeyCode::Tab | KeyCode::Esc, _) | (_, Some('q')) => Action::FocusList,
@@ -192,6 +214,22 @@ mod tests {
         assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('w')), Action::SearchInput('w'));
         assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('n')), Action::SearchInput('n'));
         assert_eq!(map_key(&preview, ctrl('w')), Action::None);
+    }
+
+    #[test]
+    fn shift_p_opens_alias_prompt_and_prompt_keys_are_text() {
+        assert_eq!(map_key(&view(Mode::Normal, Focus::List), ch('P')), Action::OpenAliasPrompt);
+        assert_eq!(map_key(&view(Mode::Normal, Focus::Preview), ch('P')), Action::None);
+        let mut prompt = view(Mode::Normal, Focus::List);
+        prompt.prompt = Some(Prompt { id: 1, input: String::new() });
+        for c in "qdPpj@-_".chars() {
+            assert_eq!(map_key(&prompt, ch(c)), Action::PromptInput(c), "{c:?}");
+        }
+        assert_eq!(map_key(&prompt, key(KeyCode::Enter)), Action::PromptSubmit);
+        assert_eq!(map_key(&prompt, key(KeyCode::Esc)), Action::PromptCancel);
+        assert_eq!(map_key(&prompt, key(KeyCode::Backspace)), Action::PromptBackspace);
+        assert_eq!(map_key(&prompt, key(KeyCode::Tab)), Action::None);
+        assert_eq!(map_key(&prompt, ctrl('c')), Action::Quit);
     }
 
     #[test]

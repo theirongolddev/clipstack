@@ -26,6 +26,13 @@ pub enum StatusLevel {
     Warning,
 }
 
+/// The alias prompt (`P`): it names entry `id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prompt {
+    pub id: EntryId,
+    pub input: String,
+}
+
 /// The inputs `ViewState::preview_lines` was laid out from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewKey {
@@ -59,6 +66,8 @@ pub struct ViewState {
     pub show_line_numbers: bool,
     /// Rows inside the preview border (set at each render)
     pub preview_height: u16,
+    /// Open alias prompt; it takes every key until Enter or Esc
+    pub prompt: Option<Prompt>,
 }
 
 impl Default for ViewState {
@@ -77,6 +86,7 @@ impl Default for ViewState {
             preview_key: None,
             show_whitespace: false,
             show_line_numbers: false,
+            prompt: None,
             preview_height: 10, // Updated dynamically during render
         }
     }

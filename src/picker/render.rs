@@ -48,6 +48,16 @@ impl Picker {
     }
 
     fn render_search_box(&self, frame: &mut Frame, area: Rect) {
+        if let Some(prompt) = &self.view.prompt {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Alias (Enter: save and pin, empty: remove, Esc: cancel)")
+                .border_style(Style::default().fg(Color::Green));
+            frame.render_widget(Paragraph::new(format!("@{}", prompt.input)).block(block), area);
+            let width = u16::try_from(prompt.input.chars().count() + 1).unwrap_or(u16::MAX);
+            frame.set_cursor_position((area.x.saturating_add(1).saturating_add(width), area.y + 1));
+            return;
+        }
         let title = match self.view.mode {
             Mode::Search => "Search (Esc: stop typing, Enter: copy)",
             Mode::Normal => "Search (/ to search)",
@@ -116,6 +126,13 @@ impl Picker {
                 // Add [content] indicator for deep matches
                 if is_content_match {
                     spans.push(Span::styled("[content] ", Style::default().fg(Color::Magenta)));
+                }
+
+                if let Some(alias) = &entry.alias {
+                    spans.push(Span::styled(
+                        format!("@{alias} "),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ));
                 }
 
                 spans.extend(preview_spans);
@@ -234,13 +251,16 @@ impl Picker {
 
     /// Key help for the status line, based on focus and mode
     pub(super) fn help_text(&self) -> String {
+        if self.view.prompt.is_some() {
+            return "[ALIAS] a-z 0-9 _ - (start with a letter or digit)  Enter:Save  Esc:Cancel".to_string();
+        }
         match (self.view.mode, self.view.focus) {
             (Mode::Search, _) => "[SEARCH] type to filter  ↑/↓:Nav  Enter:Copy  Esc:Done".to_string(),
             (Mode::Normal, Focus::Preview) => {
                 "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  w:Whitespace  n:Numbers  Tab/Esc/q:Back".to_string()
             }
             (Mode::Normal, Focus::List) => {
-                "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit".to_string()
+                "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit".to_string()
             }
         }
     }
@@ -411,6 +431,31 @@ mod tests {
         assert!(columns.iter().all(|&c| c == columns[0]), "size column moves: {list:#?}");
         let ages: Vec<String> = list.iter().map(|r| r.chars().skip(columns[0] - 5).take(4).collect()).collect();
         assert_eq!(ages, ["  5s", " 12m", "  3h", " 40d", "999d"]);
+    }
+
+    #[test]
+    fn list_shows_alias() {
+        let (_temp, storage) = create_test_storage(&["plain", "named"]);
+        let id = storage.nth(1).unwrap().unwrap().id;
+        storage.set_alias(id, Some("work")).unwrap();
+        let mut picker = Picker::new(storage).unwrap();
+        let rows = draw(&mut picker, 120);
+        let row = rows.iter().find(|r| r.contains("named")).unwrap();
+        assert!(row.contains("★ 999d [   5B] @work named"), "the alias leads the preview text: {row}");
+        let plain = rows.iter().find(|r| r.contains("plain") && !r.contains("named")).unwrap();
+        assert!(!plain.contains('@'), "{plain}");
+    }
+
+    #[test]
+    fn alias_prompt_replaces_the_search_box() {
+        let (_temp, storage) = create_test_storage(&["a"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.apply(super::super::keys::Action::OpenAliasPrompt).unwrap();
+        picker.apply(super::super::keys::Action::PromptInput('x')).unwrap();
+        let rows = draw(&mut picker, 120);
+        assert!(rows[0].contains("Alias"), "{}", rows[0]);
+        assert!(rows[1].contains("@x"), "{}", rows[1]);
+        assert!(picker.help_text().contains("[ALIAS]"));
     }
 
     #[test]
