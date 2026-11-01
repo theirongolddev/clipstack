@@ -387,10 +387,7 @@ fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 /// `SQLITE_BUSY`/`SQLITE_LOCKED`: another connection holds the lock.
 fn is_busy(err: &anyhow::Error) -> bool {
-    matches!(
-        err.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code),
-        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-    )
+    err.downcast_ref::<rusqlite::Error>().is_some_and(schema::is_busy)
 }
 
 /// After a deleting write: move the WAL into the database and truncate it
@@ -745,6 +742,73 @@ mod tests {
         let bytes = db_file_bytes(&storage);
         assert!(!contains(&bytes, "LARGESECRET-b42d"), "cleared entry left plaintext");
         assert!(!contains(&bytes, "ordinary text"));
+    }
+
+    #[test]
+    fn test_concurrent_writers_lose_no_updates() {
+        // Separate Storage handles model separate processes (daemon, picker,
+        // serve) each with their own connection.
+        let dir = tempfile::TempDir::new().unwrap();
+        open(&dir, None);
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let base = dir.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let storage = Storage::open(base, None, IngestPolicy::default()).unwrap();
+                    for i in 0..10 {
+                        storage.ingest(&format!("writer {t} item {i}"), Source::Copy, &[]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(entry_count(&open(&dir, None)), 80, "every concurrent save must survive");
+    }
+
+    #[test]
+    fn test_concurrent_saves_dont_corrupt() {
+        let (storage, _dir) = test_storage();
+        let storage = std::sync::Arc::new(storage);
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let storage = std::sync::Arc::clone(&storage);
+                std::thread::spawn(move || {
+                    storage.ingest(&format!("thread {i} content"), Source::Copy, &[]).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(entry_count(&storage), 10, "no concurrent save may be lost");
+        let check: String =
+            storage.with_conn(|c| c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap());
+        assert_eq!(check, "ok");
+    }
+
+    #[test]
+    fn concurrent_first_open_creates_schema_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let base = dir.path().to_path_buf();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let storage = Storage::open(base, Some(50), IngestPolicy::default()).unwrap();
+                    storage.ingest(&format!("first open {t}"), Source::Copy, &[]).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let storage = open(&dir, None);
+        assert_eq!(entry_count(&storage), 8);
+        assert_eq!(storage.max_entries(), 50);
     }
 
     #[test]

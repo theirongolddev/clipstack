@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Newest schema this binary understands (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: i64 = 1;
@@ -74,10 +74,7 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
     // longer be enabled without a VACUUM. On an existing file this is a no-op.
     conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
 
-    let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        anyhow::bail!("Failed to enable WAL mode on {path:?} (got {mode})");
-    }
+    enable_wal(&conn, path)?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "secure_delete", "ON")?;
     conn.pragma_update(None, "trusted_schema", "OFF")?;
@@ -86,6 +83,34 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
 
     apply_migrations(&mut conn).with_context(|| format!("Failed to migrate database: {path:?}"))?;
     Ok(conn)
+}
+
+/// `SQLITE_BUSY`/`SQLITE_LOCKED`: another connection holds the lock.
+pub(super) fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// `journal_mode = WAL`. Switching a new file to WAL needs an exclusive lock
+/// and SQLite fails at once (no busy handler) while another process is
+/// opening the same file, so retry until `BUSY_TIMEOUT`. On a file that is
+/// already WAL this succeeds first time.
+fn enable_wal(conn: &Connection, path: &Path) -> Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) => anyhow::bail!("Failed to enable WAL mode on {path:?} (got {mode})"),
+            Err(e) if is_busy(&e) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to enable WAL mode on {path:?}"));
+            }
+        }
+    }
 }
 
 /// `<db>-wal` and `<db>-shm`, which SQLite creates next to the database.
