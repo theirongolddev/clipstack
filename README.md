@@ -526,7 +526,7 @@ This helps diagnose issues with:
 - **Daemon not running**: Entries won't be saved automatically
 - **Wayland not detected**: ClipStack requires a Wayland session
 - **Storage issues**: Shows where data is stored and current usage
-- **Unexpected limit**: Shows where the entry limit comes from: `--max-entries`, `CLIPSTACK_MAX_ENTRIES`, `saved` (from the index), or `default`
+- **Unexpected limit**: Shows where the entry limit comes from: `cli` (`--max-entries`), `env` (`CLIPSTACK_MAX_ENTRIES`), `saved` (from the index), or `default`
 
 ## Architecture
 

@@ -260,8 +260,8 @@ impl LimitSource {
     /// `index_exists`: whether a stored limit could have come from index.json
     fn label(self, index_exists: bool) -> &'static str {
         match self {
-            LimitSource::Cli => "--max-entries",
-            LimitSource::Env => "CLIPSTACK_MAX_ENTRIES",
+            LimitSource::Cli => "cli",
+            LimitSource::Env => "env",
             LimitSource::Stored if index_exists => "saved",
             LimitSource::Stored => "default",
         }
@@ -475,8 +475,8 @@ mod tests {
     fn test_limit_label_distinguishes_saved_from_default() {
         assert_eq!(LimitSource::Stored.label(true), "saved");
         assert_eq!(LimitSource::Stored.label(false), "default");
-        assert_eq!(LimitSource::Cli.label(false), "--max-entries");
-        assert_eq!(LimitSource::Env.label(true), "CLIPSTACK_MAX_ENTRIES");
+        assert_eq!(LimitSource::Cli.label(false), "cli");
+        assert_eq!(LimitSource::Env.label(true), "env");
     }
 
     #[test]
