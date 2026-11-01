@@ -168,23 +168,38 @@ fn resolve(storage: &Storage, reference: &EntryRef) -> Result<ClipEntry> {
 /// is written as PNG bytes, but never to a terminal (exit 2); with `--copy`
 /// it is copied as `image/png` and not written. `--image-path` prints the
 /// path of the image's cached file instead (exit 1 for text).
-pub fn get(storage: &Storage, reference: &EntryRef, copy: bool, image_path: bool) -> Result<()> {
+/// `--paste` (which implies `copy`) then types `[picker] paste_keys` with
+/// wtype, as `pick --paste` does.
+pub fn get(storage: &Storage, reference: &EntryRef, get: Get, picker: &config::PickerConfig) -> Result<()> {
     let entry = resolve(storage, reference)?;
-    if image_path {
+    if get.image_path {
         let path = image_cache::ensure(storage, &entry)?;
         return write_stdout(format!("{}\n", path.display()).as_bytes());
     }
     if entry.kind == Kind::Image {
-        return get_image(storage, &entry, reference, copy);
-    }
-    let content = storage.load_content(entry.id)?;
-    if copy {
-        clipboard::Clipboard::system().copy(&content)?;
-        if let IngestOutcome::Skipped(reason) = storage.ingest(&content, Source::Copy, &[])? {
-            eprintln!("Copied, but not kept in the history: {}", storage.policy().describe_skip(&reason));
+        get_image(storage, &entry, reference, get.copy)?;
+    } else {
+        let content = storage.load_content(entry.id)?;
+        if get.copy {
+            clipboard::Clipboard::system().copy(&content)?;
+            if let IngestOutcome::Skipped(reason) = storage.ingest(&content, Source::Copy, &[])? {
+                eprintln!("Copied, but not kept in the history: {}", storage.policy().describe_skip(&reason));
+            }
         }
+        write_stdout(content.as_bytes())?;
     }
-    write_stdout(content.as_bytes())
+    if get.paste {
+        paste_into_focused_window(picker)?;
+    }
+    Ok(())
+}
+
+/// `get` flags.
+#[derive(Debug, Clone, Copy)]
+pub struct Get {
+    pub copy: bool,
+    pub paste: bool,
+    pub image_path: bool,
 }
 
 /// `get` of an image entry: copy it as `image/png`, or write the PNG to a
@@ -287,15 +302,49 @@ pub fn pick(storage: Storage, config: &config::PickerConfig, paste: bool) -> Res
     };
     clipboard::Clipboard::system().copy(&content)?;
     eprintln!("Copied {} bytes to clipboard", content.len());
-    if !paste {
-        return Ok(());
+    if paste {
+        paste_into_focused_window(config)?;
     }
+    Ok(())
+}
+
+/// Type `[picker] paste_keys` with wtype, detached and after a short delay,
+/// so the paste lands in the window that had focus. Without wtype this only
+/// says so: the content is already on the clipboard.
+fn paste_into_focused_window(config: &config::PickerConfig) -> Result<()> {
     let argv = crate::picker::paste_command(&config.paste_keys).map_err(|e| config::ConfigError(format!("[picker] {e}")))?;
     let args = argv.split_first().map_or(&[][..], |(_wtype, args)| args);
     let path = std::env::var_os("PATH").unwrap_or_default();
     match util::find_in_path("wtype", &path) {
         Some(wtype) => crate::picker::spawn_paste(&wtype, args).context("cannot start wtype")?,
         None => eprintln!("wtype not found: copied but not pasted (install wtype for --paste)"),
+    }
+    Ok(())
+}
+
+/// `edit REF`: edit a text entry in `$VISUAL`/`$EDITOR` (as the picker's
+/// `e` does: a 0600 file in the runtime dir, removed afterwards). Changed
+/// text is saved as a new entry (source `edit`) and copied; the original
+/// stays. Unchanged text, or a failed editor, changes nothing (exit 0).
+pub fn edit(storage: &Storage, reference: &EntryRef) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    let content = storage.load_content(entry.id)?;
+    let dir = daemon::runtime_dir()?;
+    let env = |name| std::env::var(name).ok();
+    let editor = crate::picker::choose_editor(env("VISUAL").as_deref(), env("EDITOR").as_deref());
+    let Some(text) = crate::picker::edit_in_editor(&content, &editor, &dir, entry.id)? else {
+        eprintln!("Edit: not changed (unchanged, empty, or the editor failed)");
+        return Ok(());
+    };
+    clipboard::Clipboard::system().copy(&text)?;
+    match storage.ingest(&text, Source::Edit, &[])? {
+        IngestOutcome::Inserted(saved) | IngestOutcome::Bumped(saved) => {
+            eprintln!("Saved the edited text as id:{} and copied it", saved.id);
+        }
+        IngestOutcome::Skipped(reason) => eprintln!(
+            "Copied the edited text (not saved to history: {})",
+            storage.policy().describe_skip(&reason)
+        ),
     }
     Ok(())
 }

@@ -10,6 +10,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
+use std::time::Duration;
 
 /// Run `clipstack <args>` to completion, feeding `stdin` if given.
 fn run(env: &TestEnv, args: &[&str], stdin: Option<&str>) -> Output {
@@ -199,3 +200,89 @@ fn image_path_prunes_files_of_entries_that_are_gone() {
     assert!(dir.join("notes.txt").exists(), "only <id>.png files are touched");
 }
 
+#[test]
+fn image_commands_refuse_text_and_edit_refuses_images() {
+    let env = TestEnv::new();
+    env.put_image(&test_png(4, 4, b"img"));
+    let out = run(&env, &["edit", "1"], None);
+    assert_eq!(code(&out), 1);
+    assert!(stderr(&out).contains("is an image, not text"), "{}", stderr(&out));
+    // Usage errors from clap
+    assert_eq!(code(&run(&env, &["get", "1", "--image-path", "--copy"], None)), 2);
+}
+
+#[test]
+fn edit_saves_and_copies_changed_text() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("draft"));
+    let out = env
+        .cmd()
+        .args(["edit", "1"])
+        .env("VISUAL", "sh -c 'printf final > \"$1\"' --")
+        .output()
+        .unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(env.clipboard_content().as_deref(), Some("final"));
+    let entries = list(&env);
+    assert_eq!((entries[0]["preview"].as_str(), entries[0]["source"].as_str()), (Some("final"), Some("edit")));
+    assert_eq!(entries[1]["preview"], "draft", "the original stays");
+    // The edit file is gone from the runtime dir
+    let left: Vec<_> = std::fs::read_dir(&env.runtime_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("clipstack-edit-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    // Unchanged: nothing saved or copied, still exit 0
+    env.set_clipboard("other", &["text/plain"]);
+    let out = env.cmd().args(["edit", "1"]).env("VISUAL", "true").output().unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("not changed"), "{}", stderr(&out));
+    assert_eq!(env.clipboard_content().as_deref(), Some("other"));
+    assert_eq!(list(&env).len(), 2);
+}
+
+#[test]
+fn get_paste_copies_then_types_the_paste_keys() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("first"));
+    ok(&env, &["copy"], Some("second"));
+    env.set_clipboard("something else", &["text/plain"]);
+
+    ok(&env, &["get", "2", "--paste"], None);
+    assert_eq!(env.clipboard_content().as_deref(), Some("first"));
+    let calls = env.fake_clip_dir.join("wtype.calls");
+    assert!(common::wait_until(Duration::from_secs(5), || {
+        std::fs::read_to_string(&calls).is_ok_and(|c| c.ends_with('\n'))
+    }));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), "-M shift -k Insert -m shift\n");
+
+    // Images paste too, as image/png
+    let png = test_png(3, 3, b"paste");
+    env.put_image(&png);
+    std::fs::remove_file(&calls).unwrap();
+    let out = ok(&env, &["get", "1", "--paste"], None);
+    assert!(out.stdout.is_empty());
+    assert_eq!(std::fs::read(env.fake_clip_dir.join("content")).unwrap(), png);
+    assert!(common::wait_until(Duration::from_secs(5), || calls.exists()), "wtype never ran");
+}
+
+#[test]
+fn help_and_completions_cover_the_new_commands() {
+    let env = TestEnv::new();
+    let help = stdout(&ok(&env, &["--help"], None));
+    for command in ["pin", "unpin", "delete", "edit"] {
+        assert!(help.lines().any(|l| l.trim_start().starts_with(command)), "{command} missing from --help:\n{help}");
+    }
+    let get_help = stdout(&ok(&env, &["get", "--help"], None));
+    for flag in ["--copy", "--paste", "--image-path"] {
+        assert!(get_help.contains(flag), "{flag} missing from get --help:\n{get_help}");
+    }
+    for shell in ["bash", "zsh", "fish"] {
+        let script = stdout(&ok(&env, &["completions", shell], None));
+        for word in ["unpin", "delete", "edit", "image-path"] {
+            assert!(script.contains(word), "{shell} completions lack {word}");
+        }
+    }
+}

@@ -89,10 +89,22 @@ pub enum Commands {
         #[arg(long)]
         copy: bool,
 
+        /// Copy it, then paste it into the window that had focus (needs
+        /// wtype; keys from `[picker] paste_keys`)
+        #[arg(long)]
+        paste: bool,
+
         /// Images only: write the PNG to <runtime dir>/clipstack-images/<id>.png
         /// (if it isn't there yet) and print that path
-        #[arg(long, conflicts_with = "copy")]
+        #[arg(long, conflicts_with_all = ["copy", "paste"])]
         image_path: bool,
+    },
+
+    /// Edit a text entry in $VISUAL or $EDITOR; changed text is saved as a new entry and copied
+    Edit {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
     },
 
     /// Pin an entry so the entry limit and retention never remove it

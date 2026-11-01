@@ -76,7 +76,11 @@ fn run(cli: Cli) -> Result<()> {
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count, json, pinned }) => commands::list(&storage, count, json, pinned),
         Some(Commands::Search { query, count, json }) => commands::search(&storage, &query.join(" "), count, json),
-        Some(Commands::Get { entry, copy, image_path }) => commands::get(&storage, &entry, copy, image_path),
+        Some(Commands::Get { entry, copy, paste, image_path }) => {
+            let get = commands::Get { copy: copy || paste, paste, image_path };
+            commands::get(&storage, &entry, get, &config.picker)
+        }
+        Some(Commands::Edit { entry }) => commands::edit(&storage, &entry),
         Some(Commands::Pin { entry }) => commands::pin(&storage, &entry),
         Some(Commands::Unpin { entry }) => commands::unpin(&storage, &entry),
         Some(Commands::Delete { entry }) => commands::delete(&storage, &entry),

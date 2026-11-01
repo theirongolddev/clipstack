@@ -2,7 +2,7 @@
 //! `search` the filter, `keys` the key handling and `render` the drawing.
 
 mod actions;
-pub use actions::{paste_command, spawn_paste};
+pub use actions::{choose_editor, edit_in_editor, paste_command, spawn_paste};
 mod data;
 mod keys;
 mod render;
