@@ -168,7 +168,7 @@ Item {
           textFormat: Text.PlainText
           font.family: reader.c.sans
           font.pixelSize: 12
-          color: reader.ov.searching ? reader.c.accent : reader.c.muted
+          color: reader.ov.searching ? reader.c.accentText : reader.c.muted
         }
       }
 

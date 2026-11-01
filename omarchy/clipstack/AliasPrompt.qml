@@ -102,8 +102,8 @@ Rectangle {
       Text {
         id: hint
         textFormat: Text.StyledText
-        text: "Lowercase letters, digits, <font face=\"" + prompt.c.mono + "\" color=\"#CFCFDA\">-</font> and "
-          + "<font face=\"" + prompt.c.mono + "\" color=\"#CFCFDA\">_</font>"
+        text: "Lowercase letters, digits, <font face=\"" + prompt.c.mono + "\" color=\"" + prompt.c.rowText + "\">-</font> and "
+          + "<font face=\"" + prompt.c.mono + "\" color=\"" + prompt.c.rowText + "\">_</font>"
         font.family: prompt.c.sans
         font.pixelSize: 12
         color: prompt.c.metaText

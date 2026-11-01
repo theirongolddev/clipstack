@@ -23,7 +23,7 @@ Rectangle {
   Rectangle {
     anchors.fill: parent
     radius: parent.radius
-    color: "white"
+    color: button.c.buttonHover
     opacity: hover.containsMouse ? 0.06 : 0
   }
 

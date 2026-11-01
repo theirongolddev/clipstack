@@ -84,7 +84,7 @@ Rectangle {
         textFormat: Text.PlainText
         font.family: box.c.mono
         font.pixelSize: box.fontSize
-        color: line.hit ? box.c.accent : box.c.lineNumber
+        color: line.hit ? box.c.accentText : box.c.lineNumber
       }
 
       Text {
@@ -114,7 +114,7 @@ Rectangle {
         textFormat: Text.RichText
         text: line.rich
           ? "<span style=\"white-space:pre-wrap\">" + Logic.codeHtml(line.shown, box.ov.query, box.tint, {
-              keyword: box.c.accent,
+              keyword: box.c.keyword,
               literal: box.c.literal,
               mark: line.hit ? box.c.markCodeLine : box.c.markCode,
               markText: box.c.searchText

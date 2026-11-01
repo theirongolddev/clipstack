@@ -1,17 +1,38 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
+import qs.Commons as Commons
 import "plugin"
 
 // Headless render of the four design states (C1 browse, C2 search, C3
 // image, C4 alias) against tests/fake-clipstack, for comparing with the
-// boards. scripts/test-overlay.sh --render copies the plugin next to this
-// file (Quickshell only imports from inside its config dir) and runs it with
-// QT_QPA_PLATFORM=offscreen; it never touches the live shell.
+// boards. scripts/test-overlay.sh --render copies the plugin and omarchy's
+// Commons next to this file (Quickshell only imports from inside its config
+// dir) and runs it with QT_QPA_PLATFORM=offscreen; it never touches the live
+// shell. The theme is whatever Commons loaded from the (temp) HOME; with
+// RENDER_SWITCH_THEME set, it then loads that theme dir the way the shell's
+// applyTheme IPC does and draws C1 again: the overlay follows a theme switch
+// without a restart.
 ShellRoot {
   id: shellRoot
 
   readonly property string outDir: Quickshell.env("RENDER_OUT")
+  readonly property string switchTheme: Quickshell.env("RENDER_SWITCH_THEME") || ""
   property int step: 0
+
+  FileView {
+    id: switchColors
+    path: shellRoot.switchTheme !== "" ? shellRoot.switchTheme + "/colors.toml" : ""
+    blockLoading: true
+    printErrors: false
+  }
+
+  FileView {
+    id: switchShell
+    path: shellRoot.switchTheme !== "" ? shellRoot.switchTheme + "/shell.toml" : ""
+    blockLoading: true
+    printErrors: false
+  }
 
   Store {
     id: store
@@ -123,6 +144,18 @@ ShellRoot {
         shellRoot.grab("C4-alias-taken");
         break;
       case 15:
+        store.cancelAlias();
+        if (shellRoot.switchTheme === "") {
+          Qt.quit();
+          break;
+        }
+        Commons.Color.loadColors(switchColors.text());
+        Commons.Color.loadShell(switchShell.loaded ? switchShell.text() : "");
+        break;
+      case 16:
+        shellRoot.grab("C1-browse-switched");
+        break;
+      case 17:
         Qt.quit();
         break;
       }

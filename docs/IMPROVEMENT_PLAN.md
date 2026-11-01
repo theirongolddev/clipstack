@@ -1190,8 +1190,10 @@ evicted by `max_entries` or `max_total_bytes`).
 > `scripts/test-overlay.sh` (node tests, `qmllint --max-warnings 0`, `omarchy plugin
 > validate`, the install script against fake omarchy commands, headless interaction
 > checks of Store/CliCall; `--render` draws C1-C4 headless against
-> `tests/fake-clipstack`). The live shell test (focus, paste into the previous
-> window, edit launcher) is still to do.
+> `tests/fake-clipstack` with omarchy's real Commons, once in the current theme
+> and once in flexoki-light, plus a live switch between them). The live shell
+> test (focus, paste into the previous window, edit launcher, a real
+> `omarchy theme set`) is still to do.
 
 - Manifest: id `solsystemlabs.clipstack`, kind `overlay`, `keepLoaded: true`, entry
   point `Overlay.qml`. Validated with `omarchy plugin validate`.
@@ -1214,8 +1216,17 @@ evicted by `max_entries` or `max_total_bytes`).
   double-click pastes.
 - Groups: PINNED, TODAY, YESTERDAY, EARLIER; while searching, one MATCHES group
   with the query highlighted in each row. Footer: `N clips · P pinned`.
-- Look: the C palette (accent `#A9B4FF`), Noto Sans / JetBrains Mono, panel
-  1040x620 centred over a dimmed scrim. No `Commons.Color.menu` tokens.
+- Look: the C layout (panel 1040x620 centred over a dimmed scrim, Noto Sans /
+  JetBrains Mono) in the colours of the current omarchy theme. `Colors.qml` is
+  the one place that maps them: the card, its border and the scrim are the
+  theme's `Commons.Color.menu` tokens (as for the built-in clipboard picker);
+  text, accent and urgent come from `Commons.Color`, and the other surfaces are
+  tints mixed from those (selected row = accent over the background, text in
+  the accent lifted toward the text colour until it reads at 4.5:1, Paste
+  text in whichever of background or text contrasts more with the accent,
+  code literals in the accent's complementary hue). The shell reloads
+  `Commons.Color` on `omarchy theme set`, so the overlay follows a theme switch
+  without a restart. Themes set no font families, so the fonts stay.
 - Pure logic (grouping, relative age, highlight spans, key map, alias validation)
   lives in `Logic.js` with node unit tests (`omarchy/clipstack/tests/*.test.mjs`,
   run by `scripts/test-overlay.sh`); QML is checked with `qmllint`. Manual and render
