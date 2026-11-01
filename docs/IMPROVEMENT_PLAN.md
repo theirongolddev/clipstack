@@ -1201,7 +1201,9 @@ evicted by `max_entries` or `max_total_bytes`).
   digit first, as the CLI does, live, and flags a name another entry has); Ctrl+E `omarchy-launch-tui --app-id=org.omarchy.clipstack clipstack edit id:N`
   (overlay closes); Ctrl+Backspace `delete`. An action waits until the list shows
   the previous one's result, and a held key never repeats paste, copy, edit or
-  alias (holding Enter to save an alias must not then paste). Every action is also a button with its
+  alias (holding Enter to save an alias must not then paste). Keys typed ahead
+  of the rows wait for them: Enter right after typing acts on the search's top
+  match, and Down Enter right after opening on the fresh list's second row. Every action is also a button with its
   shortcut shown; mouse click selects, double-click pastes.
 - Groups: PINNED, TODAY, YESTERDAY, EARLIER; while searching, one MATCHES group
   with the query highlighted in each row. Footer: `N clips · P pinned`.

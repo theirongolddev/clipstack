@@ -200,6 +200,42 @@ ShellRoot {
           JSON.stringify(store.rows.map(function (r) { return r.id; })));
         store.setQuery("");
       }],
+      [600, function () {
+        store.select(shellRoot.rowIndex(9));
+        shellRoot.sh(": > \"$1/calls.log\"");
+      }],
+      [200, function () {
+        // Enter right after typing, before the search has answered
+        store.setQuery("dock");
+        store.act("copy");
+      }],
+      [800, function () {
+        shellRoot.sh("cat \"$1/calls.log\"", function (log) {
+          shellRoot.check("an action typed ahead of the search acts on its top match",
+            /^get id:4 --copy/m.test(log), JSON.stringify(log));
+        });
+      }],
+      [300, function () {
+        // A clip pinned while the overlay was closed: the fresh list starts
+        // 11, 2 (devbox), 1 (sig); the last one listed 2, 1
+        const entry = { id: 11, created_at: Date.now(), last_used: Date.now(), size: 3, kind: "text",
+          preview: "new", pinned: true, alias: null };
+        shellRoot.sh("printf new >\"$1/content/11\" && jq --argjson e \"$2\" '. + [$e]' \"$1/entries.json\""
+          + " >\"$1/e.tmp\" && mv \"$1/e.tmp\" \"$1/entries.json\" && : > \"$1/calls.log\"", null,
+          [JSON.stringify(entry)]);
+      }],
+      [300, function () {
+        // Open, Down, Enter before the list has answered
+        store.open("{}");
+        store.move("down", 10);
+        store.act("copy");
+      }],
+      [800, function () {
+        shellRoot.sh("cat \"$1/calls.log\"", function (log) {
+          shellRoot.check("keys typed ahead of the list act on the fresh list (second row: id 2)",
+            /^get id:2 --copy/m.test(log), JSON.stringify(log));
+        });
+      }],
     ];
     stepTimer.interval = 1;
     stepTimer.start();

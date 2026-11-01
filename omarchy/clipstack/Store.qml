@@ -21,7 +21,15 @@ Item {
   readonly property var selected: root.selectedIndex >= 0 && root.selectedIndex < root.rows.length
     ? root.rows[root.selectedIndex] : null
   property bool resetSelection: true
+  property bool keepIndex: false   // keep the row position, not the entry
   property bool loaded: false
+  // The rows answer the current query, from a list read since this open:
+  // keys typed ahead (Enter right after typing, or Down Enter right after
+  // opening) wait for them instead of acting on the rows on screen
+  property bool listed: false
+  property string rowsQuery: ""
+  readonly property bool rowsCurrent: root.listed && root.rowsQuery === root.query
+  property string deferredAction: ""
   property real now: Date.now()
 
   property var imagePaths: ({})    // entry id -> file URL (null = asked, "" = failed)
@@ -56,17 +64,22 @@ Item {
     if (!root.statusWhileClosed) root.status = "";
     root.statusWhileClosed = false;
     root.pendingAction = "";
+    root.deferredAction = "";
+    root.listed = false;
     root.forgetFailedImages();
     // The last session may have closed on a search: show the history as
-    // last listed until the fresh list arrives
+    // last listed until the fresh list arrives. A Down pressed before then
+    // still means the second row of the fresh list.
     root.resetSelection = true;
     if (root.loaded) root.showRows(root.allEntries);
-    root.resetSelection = true;
+    root.resetSelection = false;
+    root.keepIndex = true;
     root.refresh();
     root.focusSearch();
   }
 
   function close() {
+    root.deferredAction = "";
     root.aliasOpen = false;
     root.opened = false;
   }
@@ -111,10 +124,17 @@ Item {
     root.rows = Logic.buildRows(entries, root.query, root.now);
     root.selectedIndex = root.resetSelection
       ? (root.rows.length > 0 ? 0 : -1)
-      : Logic.selectionAfterRefresh(root.rows, prevId, prevIndex);
+      : Logic.selectionAfterRefresh(root.rows, root.keepIndex ? -1 : prevId, prevIndex);
     root.resetSelection = false;
+    root.keepIndex = false;
+    root.rowsQuery = root.query;
     root.loaded = true;
     if (root.pendingAction === "refreshing" && !listCall.busy) root.pendingAction = "";
+    if (root.deferredAction !== "" && root.rowsCurrent) {
+      const action = root.deferredAction;
+      root.deferredAction = "";
+      root.act(action);
+    }
   }
 
   function report(error) {
@@ -188,8 +208,13 @@ Item {
   }
 
   function act(action) {
+    if (root.pendingAction !== "") return;
+    if (!root.rowsCurrent) {
+      root.deferredAction = action;
+      return;
+    }
     var e = root.selected;
-    if (!e || root.pendingAction !== "") return;
+    if (!e) return;
     if (action === "alias") {
       root.aliasInput = e.alias;
       root.aliasOpen = true;
@@ -276,6 +301,7 @@ Item {
       var parsed = Logic.parseEntries(error === "" ? stdout : "");
       root.report(error || parsed.error);
       if (error === "" && parsed.error === "") root.allEntries = parsed.entries;
+      root.listed = true;
       root.runQuery();
     }
   }
