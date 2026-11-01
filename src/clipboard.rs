@@ -93,12 +93,22 @@ impl Clipboard {
 mod tests {
     use super::*;
 
-    // Note: These tests require wl-clipboard to be installed and a Wayland session
-    // They are integration tests that actually interact with the system clipboard
+    // These tests overwrite the user's real desktop clipboard, so `--ignored`
+    // alone doesn't run them: they also need CLIPSTACK_REAL_CLIPBOARD_TESTS=1.
+    fn real_clipboard_opt_in() -> bool {
+        if std::env::var_os("CLIPSTACK_REAL_CLIPBOARD_TESTS").is_some() {
+            return true;
+        }
+        eprintln!("skipped: set CLIPSTACK_REAL_CLIPBOARD_TESTS=1 to touch the real clipboard");
+        false
+    }
 
     #[test]
-    #[ignore] // Run with: cargo test -- --ignored
+    #[ignore] // CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored
     fn test_copy_and_paste() {
+        if !real_clipboard_opt_in() {
+            return;
+        }
         let content = "test clipboard content";
         Clipboard::copy(content).unwrap();
 
@@ -109,6 +119,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_large_content() {
+        if !real_clipboard_opt_in() {
+            return;
+        }
         let content = "x".repeat(500_000); // 500KB
         Clipboard::copy(&content).unwrap();
 
@@ -119,6 +132,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_unicode_content() {
+        if !real_clipboard_opt_in() {
+            return;
+        }
         let content = "Hello 世界 🎉 émojis";
         Clipboard::copy(content).unwrap();
 

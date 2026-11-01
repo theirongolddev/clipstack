@@ -772,8 +772,9 @@ cargo test
 cargo test --release -- --ignored perf_
 
 # Clipboard round-trip tests: these use the REAL wl-copy/wl-paste and
-# overwrite your desktop clipboard (requires a Wayland session)
-cargo test -- --ignored test_copy_and_paste test_large_content test_unicode_content
+# overwrite your desktop clipboard (requires a Wayland session). They are
+# skipped unless CLIPSTACK_REAL_CLIPBOARD_TESTS is set, even with --ignored.
+CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored test_copy_and_paste test_large_content test_unicode_content
 
 # Shell suites (need a release build and jq)
 cargo build --release
