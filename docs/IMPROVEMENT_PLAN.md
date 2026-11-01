@@ -1,6 +1,6 @@
 # ClipStack Improvement Plan
 
-> Status: **IMPLEMENTED** (Steps 0-4, 2026-11-01); **Step 5 in progress**. Each step has an
+> Status: **IMPLEMENTED** (Steps 0-5, 2026-11-01). Each step has an
 > "Implementation status" line. Steps 0-4 below were fully specified and the open
 > questions are decided. The user chose the recommended answers for Q2
 > (retention off by default) and Q10 (`/` starts a search).
@@ -1081,8 +1081,9 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 > **Implementation status:** 5.1-5.3 done (bbb1402..1f8d870, docs in the commit after): schema v2 and PNG storage,
 > daemon image capture, `pin`/`unpin`/`delete`/`edit`, `get --paste`/`--image-path`,
-> images in `get` and the picker. 5.4 (overlay plugin) and 5.5 (desktop integration)
-> pending.
+> images in `get` and the picker. 5.4 overlay plugin merged in 9d4f67c. 5.5 done on the
+> author's machine (binding, plugin enabled, `omarchy.clipboard` disabled); verified
+> by opening the overlay in the live shell over the real store.
 
 Goal: a Maccy-style clipboard overlay inside omarchy-shell (Quickshell), backed by
 the `clipstack` CLI, with image history. Design: concept C "Reader" (list on the
