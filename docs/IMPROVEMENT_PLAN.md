@@ -692,7 +692,7 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 - If the types include the password hint, record the hash anyway so the same secret isn't re-read on every tick.
 - Capture logs (`[watch]`, `[poll]`) give the entry id, byte size or skip reason, never a content preview.
 
-**Periodic expire:** the daemon tick calls `storage.expire()` every 10 minutes, so secrets age out even when nothing new is copied.
+**Periodic expire:** the daemon tick calls `storage.expire()` every 60 seconds, so secrets age out even when nothing new is copied. `expire()` takes the write lock only when a cheap read finds something to delete, so the short interval costs one query a minute.
 
 **Socket server:**
 - After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.
@@ -800,7 +800,7 @@ WantedBy=graphical-session.target
 | 2-4b | Add `[capture]` and `[socket]` config sections with range checks | `config::tests::capture_and_socket_defaults`, `parses_capture_and_socket_sections`, `rejects_poll_interval_and_timeout_out_of_range` |
 | 2-5 | Add capture supervisor state machine | `capture::tests::auto_falls_back_to_poll_on_fast_exit`, `restarts_with_backoff_after_late_exit`, `auto_polls_after_5_restarts_in_60s`, `watch_mode_gives_up_instead_of_polling`, `poll_mode_never_spawns_watch` |
 | 2-6 | Run wl-paste --watch from the daemon with polling fallback | `watch_capture::daemon_watch_captures_copy`, `daemon_falls_back_to_poll_when_watch_unsupported`, `poll_skips_password_hint_types`, `poll_passes_mime_types_to_ingest` (assert `mime` column) |
-| 2-7 | Expire old entries periodically in the daemon | `daemon::tests::tick_runs_expire_every_10_minutes` (injected clock) |
+| 2-7 | Expire old entries periodically in the daemon | `daemon::tests::tick_runs_expire_every_60_seconds` (injected clock) |
 | 2-8 | Add socket protocol v1 framing | `protocol::tests::parses_push_header`, `rejects_header_over_256_bytes`, `rejects_len_over_limit`, `rejects_unknown_verb_and_version`, `rejects_nonzero_len_for_pull_and_ping`, `ok_response_roundtrip_with_meta`, `err_response_roundtrip` |
 | 2-9 | Serve PUSH/PULL/PING on a 0600 Unix socket | `socket_protocol::socket_is_0600_in_runtime_dir`, `push_ingests_and_copies`, `push_ignored_pattern_copies_but_not_stored`, `pull_forbidden_by_default`, `pull_returns_clipboard_when_allowed`, `pull_refuses_sensitive_clipboard`, `ping_reports_capture_and_version` |
 | 2-10 | Enforce socket timeouts and body limit | `socket_protocol::idle_client_gets_timeout` (`timeout_ms = 200`), `second_client_served_after_first_times_out`, `oversize_push_rejected_without_reading_body` |

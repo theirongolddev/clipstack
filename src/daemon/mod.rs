@@ -113,7 +113,7 @@ impl Daemon {
             self.options.clipboard.clone(),
             self.options.hook.clone(),
         );
-        let mut last_expire = Instant::now();
+        let mut expire = ExpireTimer::new(Instant::now());
 
         let result = loop {
             if !self.running.load(Ordering::SeqCst) {
@@ -123,12 +123,7 @@ impl Daemon {
             if let Err(e) = capture.step(&self.storage, now) {
                 break Err(e);
             }
-            if now.saturating_duration_since(last_expire) >= EXPIRE_INTERVAL {
-                last_expire = now;
-                if let Err(e) = self.storage.expire() {
-                    eprintln!("[storage] expiry failed: {e:#}");
-                }
-            }
+            expire.tick(&self.storage, now);
             let tick = if capture.is_polling() { TICK.min(poll_interval) } else { TICK };
             std::thread::sleep(tick);
         };
@@ -147,6 +142,32 @@ impl Daemon {
     /// Get a handle to stop the daemon from another thread
     pub fn stop_handle(&self) -> Arc<AtomicBool> {
         self.running.clone()
+    }
+}
+
+/// Runs `storage.expire()` every `EXPIRE_INTERVAL` on the daemon's clock, so
+/// entries past retention go away even when nothing new is copied.
+struct ExpireTimer {
+    next: Instant,
+}
+
+impl ExpireTimer {
+    fn new(now: Instant) -> Self {
+        Self { next: now + EXPIRE_INTERVAL }
+    }
+
+    /// Expire if due at `now`; returns whether it ran.
+    fn tick(&mut self, storage: &Storage, now: Instant) -> bool {
+        if now < self.next {
+            return false;
+        }
+        self.next = now + EXPIRE_INTERVAL;
+        match storage.expire() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[storage] expired {n} entries"),
+            Err(e) => eprintln!("[storage] expiry failed: {e:#}"),
+        }
+        true
     }
 }
 
@@ -275,6 +296,34 @@ mod tests {
         drop(daemon);
         assert!(!lock_is_held(&lock));
         let _again = test_daemon(&dir).expect("lock is free after the daemon exits");
+    }
+
+    #[test]
+    fn tick_runs_expire_every_60_seconds() {
+        let policy = crate::config::Config::parse("[storage]\nretention_days = 1\n")
+            .unwrap()
+            .ingest_policy()
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), Some(100), policy).unwrap();
+        let count = |s: &Storage| s.list(crate::storage::ListOrder::Recency, None).unwrap().len();
+        // An entry last used long ago: past retention by the wall clock
+        let old = |s: &Storage| s.ingest_at("old", crate::storage::Source::Copy, &[], 1_000).unwrap();
+
+        let t0 = Instant::now();
+        let mut timer = ExpireTimer::new(t0);
+        old(&storage);
+        assert!(!timer.tick(&storage, t0 + Duration::from_secs(59)));
+        assert_eq!(count(&storage), 1, "not due before 60 s");
+        assert!(timer.tick(&storage, t0 + Duration::from_secs(60)));
+        assert_eq!(count(&storage), 0, "expired at 60 s");
+
+        old(&storage);
+        assert!(!timer.tick(&storage, t0 + Duration::from_secs(61)));
+        assert!(!timer.tick(&storage, t0 + Duration::from_secs(119)));
+        assert_eq!(count(&storage), 1);
+        assert!(timer.tick(&storage, t0 + Duration::from_secs(120)));
+        assert_eq!(count(&storage), 0);
     }
 
     #[test]
