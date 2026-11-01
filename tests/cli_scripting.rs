@@ -177,3 +177,74 @@ fn get_copy_puts_content_on_fake_clipboard() {
     assert_eq!(id_of(&env, "pick me"), id, "same entry, not a new one");
     assert_eq!(env.export().len(), 2);
 }
+
+// ======== list --json (3-5) ========
+
+fn json(out: &Output) -> serde_json::Value {
+    assert_eq!(code(out), 0, "stderr: {}", stderr(out));
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {}", stdout(out)))
+}
+
+#[test]
+fn list_json_fields_and_positions() {
+    let env = TestEnv::new();
+    copy_all(&env, &["first", "second\twith tab", "third"]);
+    set_alias_in_db(&env, id_of(&env, "first"), "one");
+
+    let list = json(&run(&env, &["list", "--json"], None));
+    let list = list.as_array().expect("an array");
+    assert_eq!(list.len(), 3);
+    let previews: Vec<_> = list.iter().map(|e| e["preview"].as_str().unwrap()).collect();
+    assert_eq!(previews, ["third", "second with tab", "first"], "newest first");
+    for (i, e) in list.iter().enumerate() {
+        assert_eq!(e["position"], i + 1);
+        let keys: Vec<_> = e.as_object().unwrap().keys().map(String::as_str).collect();
+        for key in ["position", "id", "created_at", "last_used", "size", "preview", "pinned", "alias", "source", "mime"] {
+            assert!(keys.contains(&key), "{key} missing from {e}");
+        }
+        assert!(e.get("content").is_none(), "list does not include content");
+        assert!(e["last_used"].as_i64().unwrap() > 1_600_000_000_000, "unix ms: {e}");
+        assert_eq!(e["source"], "copy");
+    }
+    assert_eq!(list[2]["pinned"], true);
+    assert_eq!(list[2]["alias"], "one");
+    assert_eq!(list[0]["alias"], serde_json::Value::Null);
+    assert_eq!(list[1]["size"], "second\twith tab".len());
+    // position N is what `get N` prints
+    assert_eq!(stdout(&run(&env, &["get", "2"], None)), "second\twith tab");
+}
+
+#[test]
+fn list_json_respects_count() {
+    let env = TestEnv::new();
+    copy_all(&env, &["a1", "a2", "a3", "a4"]);
+    let list = json(&run(&env, &["list", "--json", "-c", "2"], None));
+    let previews: Vec<_> = list.as_array().unwrap().iter().map(|e| e["preview"].clone()).collect();
+    assert_eq!(previews, ["a4", "a3"]);
+    // No "... and N more" line in JSON mode
+    assert!(!stdout(&run(&env, &["list", "--json", "-c", "2"], None)).contains("more"));
+}
+
+#[test]
+fn list_json_empty_array() {
+    let env = TestEnv::new();
+    let out = run(&env, &["list", "--json"], None);
+    assert_eq!(json(&out), serde_json::json!([]));
+    assert_eq!(stdout(&out).trim_end(), "[]");
+}
+
+#[test]
+fn list_pinned_keeps_recency_positions() {
+    let env = TestEnv::new();
+    copy_all(&env, &["pinned old", "plain", "pinned new", "newest"]);
+    set_alias_in_db(&env, id_of(&env, "pinned old"), "old");
+    set_alias_in_db(&env, id_of(&env, "pinned new"), "new");
+
+    let list = json(&run(&env, &["list", "--pinned", "--json"], None));
+    let got: Vec<_> = list.as_array().unwrap().iter().map(|e| (e["position"].clone(), e["preview"].clone())).collect();
+    assert_eq!(got, [(2.into(), "pinned new".into()), (4.into(), "pinned old".into())]);
+
+    let human = stdout(&run(&env, &["list", "--pinned"], None));
+    assert!(human.contains("pinned new") && human.contains("pinned old"), "{human}");
+    assert!(!human.contains("plain") && !human.contains("newest"), "{human}");
+}

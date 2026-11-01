@@ -52,12 +52,38 @@ pub fn paste() -> Result<()> {
     Ok(())
 }
 
-/// `list`: the newest `count` entries, one line each.
-pub fn list(storage: &Storage, count: usize) -> Result<()> {
-    let entries = storage.list(ListOrder::Recency, Some(count))?;
-    let total = storage.counts()?.total;
+/// `list [-c N] [--json] [--pinned]`: the newest `count` entries (only
+/// pinned ones with `pinned`), one line each or as a JSON array.
+pub fn list(storage: &Storage, count: usize, json: bool, pinned: bool) -> Result<()> {
+    let (entries, total) = if pinned {
+        let all: Vec<_> = positioned(storage.list(ListOrder::Recency, None)?)
+            .into_iter()
+            .filter(|(_, e)| e.pinned)
+            .collect();
+        let total = all.len();
+        (all.into_iter().take(count).collect(), total)
+    } else {
+        (positioned(storage.list(ListOrder::Recency, Some(count))?), storage.counts()?.total)
+    };
 
-    for entry in &entries {
+    if json {
+        return print_json(&entries);
+    }
+    print_lines(entries.iter().map(|(_, e)| e));
+    if total > entries.len() {
+        println!("... and {} more", total - entries.len());
+    }
+    Ok(())
+}
+
+/// Entries in recency order, each with its 1-based position (`get N`).
+fn positioned(entries: Vec<ClipEntry>) -> Vec<(usize, ClipEntry)> {
+    (1..).zip(entries).collect()
+}
+
+/// The human `list` format: age, size and a one-line preview.
+fn print_lines<'a>(entries: impl Iterator<Item = &'a ClipEntry>) {
+    for entry in entries {
         let time = util::format_relative_time(entry.last_used);
         let size = util::format_size(entry.size);
         let preview: String = entry
@@ -69,11 +95,28 @@ pub fn list(storage: &Storage, count: usize) -> Result<()> {
 
         println!("{:>5} [{:>6}] {}", time, size, preview);
     }
+}
 
-    if total > entries.len() {
-        println!("... and {} more", total - entries.len());
+/// One element of the `--json` array: the entry's fields plus `position`.
+#[derive(serde::Serialize)]
+struct JsonEntry<'a> {
+    position: usize,
+    #[serde(flatten)]
+    entry: &'a ClipEntry,
+}
+
+/// A JSON array of entries on one line. A closed stdout ends it quietly.
+fn print_json(entries: &[(usize, ClipEntry)]) -> Result<()> {
+    let items: Vec<_> = entries.iter().map(|(position, entry)| JsonEntry { position: *position, entry }).collect();
+    let mut out = io::stdout().lock();
+    let written = serde_json::to_writer(&mut out, &items)
+        .map_err(io::Error::from)
+        .and_then(|()| writeln!(out))
+        .and_then(|()| out.flush());
+    match written {
+        Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// The entry `reference` names; not found is exit 1 (`no entry for REF`).

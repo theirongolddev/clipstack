@@ -43,11 +43,19 @@ pub enum Commands {
     /// Open picker UI to select from history
     Pick,
 
-    /// List clipboard history
+    /// List clipboard history, newest first
     List {
         /// Number of entries to show
         #[arg(short, long, default_value = "10")]
         count: usize,
+
+        /// Print a JSON array (each entry with its position for `get N`)
+        #[arg(long)]
+        json: bool,
+
+        /// Only pinned entries (positions stay those of the full history)
+        #[arg(long)]
+        pinned: bool,
     },
 
     /// Print one entry's content (no newline added); --copy also puts it on the clipboard
