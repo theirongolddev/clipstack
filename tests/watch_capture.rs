@@ -531,8 +531,14 @@ fn poll_captures_image_once() {
     assert_eq!(entries[0]["source"], "poll");
     assert_eq!(decode_image(&entries[0]), png);
 
-    // Later polls see the same image and leave the entry alone
-    wait_for_polls(&env, 3);
+    // Later polls see the same types and neither re-read nor bump the image
+    let image_reads = || {
+        let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
+        calls.lines().filter(|l| *l == "--no-newline --type image/png").count()
+    };
+    let reads = image_reads();
+    wait_for_list_types(&env, 5);
+    assert!(image_reads() <= reads + 1, "the image is re-read on every poll");
     let again = env.export();
     assert_eq!(again.len(), 1);
     assert_eq!(again[0]["last_used"], entries[0]["last_used"], "not bumped on every poll");

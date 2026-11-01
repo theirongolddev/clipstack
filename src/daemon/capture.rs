@@ -390,25 +390,52 @@ fn forward_stderr(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
 /// short, so it never matches content.
 const TOO_LARGE: &[u8] = b"too large";
 
+/// While the clipboard holds the same image offer (an unchanged type list),
+/// the poller re-reads the PNG at most this often.
+const IMAGE_RECHECK: Duration = Duration::from_secs(2);
+
+/// The image offer the poller last read.
+struct ImageOffer {
+    types: Vec<String>,
+    read_at: Instant,
+}
+
 /// Polling capture: read the clipboard every `interval` and save it when it
 /// changed.
 pub struct Poller {
     interval: Duration,
     last_poll: Option<Instant>,
     last_hash: Option<Vec<u8>>,
+    /// Set while the last read was the image of an offer
+    image: Option<ImageOffer>,
 }
 
 impl Poller {
     pub fn new(interval: Duration) -> Self {
-        Self { interval, last_poll: None, last_hash: None }
+        Self { interval, last_poll: None, last_hash: None, image: None }
     }
 
-    /// Read the clipboard if a poll is due at `now`.
+    /// Read the clipboard if a poll is due at `now`. While an image is on the
+    /// clipboard only its types are listed each poll: the PNG is read again
+    /// when they change, else at most every `IMAGE_RECHECK`.
     pub fn poll_if_due(&mut self, storage: &Storage, clipboard: &Clipboard, now: Instant) {
         if self.last_poll.is_some_and(|t| now.saturating_duration_since(t) < self.interval) {
             return;
         }
         self.last_poll = Some(now);
+        if let Some(image) = &self.image {
+            let Ok(types) = clipboard.list_types() else {
+                return;
+            };
+            if types == image.types && now.saturating_duration_since(image.read_at) < IMAGE_RECHECK {
+                return;
+            }
+            if clipboard::choose_offer(&types) == clipboard::Offer::Image {
+                self.poll_image(storage, clipboard, types, now);
+                return;
+            }
+            self.image = None;
+        }
         // No selection, or none as text, reads as ""; errors are retried next tick
         match clipboard.paste_text() {
             Ok(content) if !content.is_empty() => {
@@ -418,28 +445,32 @@ impl Poller {
                 // New text: its types decide whether the offer is an image
                 let types = clipboard.list_types().unwrap_or_default();
                 if clipboard::choose_offer(&types) == clipboard::Offer::Image {
-                    self.poll_image(storage, clipboard, types);
+                    self.poll_image(storage, clipboard, types, now);
                 } else {
                     self.observe(storage, &content, || types);
                 }
             }
             Ok(_) => {
                 if let Ok(types) = clipboard.list_types() {
-                    self.poll_image(storage, clipboard, types);
+                    self.poll_image(storage, clipboard, types, now);
                 }
             }
             Err(_) => {}
         }
     }
 
-    /// Save the PNG when `choose_offer` picks it from `types`. The PNG is
-    /// read on every such poll (there is no cheaper change signal), but
-    /// saved only when its hash differs from the last poll's.
-    fn poll_image(&mut self, storage: &Storage, clipboard: &Clipboard, types: Vec<String>) {
+    /// Save the PNG when `choose_offer` picks it from `types`, and remember
+    /// the offer (read at `now`) so unchanged types aren't re-read every
+    /// poll. The PNG is saved only when its hash differs from the last read.
+    fn poll_image(&mut self, storage: &Storage, clipboard: &Clipboard, types: Vec<String>, now: Instant) {
         if clipboard::choose_offer(&types) != clipboard::Offer::Image {
             return;
         }
-        let png = match clipboard.paste_bytes(crate::png::MIME, storage.policy().image_limit()) {
+        let read = clipboard.paste_bytes(crate::png::MIME, storage.policy().image_limit());
+        if read.is_ok() {
+            self.image = Some(ImageOffer { types: types.clone(), read_at: now });
+        }
+        let png = match read {
             Ok(Paste::Data(png)) if !png.is_empty() => png,
             Ok(Paste::TooLarge { limit }) => {
                 // Logged once per offer, not on every poll
@@ -618,6 +649,72 @@ mod tests {
         assert_eq!(entries[0].source, Source::Poll);
         assert_eq!(entries[0].mime, "text/html");
         assert_eq!(storage.load_content(entries[0].id).unwrap(), "copied text");
+    }
+
+    /// A `Clipboard` running `tests/fakes/wl-paste` on its own state dir.
+    fn fake_clipboard(dir: &std::path::Path) -> Clipboard {
+        let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/wl-paste");
+        let body = format!("FAKE_CLIP_DIR='{}' exec '{}' \"$@\"", dir.display(), fake.display());
+        Clipboard {
+            paste_bin: crate::clipboard::fake_bin(dir, "wl-paste", &body),
+            copy_bin: std::path::PathBuf::from("false"),
+        }
+    }
+
+    /// How many fake wl-paste calls in `dir` had exactly these arguments.
+    fn calls(dir: &std::path::Path, args: &str) -> usize {
+        std::fs::read_to_string(dir.join("wl-paste.calls"))
+            .map(|s| s.lines().filter(|l| *l == args).count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn poller_rereads_an_unchanged_image_offer_every_2s() {
+        let (storage, _dir) = crate::storage::test_storage();
+        let fake = tempfile::TempDir::new().unwrap();
+        let dir = fake.path();
+        let clipboard = fake_clipboard(dir);
+        let offer = |content: &[u8], types: &str| {
+            std::fs::write(dir.join("types"), types).unwrap();
+            std::fs::write(dir.join("content"), content).unwrap();
+        };
+        let images = || calls(dir, "--no-newline --type image/png");
+        let ms = Duration::from_millis;
+        let mut poller = Poller::new(ms(250));
+        let t0 = Instant::now();
+
+        offer(&crate::png::test_png(4, 4, b"one"), "image/png\n");
+        poller.poll_if_due(&storage, &clipboard, t0);
+        assert_eq!(images(), 1);
+        let saved = storage.list(crate::storage::ListOrder::Recency, None).unwrap();
+        assert_eq!(saved.len(), 1);
+
+        // The same types: only listed, neither re-read nor read as text
+        let texts = calls(dir, "--no-newline --type text");
+        for n in 1..8 {
+            poller.poll_if_due(&storage, &clipboard, t0 + ms(250 * n));
+        }
+        assert_eq!(images(), 1, "an unchanged image offer is re-read at most every 2 s");
+        assert_eq!(calls(dir, "--no-newline --type text"), texts);
+        assert_eq!(calls(dir, "--list-types"), 1 + 7);
+        poller.poll_if_due(&storage, &clipboard, t0 + ms(2000));
+        assert_eq!(images(), 2, "re-read after 2 s");
+        let again = storage.list(crate::storage::ListOrder::Recency, None).unwrap();
+        assert_eq!(again[0].last_used, saved[0].last_used, "the same image is not bumped");
+
+        // A changed type list is read at once
+        offer(&crate::png::test_png(4, 4, b"two"), "image/png\nimage/bmp\n");
+        poller.poll_if_due(&storage, &clipboard, t0 + ms(2250));
+        assert_eq!(images(), 3);
+        assert_eq!(storage.list(crate::storage::ListOrder::Recency, None).unwrap().len(), 2);
+
+        // ...and so is text replacing the image
+        offer(b"after the image", "text/plain\n");
+        poller.poll_if_due(&storage, &clipboard, t0 + ms(2500));
+        let entries = storage.list(crate::storage::ListOrder::Recency, None).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(storage.load_content(entries[0].id).unwrap(), "after the image");
+        assert_eq!(images(), 3);
     }
 
     #[test]

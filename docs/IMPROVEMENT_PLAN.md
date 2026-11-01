@@ -1169,8 +1169,10 @@ created as v1 and migrated, so the migration runs everywhere.
   `nil`, which means an empty clipboard). Without it wl-paste still passes text
   whenever text is offered, else the first offered type; the hook then lists the
   types and, when the image is chosen, fetches the PNG itself. Poll mode lists types
-  whenever the text read is empty or new, and re-reads the PNG on each such poll,
-  saving it only when its hash changes.
+  whenever the text read is empty or new, and saves the PNG only when its hash
+  changes. *Amended:* while the last read was an image, each poll only lists the
+  types; the PNG is re-read at once when the type list changes, else at most every
+  2 s (`IMAGE_RECHECK`, not configurable), instead of on every poll.
 - `tests/fakes` wl-paste/wl-copy learn `--type image/png` with binary payloads.
 
 #### 5.3 CLI

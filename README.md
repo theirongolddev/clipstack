@@ -1017,7 +1017,7 @@ Under systemd, check that the user manager has `WAYLAND_DISPLAY` (`systemctl --u
 
 ### Daemon falls back to polling
 
-`clipstack status` shows `capture=poll`, and the log says `[capture] polling every 250 ms: wl-paste --watch exited at once (...)`. The reason is wl-paste's own error: usually the compositor doesn't support the data-control protocol (GNOME), which polling works around. Polling still saves every copy that stays on the clipboard for at least `poll_interval_ms`. If your compositor should support watching, run `wl-paste --watch cat` in a terminal to see the error, and check that wl-clipboard is 2.0 or newer (`wl-paste --version`).
+`clipstack status` shows `capture=poll`, and the log says `[capture] polling every 250 ms: wl-paste --watch exited at once (...)`. The reason is wl-paste's own error: usually the compositor doesn't support the data-control protocol (GNOME), which polling works around. Polling still saves every copy that stays on the clipboard for at least `poll_interval_ms`. While the clipboard holds an image, each poll only lists the offered types: the image is read again at once when they change, otherwise every 2 seconds, so a large screenshot isn't re-read four times a second. If your compositor should support watching, run `wl-paste --watch cat` in a terminal to see the error, and check that wl-clipboard is 2.0 or newer (`wl-paste --version`).
 
 ### Socket unavailable
 
