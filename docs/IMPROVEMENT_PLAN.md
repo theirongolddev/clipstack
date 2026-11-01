@@ -1,8 +1,8 @@
 # ClipStack Improvement Plan
 
 > Status: **REVIEWED**. Steps 0-4 below are fully specified and the open
-> questions are decided, except Q2 and Q10, which are marked NEEDS USER with a
-> default that implementation uses until the user says otherwise.
+> questions are decided. The user chose the recommended answers for Q2
+> (retention off by default) and Q10 (`/` starts a search).
 >
 > This plan runs **before** `docs/FEATURE_PLAN.md`. It replaces FEATURE_PLAN
 > §0.0 (storage correctness contract) and most of §0.2–0.3 (async loading and
@@ -60,7 +60,7 @@ Substantive changes made in this review:
   `rejects_fallback_owned_by_other_uid` test, which tested mode, not owner.
 - **Commit 1-12 is split** into 1-12a (main, daemon) and 1-12b (picker); it was
   the largest commit in the plan.
-- **Open questions resolved** (table below). Q2 and Q10 are NEEDS USER.
+- **Open questions resolved** (table below). Q2 and Q10 were decided by the user.
 
 ## Goals
 
@@ -627,7 +627,7 @@ Also add a "historical" banner to `docs/UPGRADE_PLAN.md` and `docs/IMPLEMENTATIO
 
 - **FTS size:** trigram indexes run about 3-5x the indexed text. With the 256 K-character window and 256 MiB total cap, the worst case is about 1 GB, but typical use is a few MB. A lower window (64 K) can be decided after measuring.
 - **Bundled SQLite build:** adds about 30-60 s to the first build and needs `cc`. That's acceptable.
-- **Retention default**: any non-zero default deletes most of the existing 10-month history at the first `open` after import, because imported `last_used` is the legacy timestamp (Q2, NEEDS USER; the plan ships `0`).
+- **Retention default**: any non-zero default deletes most of the existing 10-month history at the first `open` after import, because imported `last_used` is the legacy timestamp (Q2, decided by the user: ships `0`).
 - **Import exempts filters** (Q6). Secrets already in history stay until retention or a manual delete.
 - **SQLITE_BUSY:** a picker holding a read transaction doesn't block WAL writers. Writers wait up to 5 s. Long write transactions only happen during import.
 
@@ -1040,18 +1040,18 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 - Paste timing and focus return depend on the compositor and window rules. 150 ms may need to be configurable.
 - Shift+Insert pastes PRIMARY instead of CLIPBOARD in some apps (xterm). `paste_keys` makes this configurable.
-- Key table: Q10 is NEEDS USER; the default (`/` to search) is implemented unless the user chooses otherwise before 4-2.
+- Key table: Q10 is decided by the user: `/` starts a search; bare letters are commands.
 
 ---
 
 ## Open questions (decided in review)
 
-Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 are NEEDS USER; each has a default that is a one-line change to flip later.
+Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 were decided by the user.
 
 | # | Question | Decision | Reason |
 |---|----------|----------|--------|
 | Q1 | `storage_version` as a schema column? | **`PRAGMA user_version` plus `application_id`.** | A per-row version adds nothing to a single-table schema; future formats use `ALTER TABLE` under a new `user_version` |
-| Q2 | Retention default. The real store holds about 100 entries spanning about 10 months. | **NEEDS USER. Default `retention_days = 0` (off)** until told otherwise; README recommends `30` or `90` under "Configuration file", and the one-time import notice adds `N entries are older than <retention> days and will expire at the next start` only when retention is enabled. | `max_entries` (100) already bounds the history, so retention is an opt-in privacy setting, not a size control. Any non-zero default deletes most of the user's history at the first `open` after import, and reads happen before the user has seen the notice |
+| Q2 | Retention default. The real store holds about 100 entries spanning about 10 months. | **Decided by the user: `retention_days = 0` (off) by default**; README recommends `30` or `90` under "Configuration file", and the one-time import notice adds `N entries are older than <retention> days and will expire at the next start` only when retention is enabled. | `max_entries` (100) already bounds the history, so retention is an opt-in privacy setting, not a size control. Any non-zero default deletes most of the user's history at the first `open` after import, and reads happen before the user has seen the notice |
 | Q3 | TCP `serve`: remove or keep opt-in? | **Remove (hidden stub, exit 2) and rewrite rcopy in the same commit (2-13).** | A token-protected TCP listener is more code than the socket it replaces; rewriting rcopy with the removal leaves no broken window |
 | Q4 | `allow_pull` default. | **`false`.** rpaste prints how to enable it. | Pull is an exfiltration path for anyone with the remote uid or root |
 | Q5 | Legacy backup dir lifetime (plaintext). | **Keep it; `status` warns while it exists; README says `rm -r` it after checking. No `--purge-legacy`.** | Deleting user data is the user's call; a one-line `rm -r` doesn't need a subcommand |
@@ -1059,7 +1059,7 @@ Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 are
 | Q7 | `max_entries` in the DB, other limits in config. | **Keep.** | Preserves CLI/env/saved semantics and labels; the watch hook inherits the daemon's env so both agree. Revisit after Step 3 |
 | Q8 | Step 0 additions beyond the skeleton. | **Approved: commits 0-7 (no `pkill`) and 0-8 (`current_exe()`).** | Both are isolation fixes needed before any suite is run against the new code |
 | Q9 | Empty content no longer stored. | **Accept.** | An empty entry is never useful to pick |
-| Q10 | Normal-mode letters start a search, but `d` deletes, `u` undoes, `p` pins; `P`/`e` make it worse. | **NEEDS USER. Recommended: `/` is required to search; bare letters are commands (vim-like, matching the existing `j`/`k`/`g`/`G`).** Step 4 implements `map_key` with this table; because it is one pure function, switching to the alternative (letters search, commands move to `D`/`U`/`Ctrl+P`-style chords) is a table change in commit 4-2. | Today typing "docker" from normal mode deletes an entry on the `d`; this is a latent data-loss bug, not a style choice |
+| Q10 | Normal-mode letters start a search, but `d` deletes, `u` undoes, `p` pins; `P`/`e` make it worse. | **Decided by the user: `/` is required to search; bare letters are commands (vim-like, matching the existing `j`/`k`/`g`/`G`).** Step 4 implements `map_key` with this table; because it is one pure function, switching to the alternative (letters search, commands move to `D`/`U`/`Ctrl+P`-style chords) is a table change in commit 4-2. | Today typing "docker" from normal mode deletes an entry on the `d`; this is a latent data-loss bug, not a style choice |
 | Q11 | Built-in secret patterns on by default. | **On; `builtin_secret_patterns = false` opts out; skips logged without content.** | Security goal; the patterns are whole-content matches so prose is unaffected |
 | Q12 | CRLF→LF at ingest. | **Reject.** | The clipboard must round-trip exactly |
 | Q13 | `clear` deletes pinned entries. | **Keep.** | Current behaviour; `clear --keep-pinned` can be added later without a format change |
