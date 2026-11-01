@@ -12,7 +12,7 @@ use common::{TestEnv, wait_until};
 use protocol::{ErrCode, Request, Response};
 use std::io::BufReader;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
 const HINT: &str = "x-kde-passwordManagerHint";
@@ -214,4 +214,52 @@ fn oversize_push_rejected_without_reading_body() {
     // At the limit is fine
     let resp = request(&env, &Request::Push(vec![b'x'; 1024]));
     assert_eq!(resp.meta("stored"), Some("1"), "{resp:?}");
+}
+
+#[test]
+fn stale_socket_replaced() {
+    let mut env = TestEnv::new();
+    // A socket file nobody listens on, as left by a crashed daemon
+    drop(UnixListener::bind(env.socket_path()).unwrap());
+    assert!(UnixStream::connect(env.socket_path()).is_err());
+    start(&mut env, "");
+    assert!(request(&env, &Request::Ping).meta("version").is_some());
+}
+
+#[test]
+fn second_daemon_leaves_live_socket() {
+    let mut env = TestEnv::new();
+    start(&mut env, "");
+    let mut second = env.cmd();
+    second.arg("daemon");
+    let pid = env.spawn(second);
+    let done = env.wait_for_exit(pid, Duration::from_secs(5)).expect("second daemon exits");
+    assert!(!done.status.success());
+    assert!(done.stderr.contains("already running"), "{}", done.stderr);
+    assert!(request(&env, &Request::Ping).meta("version").is_some(), "first daemon still serves");
+}
+
+#[test]
+fn live_foreign_socket_is_left_alone() {
+    // Something else listens on the path (no clipstack lock): the daemon
+    // must not unlink it. It runs without a socket and says so.
+    let mut env = TestEnv::new();
+    let foreign = UnixListener::bind(env.socket_path()).unwrap();
+    let pid = env.start_daemon();
+    env.wait_for_watch_pid(Duration::from_secs(5)).expect("capture still runs");
+    env.signal(pid, "TERM");
+    let done = env.wait_for_exit(pid, Duration::from_secs(5)).expect("daemon exits");
+    assert!(done.stderr.contains("[socket] disabled"), "{}", done.stderr);
+    assert!(done.stderr.contains("in use"), "{}", done.stderr);
+    assert!(UnixStream::connect(env.socket_path()).is_ok(), "foreign socket still there");
+    drop(foreign);
+
+    // Not a socket at all: left alone too
+    let mut env = TestEnv::new();
+    std::fs::write(env.socket_path(), "not a socket").unwrap();
+    let pid = env.start_daemon();
+    env.signal(pid, "TERM");
+    let done = env.wait_for_exit(pid, Duration::from_secs(5)).expect("daemon exits");
+    assert!(done.stderr.contains("not a socket"), "{}", done.stderr);
+    assert_eq!(std::fs::read_to_string(env.socket_path()).unwrap(), "not a socket");
 }

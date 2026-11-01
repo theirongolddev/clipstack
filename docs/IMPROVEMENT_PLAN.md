@@ -695,7 +695,7 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 **Periodic expire:** the daemon tick calls `storage.expire()` every 60 seconds, so secrets age out even when nothing new is copied. `expire()` takes the write lock only when a cheap read finds something to delete, so the short interval costs one query a minute.
 
 **Socket server:**
-- After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.
+- After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. A path that isn't a socket, or a socket that still accepts connections (some other process), is left alone and the socket is disabled with a warning. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.
 - If the runtime dir is missing or not owned by us, the socket is disabled with a warning and capture continues.
 - Accept loop on its own thread: listener is non-blocking and waited on with `poll(2)` (rustix `event` feature) for at most 100 ms, so it checks `running` every 100 ms without adding accept latency, and handles connections one at a time on that thread. There is no per-connection thread: the only client is the user's `ssh` forward, and the timeouts below bound how long a stuck client can hold the loop.
 - Per connection:
@@ -804,7 +804,7 @@ WantedBy=graphical-session.target
 | 2-8 | Add socket protocol v1 framing | `protocol::tests::parses_push_header`, `rejects_header_over_256_bytes`, `rejects_len_over_limit`, `rejects_unknown_verb_and_version`, `rejects_nonzero_len_for_pull_and_ping`, `ok_response_roundtrip_with_meta`, `err_response_roundtrip` |
 | 2-9 | Serve PUSH/PULL/PING on a 0600 Unix socket | `socket_protocol::socket_is_0600_in_runtime_dir`, `push_ingests_and_copies`, `push_ignored_pattern_copies_but_not_stored`, `pull_forbidden_by_default`, `pull_returns_clipboard_when_allowed`, `pull_refuses_sensitive_clipboard`, `ping_reports_capture_and_version` |
 | 2-10 | Enforce socket timeouts and body limit | `socket_protocol::idle_client_gets_timeout` (`timeout_ms = 200`), `slow_client_hits_overall_deadline`, `second_client_served_after_first_times_out`, `oversize_push_rejected_without_reading_body` |
-| 2-11 | Replace stale socket on start; never unlink a live one | `socket_protocol::stale_socket_replaced`, `second_daemon_leaves_live_socket` |
+| 2-11 | Replace stale socket on start; never unlink a live one | `socket_protocol::stale_socket_replaced`, `second_daemon_leaves_live_socket`, `live_foreign_socket_is_left_alone` |
 | 2-12 | Stop watch child and remove socket on shutdown | `daemon_lifecycle::sigterm_stops_watch_child_and_removes_socket` (PID from `watch.pid`), `sigkill_daemon_terminates_watch_child` (PDEATHSIG) |
 | 2-13 | Remove TCP serve and rewrite rcopy for the socket | `daemon_lifecycle::serve_prints_migration_message_exits_2`; `e2e_daemon.sh`: rcopy via socat and via `nc -U` stores and copies, `OK 0 stored=0 reason=…` is reported on stderr with exit 0, unreachable socket exits 3 |
 | 2-14 | Show socket and capture mode in status | `daemon_lifecycle::status_reports_socket_reachable_and_capture_mode` |

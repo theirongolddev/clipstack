@@ -9,7 +9,7 @@ use crate::storage::{IngestOutcome, Source, Storage};
 use anyhow::{Context, Result};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use std::io::{self, BufReader, ErrorKind, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,17 +128,34 @@ impl SocketServer {
 }
 
 fn bind(path: &Path) -> Result<UnixListener> {
-    // A socket left by a daemon that crashed
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("Cannot remove old socket {}", path.display())),
-    }
+    remove_stale(path)?;
     let listener = UnixListener::bind(path).with_context(|| format!("Cannot bind {}", path.display()))?;
     // The runtime dir is 0700, so the window before chmod doesn't matter
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("Cannot chmod {}", path.display()))?;
     Ok(listener)
+}
+
+/// Remove a socket left by a daemon that crashed. We hold the daemon lock,
+/// so no other clipstack daemon serves it; still, never unlink a socket that
+/// accepts connections or a path that isn't a socket.
+fn remove_stale(path: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("Cannot inspect {}", path.display())),
+    };
+    if !meta.file_type().is_socket() {
+        anyhow::bail!("{} exists and is not a socket; leaving it alone", path.display());
+    }
+    if UnixStream::connect(path).is_ok() {
+        anyhow::bail!("{} is in use by another process; leaving it alone", path.display());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Cannot remove stale socket {}", path.display())),
+    }
 }
 
 fn accept_loop(listener: &UnixListener, handler: &Handler, running: &AtomicBool) {
