@@ -252,14 +252,14 @@ mod tests {
         let mut picker = Picker::new(storage).unwrap();
 
         // Select last item
-        picker.view.selected.select(Some(3));
+        picker.select_index(3);
 
         // Search for "ap" - only 2 results
         picker.view.query = "ap".to_string();
         picker.update_filter();
 
         // Selection should reset if out of bounds
-        let selected = picker.view.selected.selected().unwrap_or(0);
+        let selected = picker.selected_index().unwrap_or(0);
         assert!(selected < picker.search.filtered.len());
     }
 

@@ -10,7 +10,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use std::time::Duration;
 
@@ -154,16 +156,20 @@ impl Picker {
             )
             .highlight_symbol("> ");
 
-        frame.render_stateful_widget(list, area, &mut self.view.selected);
+        let selected = self.selected_index();
+        let mut list_state = ListState::default().with_offset(self.view.list_offset).with_selected(selected);
+        frame.render_stateful_widget(list, area, &mut list_state);
+        self.view.list_offset = list_state.offset();
 
         // Render scrollbar
+        let mut scroll_state = ScrollbarState::new(shown).position(selected.unwrap_or(0));
         frame.render_stateful_widget(
             Scrollbar::default()
                 .orientation(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("^"))
                 .end_symbol(Some("v")),
             area,
-            &mut self.view.scroll_state,
+            &mut scroll_state,
         );
     }
 

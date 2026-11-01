@@ -37,8 +37,9 @@ impl PickerData {
     }
 }
 
-/// Stable sort: pinned entries first, keeping the recency order within each
-/// group (entries come from storage in recency order).
+/// Pinned entries first, each group most recently used first: the order of
+/// `ListOrder::PinnedFirst`, so an unpinned entry goes back to its place by
+/// recency (not to the top of the unpinned group).
 pub fn order_pinned_first(entries: &mut [ClipEntry]) {
-    entries.sort_by_key(|e| !e.pinned);
+    entries.sort_by_key(|e| (!e.pinned, std::cmp::Reverse((e.last_used, e.id))));
 }

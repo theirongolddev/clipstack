@@ -51,10 +51,6 @@ impl Picker {
         };
 
         picker.update_filter();
-        if !picker.search.filtered.is_empty() {
-            picker.view.selected.select(Some(0));
-        }
-        picker.update_scroll_state();
 
         Ok(picker)
     }
@@ -63,6 +59,8 @@ impl Picker {
         search::filter_entries(&self.data, &self.search.matcher, query)
     }
 
+    /// Recompute the visible rows. The selected entry stays selected if it
+    /// is still visible; otherwise the first row is (none if no rows).
     fn update_filter(&mut self) {
         if self.view.query.is_empty() {
             // No search query - show all entries in order
@@ -76,76 +74,73 @@ impl Picker {
             self.search.filtered = self.search.results.iter().map(|e| e.index).collect();
         }
 
-        if self.search.filtered.is_empty() {
-            self.view.selected.select(None);
-            self.data.content_cache = None;
-        } else {
-            let current = self.view.selected.selected().unwrap_or(0);
-            if current >= self.search.filtered.len() {
-                self.view.selected.select(Some(0));
-            }
+        if self.selected_index().is_none() {
+            self.select_index(0);
         }
-        self.update_scroll_state();
+        if self.view.selection.is_none() {
+            self.data.content_cache = None;
+        }
     }
 
-    fn update_scroll_state(&mut self) {
-        self.view.scroll_state = self
-            .view
-            .scroll_state
-            .content_length(self.search.filtered.len())
-            .position(self.view.selected.selected().unwrap_or(0));
+    /// The row of the selected entry among the visible rows.
+    fn selected_index(&self) -> Option<usize> {
+        let id = self.view.selection?;
+        self.search.filtered.iter().position(|&idx| self.data.entries[idx].id == id)
+    }
+
+    /// Select the entry on row `i`, or the last row if `i` is past the end
+    /// (nothing if there are no rows).
+    fn select_index(&mut self, i: usize) {
+        let row = i.min(self.search.filtered.len().saturating_sub(1));
+        self.view.selection = self.search.filtered.get(row).map(|&idx| self.data.entries[idx].id);
     }
 
     fn selected_entry(&self) -> Option<&ClipEntry> {
-        self.view
-            .selected
-            .selected()
+        self.selected_index()
             .and_then(|i| self.search.filtered.get(i))
             .and_then(|&idx| self.data.entries.get(idx))
     }
 
-    /// Toggle pin status of selected entry
+    /// Toggle pin status of selected entry. Pinning follows the entry to the
+    /// pinned group; unpinning keeps the cursor on its row (FEATURE_PLAN
+    /// Feature 4), so the next entry is selected.
     fn toggle_pin_selected(&mut self) -> Result<()> {
-        if let Some(idx) = self.view.selected.selected().and_then(|i| self.search.filtered.get(i).copied()) {
-            let entry_id = self.data.entries[idx].id;
+        let Some(row) = self.selected_index() else {
+            return Ok(());
+        };
+        let idx = self.search.filtered[row];
+        let entry_id = self.data.entries[idx].id;
 
-            match self.data.storage.toggle_pin(entry_id) {
-                Ok(is_pinned) => {
-                    // Update local state
-                    self.data.entries[idx].pinned = is_pinned;
-
-                    // Re-sort: pinned entries first
-                    self.sort_entries_by_pin();
-
-                    let msg = if is_pinned { "★ Pinned" } else { "Unpinned" };
-                    self.view.set_status(msg.to_string(), StatusLevel::Success);
+        match self.data.storage.toggle_pin(entry_id) {
+            Ok(is_pinned) => {
+                // Update local state
+                self.data.entries[idx].pinned = is_pinned;
+                if !is_pinned {
+                    self.data.entries[idx].alias = None;
                 }
-                Err(e) => {
-                    self.view.set_status(e.to_string(), StatusLevel::Warning);
+
+                // Re-sort: pinned entries first
+                self.sort_entries_by_pin();
+                if !is_pinned {
+                    self.select_index(row);
+                    self.load_preview();
                 }
+
+                let msg = if is_pinned { "★ Pinned" } else { "Unpinned" };
+                self.view.set_status(msg.to_string(), StatusLevel::Success);
+            }
+            Err(e) => {
+                self.view.set_status(e.to_string(), StatusLevel::Warning);
             }
         }
         Ok(())
     }
 
-    /// Sort entries: pinned first, each group kept in recency (index) order
+    /// Sort entries: pinned first, each group kept in recency (index) order.
+    /// The selection is an entry id, so it follows its entry.
     fn sort_entries_by_pin(&mut self) {
-        let selected_id = self.selected_entry().map(|e| e.id);
-
         order_pinned_first(&mut self.data.entries);
-
         self.update_filter();
-
-        // Restore selection by ID
-        if let Some(id) = selected_id {
-            for (i, &idx) in self.search.filtered.iter().enumerate() {
-                if self.data.entries[idx].id == id {
-                    self.view.selected.select(Some(i));
-                    break;
-                }
-            }
-        }
-        self.update_scroll_state();
         self.load_preview();
     }
 
@@ -185,38 +180,29 @@ impl Picker {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.search.filtered.is_empty() {
+        let Some(current) = self.selected_index() else {
             return;
-        }
-
-        let current = self.view.selected.selected().unwrap_or(0);
-        let new_idx = current.saturating_add_signed(delta).min(self.search.filtered.len() - 1);
+        };
+        let new_idx = current.saturating_add_signed(delta);
 
         // Clear preview cache when selection changes
-        if self.view.selected.selected() != Some(new_idx) {
+        let before = self.view.selection;
+        self.select_index(new_idx);
+        if self.view.selection != before {
             self.view.preview_lines.clear();
             self.view.preview_scroll = 0;
         }
-
-        self.view.selected.select(Some(new_idx));
-        self.update_scroll_state();
         self.load_preview();
     }
 
     fn jump_to_start(&mut self) {
-        if !self.search.filtered.is_empty() {
-            self.view.selected.select(Some(0));
-            self.update_scroll_state();
-            self.load_preview();
-        }
+        self.select_index(0);
+        self.load_preview();
     }
 
     fn jump_to_end(&mut self) {
-        if !self.search.filtered.is_empty() {
-            self.view.selected.select(Some(self.search.filtered.len() - 1));
-            self.update_scroll_state();
-            self.load_preview();
-        }
+        self.select_index(usize::MAX);
+        self.load_preview();
     }
 
     /// Format a status message with optional pin indicator
@@ -242,9 +228,13 @@ impl Picker {
                 deleted_at: Instant::now(),
             });
 
+            let row = self.selected_index().unwrap_or(0);
             self.data.storage.delete_entry(entry.id)?;
             self.data.entries.retain(|e| e.id != entry.id);
+            // The entry is gone: select whatever is now on its row
+            self.view.selection = None;
             self.update_filter();
+            self.select_index(row);
             self.load_preview();
 
             let msg = Self::format_entry_message("Deleted", &preview, was_pinned, "'u' to undo (5s)");
@@ -275,7 +265,7 @@ impl Picker {
                 }
 
                 self.data.entries = self.data.storage.list(ListOrder::PinnedFirst, None)?;
-                self.sort_entries_by_pin();
+                self.view.selection = Some(restored.id);
                 self.update_filter();
                 self.load_preview();
 
