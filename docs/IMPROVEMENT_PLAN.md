@@ -1,13 +1,66 @@
 # ClipStack Improvement Plan
 
-> Status: **DRAFT (detailed, pending review)**. Steps 0-4 below are fully specified.
-> Everything under "Open questions" needs a decision from the user before or
-> during the step it belongs to.
+> Status: **REVIEWED**. Steps 0-4 below are fully specified and the open
+> questions are decided, except Q2 and Q10, which are marked NEEDS USER with a
+> default that implementation uses until the user says otherwise.
 >
 > This plan runs **before** `docs/FEATURE_PLAN.md`. It replaces FEATURE_PLAN
 > §0.0 (storage correctness contract) and most of §0.2–0.3 (async loading and
 > content cache), and makes Feature 1's deep-search design simpler (FTS5
 > replaces lazy file scanning).
+
+## Review notes
+
+Verified against the code and tools on 2026-11-01: schema v1 (triggers, FTS5
+external content over the virtual generated column, `secure-delete`, the
+window-function prune, the alias CHECK) runs cleanly in sqlite3 3.54.0;
+rusqlite 0.41.1 bundles SQLite 3.54.1 with MSRV 1.89; toml 1.1.8 has the
+`std`/`parse`/`serde` features; ctrlc 3.5 has `termination`; rustix 1.1 exposes
+`process::set_parent_process_death_signal(Option<Signal>)` with
+`signal::Signal::TERM`; wl-clipboard 2.3.0 documents `CLIPBOARD_STATE`
+`data|nil|clear|sensitive`; the local `nc` is OpenBSD netcat.
+
+Substantive changes made in this review:
+
+- **Retention is applied by `expire()` at `Storage::open` and by the daemon
+  tick, not by a `?cutoff` filter on every read.** One code path instead of
+  five, and `nth`/`counts`/`list` can't disagree. Reads are plain queries.
+- **Socket server handles one connection at a time.** Thread-per-connection,
+  `max_connections`, the `AtomicUsize` guard and `ERR busy` are gone. The
+  client is one `ssh` forward; a 5 s timeout bounds a stuck client.
+- **Entry-id reference is `id:42`, not `#42`.** `#` starts a shell comment at
+  the start of a word, so `clipstack get #42` silently became `clipstack get`.
+- **Step 1 module coexistence is specified.** `src/storage.rs` and
+  `src/storage/mod.rs` can't both exist, so commit 1-1 moves the JSON code to
+  `src/storage/json.rs` and callers switch to it until 1-12. Without this the
+  first eleven commits don't compile.
+- **`index.lock` is left in place by the legacy import.** Moving it would
+  break mutual exclusion with a still-running old daemon (it keeps a lock on
+  the renamed inode while new processes create a fresh file).
+- **`fs2` is dropped entirely in 1-13.** std `File::lock`/`try_lock` (stable
+  since 1.89, `flock`-based on Linux, so compatible with an old daemon's fs2
+  lock) covers both the daemon lock and the legacy import lock.
+- **The legacy upgrade note says to `clipstack kill` first.** Otherwise every
+  new-version command creates another `legacy-backup-*` dir while the old
+  daemon keeps writing `index.json`.
+- **rcopy is rewritten in Step 2 (commit 2-13), with the TCP removal.** No
+  window where remote copy is broken (Q3).
+- **Picker spawns `current_exe()` in Step 0 (commit 0-8), not Step 2.** It is
+  a one-line isolation fix like 0-7; a test that runs `pick` must never start
+  the installed binary.
+- **`get --copy` bumps the entry itself** via `ingest`, so it works without a
+  running daemon and is deterministic in tests.
+- **The wtype paste helper is detached** (`process_group(0)`, null stdio) so
+  the terminal closing with the picker doesn't take it down.
+- **Performance tests are `#[ignore]` with release-mode numbers.** The listed
+  thresholds are unreachable in a debug build and would make `cargo test`
+  flaky.
+- **Dropped `foreign_keys = ON`** (no foreign keys), the `check --purge-legacy`
+  and "check reports entries matching patterns" options (Q5/Q6), and the
+  `rejects_fallback_owned_by_other_uid` test, which tested mode, not owner.
+- **Commit 1-12 is split** into 1-12a (main, daemon) and 1-12b (picker); it was
+  the largest commit in the plan.
+- **Open questions resolved** (table below). Q2 and Q10 are NEEDS USER.
 
 ## Goals
 
@@ -120,14 +173,14 @@ impl Storage {
     pub fn set_pinned(&self, id: EntryId, pinned: bool) -> Result<()>;      // unpin clears alias
     pub fn set_alias(&self, id: EntryId, alias: Option<&str>) -> Result<()>; // pins if needed
     pub fn clear(&self) -> Result<usize>;
-    pub fn expire(&self) -> Result<usize>;                       // retention + caps, no insert
+    pub fn expire(&self) -> Result<usize>;                       // retention + caps, no insert; also run by open()
     pub fn check(&self, repair: bool) -> Result<CheckReport>;
     pub fn export_jsonl(&self, out: &mut dyn Write) -> Result<usize>;
     pub fn legacy_backup_dirs(&self) -> Vec<PathBuf>;
 }
 ```
 
-`Storage` is `Send + Sync` (it holds a `Mutex<rusqlite::Connection>`). Each process opens its own `Storage`. Write transactions use `BEGIN IMMEDIATE`.
+`Storage` is `Send + Sync` (it holds a `Mutex<rusqlite::Connection>`). Each process opens its own `Storage`. Write transactions use `BEGIN IMMEDIATE`. `open()` runs `expire()` once (a `SELECT EXISTS` first, so a read-only command normally takes no write lock; `SQLITE_BUSY` here is ignored), so reads never need a retention filter.
 
 ### Config (Step 1 adds `[storage]`, Step 2 adds `[capture]` and `[socket]`; `src/config.rs`)
 
@@ -143,7 +196,7 @@ pub struct StorageConfig {        // defaults in the TOML below
     pub builtin_secret_patterns: bool,
 }
 pub struct CaptureConfig { pub mode: CaptureMode /* Auto|Watch|Poll */, pub poll_interval_ms: u64 }
-pub struct SocketConfig  { pub enabled: bool, pub allow_pull: bool, pub max_connections: usize, pub timeout_ms: u64 }
+pub struct SocketConfig  { pub enabled: bool, pub allow_pull: bool, pub timeout_ms: u64 }
 
 impl Config {
     pub fn load(explicit: Option<&Path>) -> Result<(Config, ConfigSource)>; // missing default file => defaults
@@ -161,16 +214,16 @@ length   = 1*10DIGIT            ; PUSH: 0..=limit; PULL and PING: must be 0
 response = "OK" SP length *(SP key "=" value) LF body
          / "ERR" SP code SP message LF
 code     = "bad_request" / "too_large" / "not_utf8" / "forbidden" / "sensitive"
-         / "busy" / "timeout" / "unavailable" / "internal"
+         / "timeout" / "unavailable" / "internal"
 ```
 
-- One request per connection. The server closes the connection after it responds. Because requests are length-prefixed, clients never need to half-close, so `nc -U` without `-N` works.
+- One request per connection, handled sequentially by the accept thread. The server closes the connection after it responds. Because requests are length-prefixed, clients never need to half-close, so `nc -U` without `-N` works.
 - The header line may be at most 256 bytes. Clients must ignore `key=value` pairs they don't recognise.
 - Rust API: `Request { Push(Vec<u8>), Pull, Ping }`, `Response { Ok { body, meta: Vec<(String,String)> }, Err { code: ErrCode, message } }`, `read_request(&mut impl BufRead, max_body) -> Result<Request, ProtoError>`, `write_response`, `write_request`, `read_response`.
 
 ### CLI contracts (Step 3)
 
-- `EntryRef` grammar: `N` = 1-based position in Recency order, `#ID` = entry id, `@alias`.
+- `EntryRef` grammar: `N` = 1-based position in Recency order, `id:ID` = entry id, `@alias`. (`#ID` was rejected: `#` starts a shell comment at the start of a word.)
 - Exit codes:
 
 | Code | Meaning |
@@ -238,6 +291,7 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 | `tests/common/mod.rs` | New: `TestEnv` harness (see 0.5) |
 | `tests/daemon_lifecycle.rs` | New Rust integration test |
 | `tests/integration/test_component_interaction.sh` | Remove `pkill -f "clipstack.*daemon"` (it kills the user's real daemon); isolate `XDG_RUNTIME_DIR` |
+| `src/picker.rs` | `ensure_daemon_running` spawns `std::env::current_exe()` instead of `"clipstack"` from PATH |
 
 #### 0.4 Commits (each test-first)
 
@@ -250,6 +304,7 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 | 0-5 | Add test harness with fake wl-paste and isolated runtime dir | `tests/daemon_lifecycle.rs::harness_isolates_runtime_dir` (asserts the lock appears under the temp `XDG_RUNTIME_DIR`, not the real one) |
 | 0-6 | Stop the daemon cleanly on SIGTERM | `tests/daemon_lifecycle.rs::daemon_exits_zero_on_sigterm` (spawn `CARGO_BIN_EXE_clipstack daemon`, wait for the PID in the lock, `kill -TERM`, expect exit code 0 within 2 s and stderr containing `daemon stopped`; today it dies by signal, so `code()` is `None`) |
 | 0-7 | Stop integration test killing every clipstack daemon | Shell change only. Verify by running the script while a sentinel `sleep` process named `clipstack-daemon-sentinel` exists and confirm it survives |
+| 0-8 | Spawn the current executable when auto-starting the daemon | `picker::tests::daemon_spawn_program_is_current_exe` (the existing `daemon_spawn_args` test pattern, extended to the program path) |
 
 #### 0.5 Test plan
 
@@ -269,7 +324,7 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 #### 0.7 Risks and open questions
 
 - `tighten_dir` on a user-supplied `--storage-dir` that is a shared directory will chmod it to `0700`. That's acceptable because it is ClipStack's own directory, but it should be documented.
-- Commit 0-7 goes beyond the two skeleton items. It is needed so that running the E2E suite at the end of Step 0 doesn't kill the user's daemon (see Open question Q8).
+- Commits 0-7 and 0-8 go beyond the two skeleton items. They are needed so that running the suites at the end of Step 0 can neither kill the user's daemon nor start the installed binary (Q8, approved).
 
 ---
 
@@ -290,7 +345,7 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 | `rusqlite` | `0.41` (0.41.1), `features = ["bundled"]` | Bundled SQLite 3.54.1 is compiled with `SQLITE_ENABLE_FTS5`. `bundled` already implies `modern_sqlite`, and the default `cache` feature gives `prepare_cached`. MSRV is 1.89 |
 | `regex` | `1.13` | Ignore patterns. Linear-time matching, so a hostile pattern can't cause catastrophic backtracking |
 | `toml` | `1` (1.1.8), `default-features = false, features = ["std", "parse", "serde"]` | Config parsing. Writing TOML isn't needed |
-| `fs2` | kept for now | Only for `index.lock` during legacy import. Commit 1-13 replaces the daemon's use with std `File::try_lock` (stable since 1.89) and keeps fs2 only if the legacy import still needs it |
+| `fs2` | removed in 1-13 | std `File::lock` / `try_lock` (stable since 1.89, `flock` on Linux, so it interoperates with an old daemon's fs2 lock) covers the daemon lock and the legacy import's `index.lock` |
 
 Raising MSRV to 1.89 means `Cargo.toml` gets `rust-version = "1.89"` and the README changes from "Rust 1.85+".
 
@@ -306,13 +361,16 @@ src/storage/legacy.rs  detect/read index.json + {ms}[_nnn].txt, import(), move_t
 src/config.rs          Config (see contracts), load(), builtin secret patterns
 ```
 
+**Module coexistence during Step 1.** `src/storage.rs` and `src/storage/mod.rs` cannot both exist. Commit 1-1 does `git mv src/storage.rs src/storage/json.rs`, adds `pub mod json;` to the new `mod.rs`, and switches `main.rs`, `daemon.rs` and `picker.rs` to `use crate::storage::json::Storage` (one line each). The new `storage::Storage` is built and tested in 1-1..1-11 without any caller. 1-12a/b switch the callers back to `storage::Storage`, and 1-13 deletes `json.rs`. `legacy.rs` defines its own `LegacyIndex { max_entries, entries: Vec<LegacyEntry { id, timestamp, size, preview, hash, pinned }> }` serde structs so nothing depends on `json.rs`.
+
 **Connection setup** (`schema::open_connection(path)`):
 
 1. `perms::ensure_private_dir(dir)`. Pre-create `clipstack.db` with `private_file_options()` (`create(true)`, no truncate) so SQLite inherits `0600`. SQLite gives `-wal` and `-shm` the same mode as the db file. Then chmod any existing `-wal`/`-shm` to `0600` (they may be left over from an older umask).
 2. `Connection::open(path)`, then `conn.busy_timeout(5s)`.
-3. Per-connection PRAGMAs: `journal_mode = WAL` (persistent, re-asserting is harmless), `synchronous = NORMAL`, `secure_delete = ON`, `trusted_schema = OFF`, `temp_store = MEMORY` (no plaintext temp files during sorts), `foreign_keys = ON`.
+3. Per-connection PRAGMAs: `journal_mode = WAL` (persistent, re-asserting is harmless), `synchronous = NORMAL`, `secure_delete = ON`, `trusted_schema = OFF`, `temp_store = MEMORY` (no plaintext temp files during sorts).
 4. Creation-only PRAGMAs, set before the first table: `auto_vacuum = INCREMENTAL`, `application_id = 0x434C5053` ("CLPS").
 5. `apply_migrations()`: read `user_version`. If it is 0, run the v1 DDL in a transaction and set `user_version = 1`. If it is greater than `SCHEMA_VERSION`, fail with `StorageError::NewerSchema { found, supported }` (exit 4 in Step 3).
+6. `Storage::open` then runs the legacy import (below) if a legacy store is detected, and `expire()`.
 
 **Schema v1:**
 
@@ -393,14 +451,14 @@ impl Storage {
      ```
 4. Commit. Skips are logged by callers, never with the content, only `[source] skipped: <reason>`.
 
-**Reads apply retention too:** every list, nth, search and count query adds `AND (pinned = 1 OR ?cutoff IS NULL OR last_used >= ?cutoff)`, so expired entries disappear even before the next write deletes them.
+**`expire()`** runs steps 3-4 alone (no insert) and is called from `Storage::open` and the daemon tick, so expired entries are gone before any read in a fresh process and age out of a long-running daemon. Reads carry no retention filter. If `expire()` deleted anything it also does the best-effort checkpoint described under "Deleting secrets".
 
 **Search** (`query.rs`):
 - `fts_query(q)` splits on whitespace and keeps tokens of 3 or more characters. Each token is wrapped as an FTS5 phrase with internal `"` doubled (`"tok"`), and the phrases are joined with `AND`. If no token is long enough, it returns `None`.
 - When there is an FTS query:
   ```sql
   SELECT e.* FROM entries_fts JOIN entries e ON e.id = entries_fts.rowid
-  WHERE entries_fts MATCH ?1 [AND retention]
+  WHERE entries_fts MATCH ?1
   ORDER BY e.pinned DESC, e.last_used DESC, e.id DESC
   LIMIT ?2
   ```
@@ -413,7 +471,7 @@ impl Storage {
 ```toml
 # ~/.config/clipstack/config.toml   (all keys optional)
 [storage]
-retention_days = 30            # unpinned entries older than this are deleted; 0 = keep forever
+retention_days = 0             # unpinned entries older than this are deleted; 0 = keep forever (see Q2)
 max_entry_bytes = 10485760     # 10 MiB; larger copies are not saved
 max_total_bytes = 268435456    # 256 MiB of unpinned content; oldest pruned first
 builtin_secret_patterns = true # skip private keys and well-known API token formats
@@ -426,7 +484,6 @@ poll_interval_ms = 250
 [socket]                       # Step 2
 enabled = true
 allow_pull = false             # rpaste needs this set to true
-max_connections = 8
 timeout_ms = 5000
 ```
 
@@ -450,14 +507,14 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 **Legacy import** (`legacy.rs`):
 - **When it runs:** on every `Storage::open`, a legacy store is detected if `<dir>/index.json` exists or any file matches `^\d+(_\d+)?\.txt$`. Detection is two cheap stat/readdir calls.
 - **Procedure** (idempotent and crash-safe):
-  1. Take `<dir>/index.lock` with fs2 `lock_exclusive`. This blocks a still-running old-version daemon's read-modify-write.
+  1. Take `<dir>/index.lock` with std `File::lock()` (same `flock` as the old code's fs2). This blocks a still-running old-version daemon's read-modify-write.
   2. Read `index.json`. If it can't be parsed, log it and continue with an empty list.
   3. Union the entries with orphan `.txt` files (reusing today's `attempt_recovery` scan logic, moved here as a pure `scan(dir) -> LegacyScan`).
   4. Read each content file. Non-UTF-8 or missing files are counted and left in place.
-  5. In one `BEGIN IMMEDIATE` transaction, insert oldest first using the same `insert_or_bump` as ingest, with `source = 'import'`, `created_at` from the ID prefix (fallback: `timestamp`), and `last_used = timestamp`. Conflicts on hash use `last_used = max(..)` and `pinned = max(..)`. Filters and caps are deliberately not applied, except max_entries pruning (see Q6).
+  5. In one `BEGIN IMMEDIATE` transaction, insert oldest first with `source = 'import'`, `created_at` from the ID prefix (fallback: `timestamp`), and `last_used = timestamp`, using `INSERT ... ON CONFLICT(hash) DO UPDATE SET last_used = max(last_used, excluded.last_used), pinned = max(pinned, excluded.pinned)`. Filters and caps are deliberately not applied, except max_entries pruning (see Q6).
   6. Set `settings.max_entries` from `index.json` only if it isn't already set. Set `legacy_imported_at` and `legacy_imported_count`. Commit.
-  7. Only after the commit, `mkdir legacy-backup-<now_ms>` (`0700`) and `rename` each imported or kept file into it (`index.json`, the `*.txt` files, `*.tmp` files, then `index.lock`).
-- **Crash safety:** a crash before step 7 means the next open re-imports, and the hash merge prevents duplicates. A crash during step 7 leaves some files in the root, which are picked up and merged next time. Nothing is deleted.
+  7. Only after the commit, `mkdir legacy-backup-<now_ms>` (`0700`) and `rename` each imported or kept file into it (`index.json`, the `*.txt` files, `*.tmp` files). `index.lock` stays where it is: it holds no data, and moving it would let an old daemon keep a lock on the renamed inode while new processes lock a fresh file. Detection ignores it.
+- **Crash safety:** a crash before step 7 means the next open re-imports, and the upsert on hash prevents duplicates. A crash during step 7 leaves some files in the root, which are picked up and merged next time. Nothing is deleted.
 - **Messages:** print once to stderr: `Imported N entries from index.json; old files kept in <dir>/legacy-backup-…/ (delete after checking)`. `status` keeps warning while a backup dir exists.
 - **Old daemon still running:** if an old-version daemon keeps writing `index.json`, those writes are imported (merged) on the next open of any new-version command. Step 2's daemon refuses to start while the lock is held, so the user has to run `clipstack kill` first, which works because the PID file format is unchanged.
 
@@ -471,13 +528,13 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-o` creates FILE `0600` and refuses to overwrite unless `--force` is given.
 - No `import` command in this plan (see Q-misc).
 
-**Deleting secrets:** `clear()` and `delete_entry` run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten. This is tested by grepping the db, `-wal` and `-shm` files.
+**Deleting secrets:** `clear()`, `delete_entry` and a deleting `expire()` run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten in the db pages, and truncating the WAL removes the frames that carried the plaintext when it was inserted. The checkpoint cannot complete while another connection holds a read transaction (e.g. an open picker); it then returns busy and the next deleting write retries. This is tested by grepping the db, `-wal` and `-shm` files in a single-process test.
 
 #### 1.2 Migration and compatibility
 
 | Item | After Step 1 |
 |------|--------------|
-| `~/.local/share/clipd` | Auto-imported on first open by any command. Originals moved to `legacy-backup-<ms>/` only after a successful commit |
+| `~/.local/share/clipd` | Auto-imported on first open by any command. Originals moved to `legacy-backup-<ms>/` only after a successful commit. README upgrade note: run `clipstack kill` **before** the first new-version command; an old daemon left running keeps writing `index.json`, and every later new-version command would merge it and create another backup dir |
 | `recover` | Hidden alias of `check --repair` |
 | `kill` | Unchanged |
 | `serve` | Unchanged except that it calls `ingest(Source::Remote)` |
@@ -493,7 +550,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 | File | Change |
 |------|--------|
 | `Cargo.toml` | Add `rusqlite`, `regex`, `toml`; set `rust-version = "1.89"` |
-| `src/storage.rs` | Deleted; replaced by `src/storage/{mod,schema,ingest,query,legacy}.rs` |
+| `src/storage.rs` | Moved to `src/storage/json.rs` in 1-1, deleted in 1-13; replaced by `src/storage/{mod,schema,ingest,query,legacy}.rs` |
 | `src/config.rs` | New |
 | `src/main.rs` | Global `--config PATH`. Load config before storage. `list`/`stats`/`status` use `list()`/`counts()`. `copy` uses `ingest(Source::Copy)`, still copies to the clipboard when skipped, and reports why. `clear` returns a count. New `export` and `check`; `recover` becomes a hidden alias. `serve` uses `ingest(Source::Remote)`. `status` shows DB path, retention, caps, config path and legacy backups |
 | `src/daemon.rs` | `save_entry` → `ingest(Source::Poll, &[])` (mime types arrive in Step 2) |
@@ -506,19 +563,20 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 
 | # | Commit | Failing test(s) first |
 |---|--------|-----------------------|
-| 1-1 | Add rusqlite and open a WAL database with schema v1 | `schema::tests::creates_entries_settings_and_fts`, `open_is_idempotent`, `rejects_newer_user_version`, `pragmas_wal_secure_delete_temp_store_memory` |
+| 1-1 | Move JSON storage to storage/json.rs; add rusqlite and open a WAL database with schema v1 | `schema::tests::creates_entries_settings_and_fts`, `open_is_idempotent`, `rejects_newer_user_version`, `pragmas_wal_secure_delete_temp_store_memory` (the move itself is covered by the existing suite) |
 | 1-2 | Create database and WAL/SHM files 0600 | `schema::tests::db_and_wal_files_are_0600`, `tightens_existing_0644_db` |
 | 1-3 | Add config file with storage policy and built-in secret patterns | `config::tests::missing_file_gives_defaults`, `parses_storage_section`, `rejects_unknown_key`, `invalid_regex_error_names_pattern`, `rejects_total_cap_below_entry_cap`, `builtin_patterns_match_github_token_and_private_key`, `builtin_patterns_ignore_prose_mentioning_token` |
 | 1-4 | Ingest inserts new entries and bumps duplicates | `ingest::tests::inserts_new_entry`, `duplicate_bumps_last_used_keeps_id`, `duplicate_preserves_pin_and_alias`, `preview_truncates_chars_and_sanitizes`, `unicode_content_roundtrips` |
 | 1-5 | Skip empty, password-manager, oversize and ignored content | `ingest::tests::empty_is_skipped`, `password_hint_mime_is_skipped`, `oversize_is_skipped`, `ignore_pattern_match_is_skipped`, `classify_order_sensitive_before_size` |
-| 1-6 | Enforce max entries, retention and total size on ingest | `ingest::tests::prunes_unpinned_beyond_max_entries`, `pinned_survive_pruning`, `expires_unpinned_older_than_retention`, `retention_zero_disables_expiry`, `total_bytes_cap_prunes_oldest_unpinned`, `query::tests::expired_entries_hidden_before_delete` |
+| 1-6 | Enforce max entries, retention and total size on ingest and at open | `ingest::tests::prunes_unpinned_beyond_max_entries`, `pinned_survive_pruning`, `expires_unpinned_older_than_retention`, `retention_zero_disables_expiry`, `total_bytes_cap_prunes_oldest_unpinned`, `storage::tests::open_expires_old_unpinned_entries` (write with retention off, reopen with retention on, entry gone), `expire_returns_zero_without_write_when_nothing_expired` |
 | 1-7 | Persist max_entries in settings with CLI/env/stored precedence | Port `test_open_without_limit_uses_stored_limit_and_does_not_prune`, `test_open_with_explicit_limit_persists_and_prunes`, `test_open_without_limit_on_fresh_dir_uses_default`, `test_max_entries_clamps_*`, `limit_is_saved_after_explicit_limit` |
 | 1-8 | Pin, alias, delete and clear on SQLite | Port pin tests (`toggle_pin_respects_max_pinned` etc.), plus `set_alias_validates_name`, `alias_is_unique`, `set_alias_pins_entry`, `unpin_clears_alias`, `clear_removes_all`, `deleted_secret_not_in_db_files` (grep db/wal/shm bytes after `clear`) |
 | 1-9 | Concurrent writers across processes lose nothing | Port `test_concurrent_writers_lose_no_updates` (8 threads × separate `Storage::open`), `test_concurrent_saves_dont_corrupt` (shared `Arc<Storage>`) |
 | 1-10 | Full-content search with FTS5 trigram index | `query::tests::search_finds_term_beyond_preview`, `search_case_insensitive`, `search_escapes_fts_syntax` (query `"a" OR b*`), `short_tokens_use_substring_fallback`, `search_orders_pinned_then_recency`, `fts_index_limited_to_first_256k_chars`, `fts_rebuild_matches_trigger_index` |
 | 1-11 | Import legacy index.json and content files into SQLite | `legacy::tests::imports_index_and_content`, `preserves_pin_recency_and_max_entries`, `includes_orphan_txt_files`, `handles_corrupt_index_json`, `dedupes_by_recomputed_hash`, `rerun_after_crash_before_move_is_idempotent`, `moves_files_to_backup_only_after_commit` (inject failure before commit; files must remain), `keeps_non_utf8_files_in_root`, `backup_dir_is_0700`, `reimports_index_written_by_old_daemon` |
-| 1-12 | Switch CLI, daemon and picker to the SQLite storage | `tests/migration_cli.rs::stats_after_import_matches_legacy_count`, picker `test_content_search_finds_non_preview_match` (unchanged test, now via FTS), `test_pinned_entries_shown_first_on_open` ported to integer IDs, main `limit_label_saved_when_settings_row_exists` |
-| 1-13 | Remove index.lock, atomic writes, ID generation and file search caps | Deletion only; the whole suite stays green. Optionally move the daemon lock to std `File::try_lock` (existing daemon lock tests cover it) |
+| 1-12a | Switch CLI and daemon to the SQLite storage | `tests/migration_cli.rs::stats_after_import_matches_legacy_count`, `copy_skipped_by_policy_still_copies_and_reports`, main `limit_label_saved_when_settings_row_exists` |
+| 1-12b | Switch picker to the SQLite storage | picker `test_content_search_finds_non_preview_match` (unchanged test, now via FTS), `test_pinned_entries_shown_first_on_open` ported to integer IDs, undo tests ported to `ingest(Source::Picker)` |
+| 1-13 | Delete storage/json.rs and fs2; daemon lock via std File::try_lock | Deletion only; the whole suite (including the existing daemon lock tests) stays green |
 | 1-14 | Add `export` (JSONL) | `tests/migration_cli.rs::export_jsonl_roundtrips_content`, `export_file_created_0600`, `export_refuses_overwrite_without_force` |
 | 1-15 | Replace `recover` with `check [--repair]` (keep alias) | `storage::tests::check_ok_on_fresh_db`, `check_repair_rebuilds_fts_after_delete_all`, `tests/migration_cli.rs::recover_alias_prints_recovery_complete` |
 | 1-16 | Update E2E scripts for SQLite storage | Shell: scripts fail first against new behaviour, then are updated |
@@ -527,10 +585,10 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 #### 1.5 Test plan
 
 - **Unit tests:** as listed. Time-dependent tests use `ingest_at` with fixed `now_ms`. There are no sleeps.
-- **Performance** (replaces `test_performance_large_entries`), 100 × 500 KB entries:
+- **Performance** (replaces `test_performance_large_entries`), 100 × 500 KB entries, `#[ignore]` and run with `cargo test --release -- --ignored` at the end of the step (debug builds of bundled SQLite and trigram indexing of 256 K characters per entry won't meet these):
   - `list(PinnedFirst, None)` < 10 ms
   - `load_content` < 20 ms
-  - `ingest` of 500 KB < 50 ms
+  - `ingest` of 500 KB < 100 ms
   - `search` < 20 ms
 - **Rust integration** (`tests/migration_cli.rs`, TestEnv): build a legacy store fixture in a temp dir, run `stats`, `list`, `export`, `check` and `recover`, and assert backup contents and modes.
 - **Shell E2E:**
@@ -567,8 +625,8 @@ Also add a "historical" banner to `docs/UPGRADE_PLAN.md` and `docs/IMPLEMENTATIO
 
 - **FTS size:** trigram indexes run about 3-5x the indexed text. With the 256 K-character window and 256 MiB total cap, the worst case is about 1 GB, but typical use is a few MB. A lower window (64 K) can be decided after measuring.
 - **Bundled SQLite build:** adds about 30-60 s to the first build and needs `cc`. That's acceptable.
-- **Retention default** of 30 days would delete most of the existing 10-month history on the first ingest after import (Q2).
-- **Import exempts filters** (Q6). Secrets already in history stay until retention or a manual delete. `check` could optionally report entries matching current patterns (Q-misc).
+- **Retention default**: any non-zero default deletes most of the existing 10-month history at the first `open` after import, because imported `last_used` is the legacy timestamp (Q2, NEEDS USER; the plan ships `0`).
+- **Import exempts filters** (Q6). Secrets already in history stay until retention or a manual delete.
 - **SQLITE_BUSY:** a picker holding a read transaction doesn't block WAL writers. Writers wait up to 5 s. Long write transactions only happen during import.
 
 ---
@@ -576,7 +634,7 @@ Also add a "historical" banner to `docs/UPGRADE_PLAN.md` and `docs/IMPLEMENTATIO
 ### Step 2: Daemon (`daemon.rs`, `clipboard.rs`, systemd)
 
 - [12] `wl-paste --watch` with polling fallback; read `--list-types` per change and pass mime types to `ingest` ([2]).
-- [3] Unix socket in `$XDG_RUNTIME_DIR`; framed `push`/`pull` protocol ([11] ready); read timeout; thread per connection. TCP `serve` removed or opt-in with token.
+- [3] Unix socket in `$XDG_RUNTIME_DIR`; framed `push`/`pull` protocol ([11] ready); read timeout; one connection at a time. TCP `serve` removed; rcopy rewritten in the same commit.
 - [5] Verify clean shutdown with the watch child process.
 - [6] Rewrite the systemd unit for the new socket and lock paths.
 
@@ -594,9 +652,9 @@ src/clipboard.rs       Clipboard struct with bin paths; list_types(); paste_text
 
 **Capture with watch mode:**
 - The daemon spawns `wl-paste --type text --watch <current_exe> --storage-dir <abs> [--config <path>] __watch-hook`. wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`.
-- The spawn happens from the main daemon thread (it lives as long as the daemon) with `pre_exec` setting `PR_SET_PDEATHSIG = SIGTERM`. That pre_exec block is the one `unsafe` block in the project and is documented. PDEATHSIG fires when the spawning thread exits, so it must be a long-lived thread.
-- Crate: `rustix = { version = "1", features = ["process"] }` for `set_parent_process_death_signal`, already in the dependency tree through tempfile. Confirm the `Signal` type path in rustix 1.x when implementing.
-- The hook writes directly to SQLite. This is consistent with having no single writer.
+- The spawn (and every supervisor restart) happens from the main daemon thread (it lives as long as the daemon) with `pre_exec` setting `PR_SET_PDEATHSIG = SIGTERM`. That pre_exec block is the one `unsafe` block in the project and is documented. PDEATHSIG fires when the spawning thread exits, so it must be a long-lived thread.
+- Crate: `rustix = { version = "1", features = ["process"] }`, already in the dependency tree through tempfile. Verified API: `rustix::process::set_parent_process_death_signal(Some(rustix::signal::Signal::TERM))`.
+- The hook writes directly to SQLite. This is consistent with having no single writer. It inherits the daemon's environment, so `CLIPSTACK_MAX_ENTRIES` resolves the same way in both.
 
 **Hidden `__watch-hook` subcommand** (`capture::run_hook`):
 - Reads `CLIPBOARD_STATE`.
@@ -632,8 +690,7 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 **Socket server:**
 - After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.
 - If the runtime dir is missing or not owned by us, the socket is disabled with a warning and capture continues.
-- Accept loop on its own thread: listener is non-blocking, checks `running` every 100 ms.
-- Each connection gets a thread named `clipstack-conn`, guarded by an `AtomicUsize`. Past `max_connections`, the server writes `ERR busy …` and closes.
+- Accept loop on its own thread: listener is non-blocking, checks `running` every 100 ms, and handles connections one at a time on that thread. There is no per-connection thread: the only client is the user's `ssh` forward, and the timeouts below bound how long a stuck client can hold the loop.
 - Per connection:
   - `set_read_timeout` / `set_write_timeout(timeout_ms)` plus an overall deadline of `2 × timeout_ms`.
   - Reject headers over 256 bytes or that aren't ASCII.
@@ -651,18 +708,17 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 
 **Shutdown sequence** (SIGTERM, SIGINT, SIGHUP via ctrlc, or `stop()`):
 1. `running = false`.
-2. The accept thread exits.
-3. Wait up to 2 s for connection threads.
-4. `child.kill()` + `wait()` for the watch child.
-5. Unlink the socket. A Drop guard does this only if we bound it.
-6. Release the lock.
-7. Print `clipstack daemon stopped`.
+2. Wait up to 2 s for the accept thread (it may be inside a request; the timeouts bound that), then carry on without it.
+3. `child.kill()` + `wait()` for the watch child.
+4. Unlink the socket. A Drop guard does this only if we bound it.
+5. Release the lock.
+6. Print `clipstack daemon stopped`.
 
 **Runtime dir:** `daemon::runtime_dir() -> Result<PathBuf>` returns `$XDG_RUNTIME_DIR`, or creates `/tmp/clipstack-<uid>` (`0700`) and verifies we own it. This replaces the shared `/tmp/clipstack.lock` fallback.
 
-**Picker auto-start:** `ensure_daemon_running` spawns `std::env::current_exe()`, not `"clipstack"` from PATH. Otherwise a test or dev build can start the installed binary.
+**Picker auto-start:** already spawns `std::env::current_exe()` since commit 0-8.
 
-**TCP `serve` removal:** keep the subcommand hidden. It prints `serve was removed: the daemon listens on <runtime>/clipstack.sock; see README "Remote clipboard"` and exits 2. `CB_PORT` is dropped. See Q3.
+**TCP `serve` removal:** keep the subcommand hidden. It prints `serve was removed: the daemon listens on <runtime>/clipstack.sock; see README "Remote clipboard"` and exits 2. `CB_PORT` is dropped. The same commit (2-13) rewrites `scripts/rcopy` for the socket, exactly as specified in Step 3.1, so remote copy never has a broken window (Q3). Step 3 adds `rpaste`.
 
 **systemd unit:** rename `systemd/clipd.service` to `systemd/clipstack.service`:
 
@@ -703,8 +759,8 @@ WantedBy=graphical-session.target
 | Item | After Step 2 |
 |------|--------------|
 | `serve`, TCP 7779 | Removed (hidden stub, exit 2) |
-| `CB_PORT` | Ignored. Remove it from README; rcopy is rewritten in Step 3 |
-| rcopy | **Broken until Step 3 lands** (Q3) |
+| `CB_PORT` | Ignored. Removed from README |
+| rcopy | Rewritten in the same commit for the Unix socket; users update `~/.ssh/config` (README gives before/after) |
 | `kill` | Unchanged (PID in the same lock path); now also stops the watch child and removes the socket |
 | Old daemon running at upgrade | The new daemon fails with "already running"; `clipstack kill` then start. Status shows `capture=unknown` when PING fails but the lock is held (an old daemon has no socket) |
 | systemd users | Must re-copy the unit under its new name; README gives the commands. The old `clipstack.service` copy in `~/.config/systemd/user` is replaced in place, same name |
@@ -718,13 +774,13 @@ WantedBy=graphical-session.target
 | `src/clipboard.rs` | Struct with bin paths, `list_types`, `paste_text --type text`, `PASSWORD_HINT_MIME`. The `watch` polling fn is removed |
 | `src/main.rs` | Hidden `__watch-hook`; `serve` stub; `status` adds socket path, PING result and capture mode; `check_dependencies` uses PATH lookup instead of `which` |
 | `src/config.rs` | `[capture]`, `[socket]` |
-| `src/picker.rs` | `current_exe()` spawn |
+| `scripts/rcopy` | Rewritten for the Unix socket (design in 3.1) |
 | `Cargo.toml` | `rustix` |
 | `systemd/clipd.service` → `systemd/clipstack.service` | Rewritten |
 | `tests/fakes/wl-paste` | Supports `--list-types` (prints `$FAKE_CLIP_DIR/types`), `--no-newline [--type T]` (prints `$FAKE_CLIP_DIR/content` or exits 1 "No selection"), `--type text --watch CMD…`. Watch mode writes its PID to `$FAKE_CLIP_DIR/watch.pid`, then reads lines `data <file>` / `sensitive <file>` / `nil` from FIFO `$FAKE_CLIP_DIR/events` and runs CMD with `CLIPBOARD_STATE` and stdin set. `FAKE_WATCH_UNSUPPORTED=1` makes watch exit 1 with the data-control message |
 | `tests/fakes/wl-copy` | stdin → `$FAKE_CLIP_DIR/content`; `--sensitive` also writes the hint to `types` |
 | `tests/watch_capture.rs`, `tests/socket_protocol.rs`, `tests/daemon_lifecycle.rs` | Rust integration tests |
-| `tests/e2e_daemon.sh` | New shell E2E (isolated) |
+| `tests/e2e_daemon.sh` | New shell E2E (isolated), including the rcopy cases |
 
 #### 2.4 Commits
 
@@ -732,21 +788,20 @@ WantedBy=graphical-session.target
 |---|--------|-----------------------|
 | 2-1 | Extend fake wl-paste/wl-copy with types, watch FIFO and sensitive mode | `tests/watch_capture.rs::fake_clipboard_roundtrip` |
 | 2-2 | Make Clipboard configurable and add list_types/paste_text | `clipboard::tests::list_types_parses_lines` (fake bins), `paste_text_no_selection_is_empty`, `copy_writes_content` |
-| 2-3 | Resolve a private runtime dir with /tmp fallback | `daemon::tests::runtime_dir_prefers_xdg`, `fallback_dir_created_0700`, `rejects_fallback_owned_by_other_uid` (simulated via a dir with the wrong mode → error) |
+| 2-3 | Resolve a private runtime dir with /tmp fallback | `daemon::tests::runtime_dir_prefers_xdg`, `fallback_dir_created_0700`, `rejects_fallback_with_wrong_mode_or_symlink` (ownership by another uid can't be simulated without root; the check is `symlink_metadata().uid() == getuid()` and is reviewed, not tested) |
 | 2-4 | Add hidden watch hook that ingests stdin | `watch_capture::hook_ingests_stdin`, `hook_skips_sensitive_state_and_drains_stdin`, `hook_skips_when_types_include_password_hint`, `hook_rejects_non_utf8`, `hook_ignores_nil_state`, `hook_caps_read_at_max_entry_bytes` |
 | 2-5 | Add capture supervisor state machine | `capture::tests::auto_falls_back_to_poll_on_fast_exit`, `restarts_with_backoff_after_late_exit`, `auto_polls_after_5_restarts_in_60s`, `watch_mode_gives_up_instead_of_polling`, `poll_mode_never_spawns_watch` |
 | 2-6 | Run wl-paste --watch from the daemon with polling fallback | `watch_capture::daemon_watch_captures_copy`, `daemon_falls_back_to_poll_when_watch_unsupported`, `poll_skips_password_hint_types`, `poll_passes_mime_types_to_ingest` (assert `mime` column) |
 | 2-7 | Expire old entries periodically in the daemon | `daemon::tests::tick_runs_expire_every_10_minutes` (injected clock) |
 | 2-8 | Add socket protocol v1 framing | `protocol::tests::parses_push_header`, `rejects_header_over_256_bytes`, `rejects_len_over_limit`, `rejects_unknown_verb_and_version`, `rejects_nonzero_len_for_pull_and_ping`, `ok_response_roundtrip_with_meta`, `err_response_roundtrip` |
 | 2-9 | Serve PUSH/PULL/PING on a 0600 Unix socket | `socket_protocol::socket_is_0600_in_runtime_dir`, `push_ingests_and_copies`, `push_ignored_pattern_copies_but_not_stored`, `pull_forbidden_by_default`, `pull_returns_clipboard_when_allowed`, `pull_refuses_sensitive_clipboard`, `ping_reports_capture_and_version` |
-| 2-10 | Enforce socket timeouts and connection limit | `socket_protocol::idle_client_gets_timeout` (`timeout_ms = 200`), `busy_when_max_connections_reached`, `oversize_push_rejected_without_reading_body` |
+| 2-10 | Enforce socket timeouts and body limit | `socket_protocol::idle_client_gets_timeout` (`timeout_ms = 200`), `second_client_served_after_first_times_out`, `oversize_push_rejected_without_reading_body` |
 | 2-11 | Replace stale socket on start; never unlink a live one | `socket_protocol::stale_socket_replaced`, `second_daemon_leaves_live_socket` |
 | 2-12 | Stop watch child and remove socket on shutdown | `daemon_lifecycle::sigterm_stops_watch_child_and_removes_socket` (PID from `watch.pid`), `sigkill_daemon_terminates_watch_child` (PDEATHSIG) |
-| 2-13 | Remove TCP serve | `daemon_lifecycle::serve_prints_migration_message_exits_2` |
-| 2-14 | Spawn the current executable when auto-starting the daemon | `picker::tests::daemon_spawn_program_is_current_exe` |
-| 2-15 | Show socket and capture mode in status | `daemon_lifecycle::status_reports_socket_reachable_and_capture_mode` |
-| 2-16 | Rewrite systemd unit for runtime-dir lock and socket | `tests/e2e_daemon.sh`: `systemd-analyze --user verify systemd/clipstack.service` (skip if unavailable) |
-| 2-17 | Document daemon capture modes, socket and systemd setup | — |
+| 2-13 | Remove TCP serve and rewrite rcopy for the socket | `daemon_lifecycle::serve_prints_migration_message_exits_2`; `e2e_daemon.sh`: rcopy via socat and via `nc -U` stores and copies, `OK 0 stored=0 reason=…` is reported on stderr with exit 0, unreachable socket exits 3 |
+| 2-14 | Show socket and capture mode in status | `daemon_lifecycle::status_reports_socket_reachable_and_capture_mode` |
+| 2-15 | Rewrite systemd unit for runtime-dir lock and socket | `tests/e2e_daemon.sh`: `systemd-analyze --user verify systemd/clipstack.service` (skip if unavailable) |
+| 2-16 | Document daemon capture modes, socket, rcopy and systemd setup | — |
 
 #### 2.5 Test plan
 
@@ -778,6 +833,7 @@ WantedBy=graphical-session.target
 - **Self-capture:** PUSH → wl-copy → watch hook → `Bumped`. Harmless.
 - **One process per copy:** about 5-10 ms of startup plus opening SQLite. Acceptable.
 - **`unsafe` pre_exec** for PDEATHSIG. The alternative is no PDEATHSIG and accepting an orphaned wl-paste after `kill -9`.
+- **systemd sandboxing in a user unit:** `ProtectSystem`, `ProtectHome`, `PrivateTmp` and `MemoryDenyWriteExecute` need unprivileged user namespaces for user services. Arch enables them; if `systemctl --user status` shows a namespace error, the README says which lines to drop. `systemd-analyze verify` does not catch this, so the manual check in 2.5 includes `systemctl --user restart clipstack && clipstack status`.
 
 ---
 
@@ -785,7 +841,7 @@ WantedBy=graphical-session.target
 
 - [8] `list --json`, `get <n|id>`, `search <q> --json` (FTS5), stable exit codes.
 - [9] `get @alias`, `alias <id> <name>`.
-- [11] `rcopy`/`rpaste` over SSH Unix-socket forwarding; README setup docs.
+- [11] `rpaste` over SSH Unix-socket forwarding (rcopy landed in 2-13); README setup docs.
 
 #### 3.1 Design
 
@@ -793,7 +849,7 @@ WantedBy=graphical-session.target
 
 ```rust
 pub enum EntryRef { Position(NonZeroUsize), Id(EntryId), Alias(String) }
-impl FromStr for EntryRef { /* "3" | "#42" | "@name" */ }
+impl FromStr for EntryRef { /* "3" | "id:42" | "@name" */ }
 pub struct CliError { pub code: Exit, pub msg: String }
 #[repr(u8)] pub enum Exit { Ok = 0, NotFound = 1, Usage = 2, Unavailable = 3, Storage = 4, Config = 5, Clipboard = 6 }
 fn exit_code_for(err: &anyhow::Error) -> Exit; // downcasts CliError, StorageError, ConfigError, ClipboardError
@@ -804,17 +860,17 @@ fn exit_code_for(err: &anyhow::Error) -> Exit; // downcasts CliError, StorageErr
 | Command | Behaviour |
 |---------|-----------|
 | `list [-c N] [--json] [--pinned]` | Human output unchanged. `--json` prints a JSON array of `ClipEntry` + `"position"`. Empty history prints `[]` and exits 0 |
-| `get <REF> [--copy]` | Raw content to stdout, no added newline. `--copy` also runs wl-copy, and the daemon bumps it. Missing entry → stderr `no entry for <REF>`, exit 1 |
+| `get <REF> [--copy]` | Raw content to stdout, no added newline. `--copy` also runs wl-copy and bumps the entry itself via `ingest(Source::Copy)` (works without a daemon; the watch hook's later bump is a no-op). Missing entry → stderr `no entry for <REF>`, exit 1 |
 | `search <QUERY> [-c N] [--json]` | `Storage::search`. Human output in the same format as `list`. No match → exit 1 (and `[]` with `--json`) |
-| `alias <REF> <NAME>` | `set_alias`, pinning if needed. Name rule `^[a-z0-9][a-z0-9_-]{0,31}$`. Conflict → exit 1 `alias @x already used by #12`. Pin limit → exit 1 |
+| `alias <REF> <NAME>` | `set_alias`, pinning if needed. Name rule `^[a-z0-9][a-z0-9_-]{0,31}$`. Conflict → exit 1 `alias @x already used by id:12`. Pin limit → exit 1 |
 | `alias --remove <REF>` | Clears the alias and keeps the pin |
 
 JSON timestamps are unix ms integers. No new dependency is needed for this.
 
-**rcopy / rpaste** (POSIX sh, `scripts/`):
+**rcopy / rpaste** (POSIX sh, `scripts/`; rcopy is written in commit 2-13 to this spec, rpaste in 3-8):
 - Socket path: `CLIPSTACK_SOCK`, default `$HOME/.clipstack.sock`.
 - Transport preference: `socat - UNIX-CONNECT:$SOCK`, then `nc -U $SOCK` (OpenBSD), then `ncat -U $SOCK`; exit 3 if none is available.
-- `rcopy`: `umask 077; tmp=$(mktemp)`, stdin → tmp, `n=$(wc -c <tmp)`, then `{ printf 'CLIPSTACK/1 PUSH %s\n' "$n"; cat "$tmp"; } | transport`. Parse the first response line; `OK` → exit 0, `ERR` → print the message, exit 1. Unreachable socket → exit 3. A trap removes tmp.
+- `rcopy`: `umask 077; tmp=$(mktemp)`, stdin → tmp, `n=$(wc -c <tmp)`, then `{ printf 'CLIPSTACK/1 PUSH %s\n' "$n"; cat "$tmp"; } | transport`. Parse the first response line; `OK` → exit 0 (print `reason=…` to stderr when `stored=0`), `ERR` → print the message, exit 1. Unreachable socket → exit 3. A trap removes tmp.
 - `rpaste`: `printf 'CLIPSTACK/1 PULL 0\n' | transport | { IFS= read -r hdr; case $hdr in OK*) cat ;; *) echo "${hdr#ERR }" >&2; exit 1 ;; esac; }`. POSIX `read` doesn't over-read from a pipe.
 - SSH setup (README):
   ```
@@ -825,7 +881,7 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 
 #### 3.2 Migration and compatibility
 
-- rcopy changes transport from TCP to a Unix socket; users update `~/.ssh/config` (README gives before/after). `CB_PORT` is documented as removed.
+- rcopy already uses the Unix socket (Step 2). `rpaste` is new and needs `allow_pull = true` on the local side.
 - `list` human output is unchanged.
 
 #### 3.3 File-by-file
@@ -834,10 +890,9 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 |------|--------|
 | `src/cli.rs`, `src/commands.rs` | New (moved from `main.rs`) |
 | `src/main.rs` | Thin dispatcher + exit-code mapping |
-| `scripts/rcopy` | Rewritten |
 | `scripts/rpaste` | New |
 | `tests/cli_scripting.rs` | New |
-| `tests/e2e_remote.sh` | New (isolated daemon; `CLIPSTACK_SOCK` pointed at the temp runtime socket, which stands in for the ssh forward) |
+| `tests/e2e_remote.sh` | New (isolated daemon; `CLIPSTACK_SOCK` pointed at the temp runtime socket, which stands in for the ssh forward). The rcopy cases move here from `e2e_daemon.sh` |
 
 #### 3.4 Commits
 
@@ -850,9 +905,8 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 | 3-5 | Add `list --json` | `cli_scripting::list_json_fields_and_positions`, `list_json_respects_count`, `list_json_empty_array` |
 | 3-6 | Add `search` with FTS5 and `--json` | `cli_scripting::search_finds_deep_match`, `search_json_shape`, `search_no_match_exits_1` |
 | 3-7 | Add `alias` and `alias --remove` | `cli_scripting::alias_pins_and_names`, `alias_conflict_exits_1`, `alias_remove_keeps_pin`, `alias_at_pin_limit_exits_1` |
-| 3-8 | Rewrite rcopy for the daemon Unix socket | `e2e_remote.sh`: rcopy via socat and via `nc -U` stores and copies; unreachable socket exits 3 |
-| 3-9 | Add rpaste | `e2e_remote.sh`: rpaste with `allow_pull=false` exits 1 with message; with `allow_pull=true` prints the fake clipboard content byte-for-byte (including no trailing newline) |
-| 3-10 | Document scripting mode, exit codes and SSH socket forwarding | — |
+| 3-8 | Add rpaste and move the remote E2E cases into e2e_remote.sh | `e2e_remote.sh`: rpaste with `allow_pull=false` exits 1 with message; with `allow_pull=true` prints the fake clipboard content byte-for-byte (including no trailing newline); rcopy cases still pass |
+| 3-9 | Document scripting mode, exit codes and SSH socket forwarding | — |
 
 #### 3.5 Test plan
 
@@ -930,7 +984,7 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 **[7] Paste into the previous window:**
 - `clipstack pick --paste`, or config `[picker] paste_after_pick = true` with `paste_keys = "shift+Insert"` (Shift+Insert pastes in terminals and most GUI apps).
-- After `wl-copy` succeeds, spawn a detached `sh -c 'sleep 0.15; exec wtype -M shift -k Insert -m shift'`, using `paste_command(keys) -> Vec<String>` (pure). The delay lets the picker window close and focus return.
+- After `wl-copy` succeeds, spawn `sh -c 'sleep 0.15; exec wtype -M shift -k Insert -m shift'` detached: `process_group(0)` (std `CommandExt`), stdin/stdout/stderr null, never waited on. Without that, the terminal closing with the picker sends it SIGHUP before the sleep ends. `paste_command(keys) -> Vec<String>` (pure) builds the argv. The delay lets the picker window close and focus return.
 - If wtype is missing, print a status message and still exit 0.
 
 **Config additions:** a `[picker]` section with `paste_after_pick` (default false), `paste_keys` (default "shift+Insert") and `search_debounce_ms` (default 50).
@@ -939,7 +993,7 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 - No storage changes.
 - New key bindings: `P` and `e` in list focus, `w` and `n` in preview focus.
-- `P` and `e` remove those two letters from type-to-search in normal mode (Q10).
+- Per the Q10 default, `/` is required to enter search; bare letters no longer start a filter. README's picker tables change accordingly. If the user picks the alternative, only the `map_key` table and those README rows change.
 
 #### 4.3 File-by-file
 
@@ -955,7 +1009,7 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 | # | Commit | Failing test(s) first |
 |---|--------|-----------------------|
 | 4-1 | Split picker into data, view state, render and key modules | Existing picker tests (moved, unchanged assertions) |
-| 4-2 | Map keys to actions as a pure function | `keys::tests::j_moves_down_in_list_focus`, `letters_start_search_in_normal_mode`, `q_in_preview_returns_to_list` |
+| 4-2 | Map keys to actions as a pure function; `/` required to search (Q10) | `keys::tests::j_moves_down_in_list_focus`, `slash_enters_search_and_letters_are_commands`, `typing_docker_in_normal_mode_deletes_nothing`, `q_in_preview_returns_to_list` |
 | 4-3 | Track selection by entry id across filter/pin changes | `state::tests::selection_survives_unpin` (FEATURE_PLAN Feature 4), `selection_none_when_filter_empty` |
 | 4-4 | Debounce search and query FTS5 | `search::tests::rapid_typing_runs_one_search`, `search_runs_after_debounce_elapsed`, `deep_match_marked_content` |
 | 4-5 | Wrap preview to actual pane width by display width | `text::tests::wraps_at_given_width`, `cjk_counts_double_width`, `render::tests::preview_rewraps_on_resize` (ratatui `TestBackend` 60 vs 120 cols) |
@@ -984,28 +1038,30 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 - Paste timing and focus return depend on the compositor and window rules. 150 ms may need to be configurable.
 - Shift+Insert pastes PRIMARY instead of CLIPBOARD in some apps (xterm). `paste_keys` makes this configurable.
-- Type-to-search conflicts: see Q10.
+- Key table: Q10 is NEEDS USER; the default (`/` to search) is implemented unless the user chooses otherwise before 4-2.
 
 ---
 
-## Open questions
+## Open questions (decided in review)
 
-| # | Question | Recommendation |
-|---|----------|----------------|
-| Q1 | The skeleton lists `storage_version` as a schema column. A per-row version adds nothing for a single-table schema. | Use `PRAGMA user_version` (schema version) plus `application_id`. Add per-row versions only if a later format needs mixed rows |
-| Q2 | Retention default. The real store holds about 100 entries spanning about 10 months; `retention_days = 30` deletes most of them on the first ingest after import. | Ask the user. Options: default 30 with a one-time import notice showing how many will expire; or default 0 (off) and document it as a recommended setting |
-| Q3 | TCP `serve`: remove or keep opt-in with token? Removal breaks TCP rcopy between Step 2 and Step 3. | Remove, with a hidden stub that exits 2. Land Step 3's commit 3-8 immediately after Step 2, or move it into Step 2 |
-| Q4 | `allow_pull` default. | `false`; rpaste prints how to enable it |
-| Q5 | Legacy backup dir lifetime (it holds plaintext). | Keep it; `status` warns while it exists; README says to delete it after checking. Optional `clipstack check --purge-legacy` |
-| Q6 | Legacy import skips secret filters and size caps, which is an exception to "one ingest path". | Accept (no silent data loss during migration). Optionally `check` reports entries matching current ignore patterns |
-| Q7 | `max_entries` lives in the DB while other limits live in config.toml. | Keep, so the existing CLI/env/saved semantics and labels are preserved. Revisit after Step 3 |
-| Q8 | Step 0 additions beyond the skeleton: remove `pkill -f "clipstack.*daemon"` from `test_component_interaction.sh` (it kills the user's real daemon); picker spawning `clipstack` from PATH (fixed in Step 2). | Approve the Step 0 test fix |
-| Q9 | Empty clipboard content is no longer stored (`copy` of empty stdin used to store an empty entry). | Accept |
-| Q10 | Normal-mode letters start a search, but `d` already deletes (typing "docker" deletes an entry). Adding `P`/`e` makes this worse. | Decide before Step 4: either require `/` to search, or move destructive and mode keys to Ctrl/Alt chords. This plan keeps the skeleton keys until decided |
-| Q11 | Built-in secret patterns are on by default and could drop legitimate copies (e.g. a test token). | On by default; `builtin_secret_patterns = false` opts out; skips are logged (without content) |
-| Q12 | FEATURE_PLAN "Entry Normalization" (CRLF→LF at ingest). | Reject; the clipboard must round-trip exactly |
-| Q13 | `clear` deletes pinned entries too (current behaviour). | Keep; consider `clear --keep-pinned` later |
-| Q-misc | `clipstack import <jsonl>` to pair with export; `copy --sensitive` passthrough to `wl-copy --sensitive`. | Out of scope; note for later |
+Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 are NEEDS USER; each has a default that is a one-line change to flip later.
+
+| # | Question | Decision | Reason |
+|---|----------|----------|--------|
+| Q1 | `storage_version` as a schema column? | **`PRAGMA user_version` plus `application_id`.** | A per-row version adds nothing to a single-table schema; future formats use `ALTER TABLE` under a new `user_version` |
+| Q2 | Retention default. The real store holds about 100 entries spanning about 10 months. | **NEEDS USER. Default `retention_days = 0` (off)** until told otherwise; README recommends `30` or `90` under "Configuration file", and the one-time import notice adds `N entries are older than <retention> days and will expire at the next start` only when retention is enabled. | `max_entries` (100) already bounds the history, so retention is an opt-in privacy setting, not a size control. Any non-zero default deletes most of the user's history at the first `open` after import, and reads happen before the user has seen the notice |
+| Q3 | TCP `serve`: remove or keep opt-in? | **Remove (hidden stub, exit 2) and rewrite rcopy in the same commit (2-13).** | A token-protected TCP listener is more code than the socket it replaces; rewriting rcopy with the removal leaves no broken window |
+| Q4 | `allow_pull` default. | **`false`.** rpaste prints how to enable it. | Pull is an exfiltration path for anyone with the remote uid or root |
+| Q5 | Legacy backup dir lifetime (plaintext). | **Keep it; `status` warns while it exists; README says `rm -r` it after checking. No `--purge-legacy`.** | Deleting user data is the user's call; a one-line `rm -r` doesn't need a subcommand |
+| Q6 | Legacy import skips filters and caps. | **Accept. No "check reports matching entries".** | Silent data loss during migration is worse than an old secret the user can delete; the reporting feature is extra surface for a one-time event |
+| Q7 | `max_entries` in the DB, other limits in config. | **Keep.** | Preserves CLI/env/saved semantics and labels; the watch hook inherits the daemon's env so both agree. Revisit after Step 3 |
+| Q8 | Step 0 additions beyond the skeleton. | **Approved: commits 0-7 (no `pkill`) and 0-8 (`current_exe()`).** | Both are isolation fixes needed before any suite is run against the new code |
+| Q9 | Empty content no longer stored. | **Accept.** | An empty entry is never useful to pick |
+| Q10 | Normal-mode letters start a search, but `d` deletes, `u` undoes, `p` pins; `P`/`e` make it worse. | **NEEDS USER. Recommended: `/` is required to search; bare letters are commands (vim-like, matching the existing `j`/`k`/`g`/`G`).** Step 4 implements `map_key` with this table; because it is one pure function, switching to the alternative (letters search, commands move to `D`/`U`/`Ctrl+P`-style chords) is a table change in commit 4-2. | Today typing "docker" from normal mode deletes an entry on the `d`; this is a latent data-loss bug, not a style choice |
+| Q11 | Built-in secret patterns on by default. | **On; `builtin_secret_patterns = false` opts out; skips logged without content.** | Security goal; the patterns are whole-content matches so prose is unaffected |
+| Q12 | CRLF→LF at ingest. | **Reject.** | The clipboard must round-trip exactly |
+| Q13 | `clear` deletes pinned entries. | **Keep.** | Current behaviour; `clear --keep-pinned` can be added later without a format change |
+| Q-misc | `clipstack import <jsonl>`; `copy --sensitive`. | **Out of scope.** | Neither is needed by Steps 0-4; `export` is for inspection and backup |
 
 ## Engineering rules (apply to every step)
 
