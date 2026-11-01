@@ -1,3 +1,5 @@
+pub mod capture;
+
 use crate::clipboard::Clipboard;
 use crate::perms;
 use crate::storage::{IngestOutcome, Source, Storage};

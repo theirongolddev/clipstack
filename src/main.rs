@@ -100,6 +100,10 @@ enum Commands {
         port: u16,
     },
 
+    /// Run by `wl-paste --watch` once per new selection (internal)
+    #[command(name = "__watch-hook", hide = true)]
+    WatchHook,
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -110,6 +114,15 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if matches!(cli.command, Some(Commands::WatchHook)) {
+        // Always exit 0: a failing command would make wl-paste --watch stop
+        if let Err(e) = watch_hook(&cli) {
+            eprintln!("[watch] {e:#}");
+            let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        }
+        return Ok(());
+    }
 
     // Check dependencies on commands that need clipboard access
     if matches!(
@@ -298,9 +311,27 @@ fn main() -> Result<()> {
         Some(Commands::Completions { shell }) => {
             generate_completions(shell);
         }
+
+        Some(Commands::WatchHook) => unreachable!("handled before storage is opened"),
     }
 
     Ok(())
+}
+
+/// `__watch-hook`: save the selection wl-paste passes on stdin.
+fn watch_hook(cli: &Cli) -> Result<()> {
+    let env_limit = std::env::var("CLIPSTACK_MAX_ENTRIES").ok();
+    let (max_entries, _) = resolve_max_entries(cli.max_entries, env_limit.as_deref());
+    let (config, _) = config::Config::load(cli.config.as_deref())?;
+    let storage_dir = cli.storage_dir.clone().unwrap_or_else(storage::Storage::default_dir);
+    let storage = storage::Storage::open(storage_dir, max_entries, config.ingest_policy()?)?;
+    let state = std::env::var("CLIPBOARD_STATE").ok();
+    daemon::capture::run_hook(
+        &storage,
+        &clipboard::Clipboard::system(),
+        state.as_deref(),
+        &mut io::stdin().lock(),
+    )
 }
 
 /// Where the effective max_entries limit came from

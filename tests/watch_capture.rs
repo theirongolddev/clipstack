@@ -94,3 +94,128 @@ fn fake_clipboard_roundtrip() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("data-control"), "{out:?}");
 
 }
+
+const TEXT_TYPES: &[&str] = &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
+
+/// The whole history, oldest first, via `clipstack export`.
+fn export(env: &TestEnv) -> Vec<serde_json::Value> {
+    let mut cmd = env.cmd();
+    cmd.arg("export");
+    let out = output(cmd);
+    assert!(out.status.success(), "export failed: {out:?}");
+    stdout(&out).lines().map(|l| serde_json::from_str(l).expect("export line is JSON")).collect()
+}
+
+fn write_config(env: &TestEnv, toml: &str) {
+    let dir = env.config_home.join("clipstack");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), toml).unwrap();
+}
+
+/// What `clipstack __watch-hook` did with `input` under `CLIPBOARD_STATE=state`.
+struct Hook {
+    status: std::process::ExitStatus,
+    stderr: String,
+    /// Whether all of `input` could be written (no EPIPE)
+    wrote_all: bool,
+}
+
+fn run_hook(env: &TestEnv, state: Option<&str>, input: &[u8]) -> Hook {
+    let mut cmd = env.cmd();
+    cmd.arg("__watch-hook").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(state) = state {
+        cmd.env("CLIPBOARD_STATE", state);
+    }
+    let mut child = cmd.spawn().expect("spawn hook");
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &input).is_ok());
+    let out = child.wait_with_output().expect("wait for hook");
+    Hook {
+        status: out.status,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        wrote_all: writer.join().unwrap(),
+    }
+}
+
+#[test]
+fn hook_ingests_stdin() {
+    let env = TestEnv::new();
+    env.set_clipboard("hello from watch", TEXT_TYPES);
+    let hook = run_hook(&env, Some("data"), b"hello from watch");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.wrote_all);
+
+    let entries = export(&env);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["content"], "hello from watch");
+    assert_eq!(entries[0]["source"], "watch");
+    assert_eq!(entries[0]["mime"], "text/plain;charset=utf-8");
+    assert!(!hook.stderr.contains("hello from watch"), "content must not be logged: {}", hook.stderr);
+
+    // No CLIPBOARD_STATE (older wl-paste) is treated as data
+    let hook = run_hook(&env, None, b"second copy");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert_eq!(export(&env).len(), 2);
+}
+
+#[test]
+fn hook_skips_sensitive_state_and_drains_stdin() {
+    let env = TestEnv::new();
+    let secret = vec![b's'; 1 << 20];
+    let hook = run_hook(&env, Some("sensitive"), &secret);
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.wrote_all, "the hook must read all of stdin so the source sees no EPIPE");
+    assert!(hook.stderr.contains("[watch] skipped sensitive"), "{}", hook.stderr);
+    assert!(export(&env).is_empty());
+}
+
+#[test]
+fn hook_skips_when_types_include_password_hint() {
+    let env = TestEnv::new();
+    env.set_clipboard("hunter2", &["text/plain;charset=utf-8", "x-kde-passwordManagerHint"]);
+    let hook = run_hook(&env, Some("data"), b"hunter2");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.stderr.contains("[watch] skipped: marked sensitive"), "{}", hook.stderr);
+    assert!(export(&env).is_empty());
+}
+
+#[test]
+fn hook_rejects_non_utf8() {
+    let env = TestEnv::new();
+    let hook = run_hook(&env, Some("data"), b"\xff\xfe binary");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.stderr.contains("not UTF-8"), "{}", hook.stderr);
+    assert!(export(&env).is_empty());
+}
+
+#[test]
+fn hook_ignores_nil_state() {
+    let env = TestEnv::new();
+    for state in ["nil", "clear"] {
+        let hook = run_hook(&env, Some(state), b"");
+        assert!(hook.status.success(), "{state}: {}", hook.stderr);
+    }
+    // An unknown state is not saved either
+    let hook = run_hook(&env, Some("something-new"), b"maybe secret");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.wrote_all);
+    assert!(export(&env).is_empty());
+}
+
+#[test]
+fn hook_caps_read_at_max_entry_bytes() {
+    let env = TestEnv::new();
+    write_config(&env, "[storage]\nmax_entry_bytes = 1024\n");
+    env.set_clipboard("", TEXT_TYPES);
+    let hook = run_hook(&env, Some("data"), &vec![b'a'; 4096]);
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert!(hook.wrote_all, "the rest of stdin is drained, not left unread");
+    assert!(hook.stderr.contains("too large (4096 bytes"), "{}", hook.stderr);
+    assert!(export(&env).is_empty());
+
+    // Exactly at the cap is saved
+    let hook = run_hook(&env, Some("data"), &vec![b'b'; 1024]);
+    assert!(hook.status.success(), "{}", hook.stderr);
+    assert_eq!(export(&env).len(), 1);
+}

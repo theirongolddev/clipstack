@@ -80,7 +80,6 @@ impl Clipboard {
     /// The mime types the current selection is offered as
     /// (`wl-paste --list-types`); empty when there is no selection. Gives up
     /// after 1 s, so a stuck source client can't stall capture.
-    #[cfg_attr(not(test), expect(dead_code, reason = "first caller is the watch hook (commit 2-4)"))]
     pub fn list_types(&self) -> Result<Vec<String>> {
         let mut cmd = Command::new(&self.paste_bin);
         cmd.arg("--list-types");
