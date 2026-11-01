@@ -1,7 +1,11 @@
 //! Command-line definitions (clap) and argument resolution.
 
+use crate::clipboard::ClipboardError;
+use crate::config::ConfigError;
+use crate::storage::StorageError;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -101,6 +105,82 @@ pub enum Commands {
     },
 }
 
+/// Exit status, stable for scripts (README "Scripting"). 3 (daemon or
+/// socket unavailable) is used by `rcopy` and `rpaste`; no clipstack
+/// subcommand needs the daemon, so the binary never exits 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Exit {
+    /// Not found or no match (grep-like); also refused (alias taken, pin
+    /// limit) and any failure not listed below
+    NotFound = 1,
+    /// Bad arguments (clap exits 2 itself for parse errors)
+    Usage = 2,
+    /// Storage error: locked, corrupt, newer schema
+    Storage = 4,
+    /// Config file error
+    Config = 5,
+    /// wl-copy or wl-paste failed
+    Clipboard = 6,
+}
+
+impl From<Exit> for std::process::ExitCode {
+    fn from(exit: Exit) -> Self {
+        std::process::ExitCode::from(exit as u8)
+    }
+}
+
+/// An error that carries its exit status. An empty message prints nothing
+/// (`search` with no match exits 1 silently, like grep).
+#[derive(Debug)]
+pub struct CliError {
+    pub code: Exit,
+    pub msg: String,
+}
+
+impl CliError {
+    pub fn new(code: Exit, msg: impl Into<String>) -> Self {
+        Self { code, msg: msg.into() }
+    }
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for CliError {}
+
+/// The exit status for an error: the first cause in its chain that has one.
+/// Anything unrecognised exits 1, as every error did before Step 3.
+pub fn exit_code_for(err: &anyhow::Error) -> Exit {
+    err.chain().find_map(cause_exit).unwrap_or(Exit::NotFound)
+}
+
+fn cause_exit(cause: &(dyn std::error::Error + 'static)) -> Option<Exit> {
+    if let Some(e) = cause.downcast_ref::<CliError>() {
+        return Some(e.code);
+    }
+    if cause.is::<ConfigError>() {
+        return Some(Exit::Config);
+    }
+    if cause.is::<ClipboardError>() {
+        return Some(Exit::Clipboard);
+    }
+    if let Some(e) = cause.downcast_ref::<StorageError>() {
+        return Some(match e {
+            StorageError::NewerSchema { .. } | StorageError::Corrupt(_) => Exit::Storage,
+            StorageError::InvalidAlias(_) => Exit::Usage,
+            StorageError::NotFound { .. } | StorageError::PinLimit { .. } | StorageError::AliasTaken(_) => {
+                Exit::NotFound
+            }
+        });
+    }
+    // Locked (busy past the timeout), I/O or corruption reported by SQLite
+    cause.is::<rusqlite::Error>().then_some(Exit::Storage)
+}
+
 /// Where the effective max_entries limit came from
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LimitSource {
@@ -179,6 +259,34 @@ mod tests {
         assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "default");
         open(Some(5));
         assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "saved");
+    }
+
+    #[test]
+    fn exit_code_for_storage_config_clipboard_errors() {
+        use crate::clipboard::ClipboardError;
+        use crate::config::ConfigError;
+        use storage::StorageError;
+        let code = |err: anyhow::Error| exit_code_for(&err);
+
+        assert_eq!(code(StorageError::NewerSchema { found: 2, supported: 1 }.into()), Exit::Storage);
+        assert_eq!(code(StorageError::Corrupt("damaged".into()).into()), Exit::Storage);
+        // Found through added context too
+        let wrapped = anyhow::Error::new(StorageError::Corrupt("damaged".into())).context("opening");
+        assert_eq!(code(wrapped), Exit::Storage);
+        let busy = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), None);
+        assert_eq!(code(anyhow::Error::new(busy).context("Failed to apply storage limits")), Exit::Storage);
+
+        assert_eq!(code(ConfigError("bad key".into()).into()), Exit::Config);
+        assert_eq!(code(ClipboardError::from(anyhow::anyhow!("wl-copy failed")).into()), Exit::Clipboard);
+
+        assert_eq!(code(CliError::new(Exit::NotFound, "no entry for 3").into()), Exit::NotFound);
+        assert_eq!(code(CliError::new(Exit::Usage, "bad").into()), Exit::Usage);
+        assert_eq!(code(StorageError::NotFound { id: 3 }.into()), Exit::NotFound);
+        assert_eq!(code(StorageError::PinLimit { max: 25 }.into()), Exit::NotFound);
+        assert_eq!(code(StorageError::AliasTaken("x".into()).into()), Exit::NotFound);
+        assert_eq!(code(StorageError::InvalidAlias("X".into()).into()), Exit::Usage);
+        // Anything else keeps the old exit status 1
+        assert_eq!(code(anyhow::anyhow!("something else")), Exit::NotFound);
     }
 
     #[test]

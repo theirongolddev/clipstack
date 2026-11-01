@@ -1,7 +1,7 @@
 //! One function per subcommand. `main` parses the command line, loads the
 //! config, opens storage and dispatches here.
 
-use crate::cli::{Cli, LimitSource, resolve_max_entries};
+use crate::cli::{Cli, CliError, Exit, LimitSource, resolve_max_entries};
 use crate::storage::{self, IngestOutcome, ListOrder, Source, Storage};
 use crate::{clipboard, config, daemon, perms, protocol, util};
 use anyhow::{Context, Result};
@@ -13,15 +13,17 @@ use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `serve`: the TCP server is gone; say where the socket is. Exits 2.
-pub fn serve_removed() -> ! {
+/// `serve`: the TCP server is gone; the error says where the socket is (exit 2).
+pub fn serve_removed() -> CliError {
     let sock = daemon::Daemon::socket_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "$XDG_RUNTIME_DIR/clipstack.sock".to_string());
-    eprintln!(
-        "serve was removed: the daemon listens on {sock}; see README \"Remote clipboard\" for rcopy over ssh"
-    );
-    std::process::exit(2);
+    CliError::new(
+        Exit::Usage,
+        format!(
+            "serve was removed: the daemon listens on {sock}; see README \"Remote clipboard\" for rcopy over ssh"
+        ),
+    )
 }
 
 /// `copy`: stdin to the clipboard and the history.
@@ -118,9 +120,12 @@ pub fn kill() -> Result<()> {
 
     // Signal the exact PID recorded in the daemon's lock file
     let Some(pid) = daemon::Daemon::running_pid() else {
-        eprintln!("Daemon is running but its PID is unknown (started by an older version?)");
-        eprintln!("Stop it manually, e.g.: pkill -x clipstack");
-        std::process::exit(1);
+        return Err(CliError::new(
+            Exit::NotFound,
+            "Daemon is running but its PID is unknown (started by an older version?)\n\
+             Stop it manually, e.g.: pkill -x clipstack",
+        )
+        .into());
     };
 
     match Command::new("kill").arg(pid.to_string()).status() {
@@ -134,14 +139,8 @@ pub fn kill() -> Result<()> {
             }
             println!("Daemon stopped (pid {})", pid);
         }
-        Ok(_) => {
-            eprintln!("Failed to signal daemon (pid {})", pid);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Failed to kill daemon: {}", e);
-            std::process::exit(1);
-        }
+        Ok(_) => anyhow::bail!("Failed to signal daemon (pid {pid})"),
+        Err(e) => anyhow::bail!("Failed to kill daemon: {e}"),
     }
     Ok(())
 }
@@ -258,26 +257,23 @@ fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
         .find(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
-/// Check if required dependencies (wl-clipboard) are installed
+/// Check if required dependencies (wl-clipboard) are installed (exit 6 if not)
 pub fn check_dependencies() -> Result<()> {
     // Look wl-paste up on PATH ourselves: `which` isn't installed everywhere
     let path = std::env::var_os("PATH").unwrap_or_default();
     match find_in_path("wl-paste", &path) {
         Some(_) => Ok(()),
-        None => {
-            eprintln!("Error: wl-clipboard not found");
-            eprintln!();
-            eprintln!("ClipStack requires wl-clipboard for Wayland clipboard access.");
-            eprintln!();
-            eprintln!("Install it with:");
-            eprintln!("  Arch:   sudo pacman -S wl-clipboard");
-            eprintln!("  Debian: sudo apt install wl-clipboard");
-            eprintln!("  Fedora: sudo dnf install wl-clipboard");
-            eprintln!();
-            eprintln!("Also ensure you're running in a Wayland session:");
-            eprintln!("  echo $WAYLAND_DISPLAY");
-            std::process::exit(1);
-        }
+        None => Err(clipboard::ClipboardError::from(anyhow::anyhow!(
+            "wl-clipboard not found\n\n\
+             ClipStack requires wl-clipboard for Wayland clipboard access.\n\n\
+             Install it with:\n  \
+               Arch:   sudo pacman -S wl-clipboard\n  \
+               Debian: sudo apt install wl-clipboard\n  \
+               Fedora: sudo dnf install wl-clipboard\n\n\
+             Also ensure you're running in a Wayland session:\n  \
+               echo $WAYLAND_DISPLAY"
+        ))
+        .into()),
     }
 }
 

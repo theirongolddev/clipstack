@@ -862,9 +862,11 @@ WantedBy=graphical-session.target
 pub enum EntryRef { Position(NonZeroUsize), Id(EntryId), Alias(String) }
 impl FromStr for EntryRef { /* "3" | "id:42" | "@name" */ }
 pub struct CliError { pub code: Exit, pub msg: String }
-#[repr(u8)] pub enum Exit { Ok = 0, NotFound = 1, Usage = 2, Unavailable = 3, Storage = 4, Config = 5, Clipboard = 6 }
-fn exit_code_for(err: &anyhow::Error) -> Exit; // downcasts CliError, StorageError, ConfigError, ClipboardError
+#[repr(u8)] pub enum Exit { NotFound = 1, Usage = 2, Storage = 4, Config = 5, Clipboard = 6 }
+fn exit_code_for(err: &anyhow::Error) -> Exit; // first cause in the chain: CliError, ConfigError, ClipboardError, StorageError, rusqlite::Error
 ```
+
+`Exit` has no `Ok` (success is `ExitCode::SUCCESS`) and no `Unavailable`: no clipstack subcommand needs the daemon (`get --copy` bumps the entry itself), so only `rcopy`/`rpaste` exit 3, and an unconstructed variant would be dead code. `StorageError::{NewerSchema, Corrupt}` and any `rusqlite::Error` (locked past the busy timeout, I/O) map to 4; `InvalidAlias` to 2; `NotFound`, `PinLimit` and `AliasTaken` to 1. An error with none of these types also exits 1, as every error did before Step 3. `ClipboardError` wraps the wl-clipboard error without changing its message, and a missing `wl-paste` is one too (6).
 
 **Commands:**
 

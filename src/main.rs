@@ -12,8 +12,10 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
+use std::process::ExitCode;
 
-fn main() -> Result<()> {
+/// Parse, run, and map an error to its stable exit code (README "Scripting").
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     if matches!(cli.command, Some(Commands::WatchHook)) {
@@ -22,11 +24,24 @@ fn main() -> Result<()> {
             eprintln!("[watch] {e:#}");
             let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         }
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
 
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // The format `fn main() -> Result` used: message, then "Caused by:"
+            if !e.to_string().is_empty() {
+                eprintln!("Error: {e:?}");
+            }
+            cli::exit_code_for(&e).into()
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Some(Commands::Serve { .. })) {
-        commands::serve_removed();
+        return Err(commands::serve_removed().into());
     }
 
     // Check dependencies on commands that need clipboard access

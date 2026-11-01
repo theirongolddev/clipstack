@@ -22,6 +22,34 @@ pub fn is_sensitive_offer(types: &[String]) -> bool {
     types.iter().any(|t| t == PASSWORD_HINT_MIME)
 }
 
+/// wl-copy or wl-paste failed (exit code 6). It wraps the underlying error
+/// without changing its message or cause chain, so it only marks the error.
+#[derive(Debug)]
+pub struct ClipboardError(anyhow::Error);
+
+impl From<anyhow::Error> for ClipboardError {
+    fn from(err: anyhow::Error) -> Self {
+        ClipboardError(err)
+    }
+}
+
+impl std::fmt::Display for ClipboardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for ClipboardError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// Mark a wl-clipboard failure as a `ClipboardError`.
+fn tool_failure(err: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(ClipboardError(err))
+}
+
 /// How long `list_types` waits for wl-paste.
 const LIST_TYPES_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long `paste_text` waits for wl-paste (the source client sends the data).
@@ -42,6 +70,10 @@ impl Clipboard {
 
     /// Put `content` on the clipboard with wl-copy.
     pub fn copy(&self, content: &str) -> Result<()> {
+        self.run_copy(content).map_err(tool_failure)
+    }
+
+    fn run_copy(&self, content: &str) -> Result<()> {
         let mut child = Command::new(&self.copy_bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -68,6 +100,10 @@ impl Clipboard {
     /// The clipboard as text (`wl-paste --no-newline --type text`). No
     /// selection, or an offer without any text type, is `""`.
     pub fn paste_text(&self) -> Result<String> {
+        self.run_paste_text().map_err(tool_failure)
+    }
+
+    fn run_paste_text(&self) -> Result<String> {
         let mut cmd = Command::new(&self.paste_bin);
         cmd.args(["--no-newline", "--type", "text"]);
         let output = run_with_timeout(cmd, PASTE_TIMEOUT)
@@ -86,6 +122,10 @@ impl Clipboard {
     /// (`wl-paste --list-types`); empty when there is no selection. Gives up
     /// after 1 s, so a stuck source client can't stall capture.
     pub fn list_types(&self) -> Result<Vec<String>> {
+        self.run_list_types().map_err(tool_failure)
+    }
+
+    fn run_list_types(&self) -> Result<Vec<String>> {
         let mut cmd = Command::new(&self.paste_bin);
         cmd.arg("--list-types");
         let output = run_with_timeout(cmd, LIST_TYPES_TIMEOUT).context("wl-paste --list-types")?;
