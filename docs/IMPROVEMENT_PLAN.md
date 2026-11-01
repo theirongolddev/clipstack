@@ -174,6 +174,7 @@ impl Storage {
     pub fn set_alias(&self, id: EntryId, alias: Option<&str>) -> Result<()>; // pins if needed
     pub fn clear(&self) -> Result<usize>;
     pub fn expire(&self) -> Result<usize>;                       // retention + caps, no insert; also run by open()
+    pub fn retry_pending_scrub(&self) -> Result<Option<bool>>;  // daemon tick: rerun a WAL scrub a reader blocked
     pub fn check(&self, repair: bool) -> Result<CheckReport>;
     pub fn export_jsonl(&self, out: &mut dyn Write) -> Result<usize>;
     pub fn legacy_backup_dirs(&self) -> Vec<PathBuf>;
@@ -395,7 +396,7 @@ CREATE INDEX entries_by_recency      ON entries (last_used DESC, id DESC);
 CREATE INDEX entries_unpinned_by_age ON entries (pinned, last_used);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
--- keys: max_entries, legacy_imported_at, legacy_imported_count
+-- keys: max_entries, legacy_imported_at, legacy_imported_count, scrub_pending
 
 CREATE VIRTUAL TABLE entries_fts USING fts5(
   search_text, content='entries', content_rowid='id', tokenize='trigram'
@@ -532,7 +533,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-o` creates FILE `0600` and refuses to overwrite unless `--force` is given; `--force` truncates and chmods the file `0600` before writing. It prints `Exported N entries to FILE` to stderr.
 - No `import` command in this plan (see Q-misc).
 
-**Deleting secrets:** `clear()`, `delete_entry`, a deleting `expire()` and an `ingest` whose `enforce_limits` pruned anything (it returns the delete count) run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten in the db pages, and truncating the WAL removes the frames that carried the plaintext when it was inserted. The checkpoint cannot complete while another connection holds a read transaction (e.g. an open picker); it then returns busy and the next deleting write retries. This is tested by grepping the db, `-wal` and `-shm` files in a single-process test.
+**Deleting secrets:** `clear()`, `delete_entry`, a deleting `expire()` and an `ingest` whose `enforce_limits` pruned anything (it returns the delete count) run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten in the db pages, and truncating the WAL removes the frames that carried the plaintext when it was inserted. The checkpoint cannot complete while another connection holds a read transaction (e.g. an open picker); it then returns busy, the scrub records `settings.scrub_pending` (visible to every process), and the daemon's 60 s tick (`Storage::retry_pending_scrub`) or the next deleting write retries and clears it. This is tested by grepping the db, `-wal` and `-shm` files in a single-process test.
 
 #### 1.2 Migration and compatibility
 

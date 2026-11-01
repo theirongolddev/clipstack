@@ -188,7 +188,8 @@ impl Daemon {
 }
 
 /// Runs `storage.expire()` every `EXPIRE_INTERVAL` on the daemon's clock, so
-/// entries past retention go away even when nothing new is copied.
+/// entries past retention go away even when nothing new is copied, and
+/// retries a scrub of deleted text that a reader blocked.
 struct ExpireTimer {
     next: Instant,
 }
@@ -208,6 +209,11 @@ impl ExpireTimer {
             Ok(0) => {}
             Ok(n) => eprintln!("[storage] expired {n} entries"),
             Err(e) => eprintln!("[storage] expiry failed: {e:#}"),
+        }
+        match storage.retry_pending_scrub() {
+            Ok(Some(false)) => eprintln!("[storage] scrub of deleted entries still blocked by a reader"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[storage] scrub retry failed: {e:#}"),
         }
         true
     }
@@ -372,6 +378,38 @@ mod tests {
         assert_eq!(count(&storage), 1);
         assert!(timer.tick(&storage, t0 + Duration::from_secs(120)));
         assert_eq!(count(&storage), 0);
+    }
+
+    #[test]
+    fn tick_retries_a_pending_scrub() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), Some(100), Default::default()).unwrap();
+        let entry = match storage.ingest("to delete", crate::storage::Source::Copy, &[]).unwrap() {
+            crate::storage::IngestOutcome::Inserted(e) => e,
+            other => panic!("{other:?}"),
+        };
+        // Another process deletes while a reader blocks its checkpoint
+        let other = Storage::open(dir.path().to_path_buf(), None, Default::default()).unwrap();
+        let reader = rusqlite::Connection::open(storage.db_path()).unwrap();
+        reader.execute_batch("BEGIN; SELECT count(*) FROM entries;").unwrap();
+        other.with_conn(|c| c.busy_timeout(Duration::from_millis(50)).unwrap());
+        assert!(other.delete_entry(entry.id).unwrap());
+        drop(other);
+        reader.execute_batch("ROLLBACK").unwrap();
+        let pending = |s: &Storage| {
+            s.with_conn(|c| {
+                c.query_row("SELECT count(*) FROM settings WHERE key = 'scrub_pending'", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+            }) == 1
+        };
+        assert!(pending(&storage), "the other process's blocked scrub is recorded");
+
+        let t0 = Instant::now();
+        let mut timer = ExpireTimer::new(t0);
+        assert!(timer.tick(&storage, t0 + Duration::from_secs(60)));
+        assert!(!pending(&storage), "the tick retried it");
     }
 
     #[test]

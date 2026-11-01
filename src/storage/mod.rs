@@ -437,6 +437,16 @@ impl Storage {
         Ok(deleted)
     }
 
+    /// Rerun a scrub that an earlier delete (in any process) couldn't finish.
+    /// `None` if none is pending, else whether it completed this time.
+    pub fn retry_pending_scrub(&self) -> Result<Option<bool>> {
+        let conn = self.conn();
+        if get_setting(&conn, SETTING_SCRUB_PENDING)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(scrub_deleted(&conn)))
+    }
+
     /// The connection. A panic while it was held can't leave SQLite in a bad
     /// state (transactions roll back on drop), so a poisoned lock is reused.
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -520,13 +530,29 @@ fn fts_state(conn: &Connection) -> Result<FtsState> {
     }
 }
 
+/// `settings` key set while a scrub couldn't finish; the daemon tick retries.
+const SETTING_SCRUB_PENDING: &str = "scrub_pending";
+
 /// After a deleting write: move the WAL into the database and truncate it
 /// (so frames that carried deleted plaintext are gone), then return free
 /// pages to the filesystem. Best effort: while another connection holds a
-/// read transaction the checkpoint can't finish, and the next delete retries.
-fn scrub_deleted(conn: &Connection) {
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+/// read transaction the checkpoint can't finish; that is recorded in
+/// `settings` (shared by every process) so the daemon's tick, or the next
+/// delete, retries. Returns whether the checkpoint completed.
+fn scrub_deleted(conn: &Connection) -> bool {
+    // Row: (busy, wal frames, checkpointed frames); busy = 0 means truncated
+    let done = matches!(
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)),
+        Ok(0)
+    );
     let _ = conn.execute_batch("PRAGMA incremental_vacuum");
+    let pending = matches!(get_setting(conn, SETTING_SCRUB_PENDING), Ok(Some(_)));
+    if !done && !pending {
+        let _ = set_setting(conn, SETTING_SCRUB_PENDING, "1");
+    } else if done && pending {
+        let _ = conn.execute("DELETE FROM settings WHERE key = ?1", [SETTING_SCRUB_PENDING]);
+    }
+    done
 }
 
 /// A `Storage` in a fresh temp dir with the default policy.
@@ -942,6 +968,29 @@ mod tests {
         add(&storage, "third entry", 3);
         assert_eq!(entry_count(&storage), 2, "marker pruned by max_entries");
         assert!(!contains(&db_file_bytes(&storage), marker), "pruned entry left plaintext");
+    }
+
+    #[test]
+    fn blocked_scrub_is_pending_until_retried() {
+        let (storage, _dir) = test_storage();
+        // Don't wait the full busy timeout for the reader below
+        storage.with_conn(|c| c.busy_timeout(Duration::from_millis(50)).unwrap());
+        let marker = "BLOCKEDSCRUB-5e2b77d1";
+        let entry = add(&storage, marker, 1);
+        assert_eq!(storage.retry_pending_scrub().unwrap(), None, "nothing pending yet");
+
+        // An open read transaction (a picker) blocks the TRUNCATE checkpoint
+        let reader = Connection::open(storage.db_path()).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader.query_row("SELECT count(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert!(storage.delete_entry(entry.id).unwrap());
+        assert!(contains(&db_file_bytes(&storage), marker), "sanity: WAL still holds it");
+        assert_eq!(storage.retry_pending_scrub().unwrap(), Some(false), "still blocked");
+
+        reader.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(storage.retry_pending_scrub().unwrap(), Some(true));
+        assert!(!contains(&db_file_bytes(&storage), marker), "retried scrub removed it");
+        assert_eq!(storage.retry_pending_scrub().unwrap(), None, "flag cleared");
     }
 
     #[test]
