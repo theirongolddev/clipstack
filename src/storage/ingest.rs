@@ -233,6 +233,17 @@ fn limits_exceeded(
     Ok(exceeded)
 }
 
+/// Delete the oldest unpinned entries beyond `max_entries`.
+pub(crate) fn prune_to_max_entries(conn: &Connection, max_entries: usize) -> Result<usize> {
+    Ok(conn
+        .prepare_cached(
+            "DELETE FROM entries WHERE id IN (
+               SELECT id FROM entries WHERE pinned = 0
+               ORDER BY last_used DESC, id DESC LIMIT -1 OFFSET ?1)",
+        )?
+        .execute([i64::try_from(max_entries)?])?)
+}
+
 /// Delete unpinned entries beyond `max_entries`, older than the retention
 /// cutoff, or beyond `max_total_bytes` (newest kept first). Pinned entries
 /// are never touched. Returns how many were deleted.
@@ -242,12 +253,7 @@ pub(crate) fn enforce_limits(
     policy: &IngestPolicy,
     now_ms: i64,
 ) -> Result<usize> {
-    let mut deleted = conn.prepare_cached(
-        "DELETE FROM entries WHERE id IN (
-           SELECT id FROM entries WHERE pinned = 0
-           ORDER BY last_used DESC, id DESC LIMIT -1 OFFSET ?1)",
-    )?
-    .execute([i64::try_from(max_entries)?])?;
+    let mut deleted = prune_to_max_entries(conn, max_entries)?;
 
     if let Some(cutoff) = retention_cutoff(policy, now_ms) {
         deleted += conn

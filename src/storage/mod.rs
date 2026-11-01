@@ -10,6 +10,7 @@
 #[warn(dead_code)] // json is the live storage until 1-12: keep its lint on
 pub mod json;
 mod ingest;
+mod legacy;
 mod query;
 mod schema;
 
@@ -190,6 +191,13 @@ impl Storage {
     pub fn open(dir: PathBuf, max_entries: Option<usize>, policy: IngestPolicy) -> Result<Storage> {
         let db_path = dir.join(DB_FILE);
         let mut conn = schema::open_connection(&db_path)?;
+        let import = if legacy::detect(&dir) {
+            let report = legacy::import(&mut conn, &dir, max_entries, ingest::now_ms())
+                .with_context(|| format!("Failed to import the old store in {dir:?}"))?;
+            Some(report)
+        } else {
+            None
+        };
 
         let stored = get_setting(&conn, SETTING_MAX_ENTRIES)?;
         let limit_saved = stored.is_some() || max_entries.is_some();
@@ -212,6 +220,12 @@ impl Storage {
             limit_saved,
             policy,
         };
+        if let Some(report) = import {
+            // Retention and the size caps wait for the next open, so the
+            // notice can warn before anything imported expires.
+            storage.print_import_notice(&report)?;
+            return Ok(storage);
+        }
         // Expired entries are gone before any read. Another process holding
         // the write lock past the busy timeout is not fatal: it expires next time.
         match storage.expire() {
@@ -221,6 +235,45 @@ impl Storage {
             }
         }
         Ok(storage)
+    }
+
+    /// The one-time stderr message after a legacy import.
+    fn print_import_notice(&self, report: &legacy::ImportReport) -> Result<()> {
+        let Some(backup) = &report.backup_dir else {
+            return Ok(());
+        };
+        eprintln!(
+            "Imported {} entries from index.json; old files kept in {}/ (delete after checking)",
+            report.imported,
+            backup.display()
+        );
+        if report.not_text > 0 {
+            eprintln!(
+                "{} content files are not UTF-8 text and were not imported; they are in the backup dir",
+                report.not_text
+            );
+        }
+        if let Some(retention) = self.policy.retention() {
+            let cutoff = ingest::now_ms()
+                .saturating_sub(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
+            let old: i64 = self.conn().query_row(
+                "SELECT count(*) FROM entries WHERE pinned = 0 AND last_used < ?1",
+                [cutoff],
+                |r| r.get(0),
+            )?;
+            if old > 0 {
+                eprintln!(
+                    "{old} entries are older than {} days and will expire at the next start",
+                    retention.as_secs() / 86_400
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `legacy-backup-*` dirs left by the import, oldest first.
+    pub fn legacy_backup_dirs(&self) -> Vec<PathBuf> {
+        legacy::backup_dirs(&self.base_dir)
     }
 
     pub fn default_dir() -> PathBuf {
