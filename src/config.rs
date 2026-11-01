@@ -17,6 +17,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub capture: CaptureConfig,
     pub socket: SocketConfig,
+    pub picker: PickerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -74,10 +75,32 @@ impl Default for SocketConfig {
     }
 }
 
+/// `[picker]`: the interactive picker.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PickerConfig {
+    /// Wait after the last keystroke before searching; 0 = every key
+    pub search_debounce_ms: u64,
+}
+
+impl Default for PickerConfig {
+    fn default() -> Self {
+        Self { search_debounce_ms: 50 }
+    }
+}
+
+impl PickerConfig {
+    pub fn search_debounce(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.search_debounce_ms)
+    }
+}
+
 /// Allowed `[capture] poll_interval_ms`.
 pub const POLL_INTERVAL_RANGE_MS: std::ops::RangeInclusive<u64> = 50..=5000;
 /// Allowed `[socket] timeout_ms`.
 pub const SOCKET_TIMEOUT_RANGE_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
+/// Allowed `[picker] search_debounce_ms`.
+pub const SEARCH_DEBOUNCE_RANGE_MS: std::ops::RangeInclusive<u64> = 0..=1000;
 
 /// Where the config came from, for `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +176,7 @@ impl Config {
             }
         };
         let config = Self::parse(&text)
-            .and_then(|c| c.check_daemon_sections().map(|()| c))
+            .and_then(|c| c.check_ranges().map(|()| c))
             .and_then(|c| c.ingest_policy().map(|_| c))
             .map_err(|e| ConfigError(format!("{}: {}", path.display(), e.0)))?;
         let source = if explicit {
@@ -169,8 +192,16 @@ impl Config {
         toml::from_str(text).map_err(|e| ConfigError(e.to_string().trim_end().to_string()))
     }
 
-    /// Validate the `[capture]` and `[socket]` sections.
-    pub fn check_daemon_sections(&self) -> Result<(), ConfigError> {
+    /// Check the numeric ranges in `[capture]`, `[socket]` and `[picker]`.
+    pub fn check_ranges(&self) -> Result<(), ConfigError> {
+        let debounce = self.picker.search_debounce_ms;
+        if !SEARCH_DEBOUNCE_RANGE_MS.contains(&debounce) {
+            return Err(ConfigError(format!(
+                "[picker] search_debounce_ms = {debounce} must be between {} and {}",
+                SEARCH_DEBOUNCE_RANGE_MS.start(),
+                SEARCH_DEBOUNCE_RANGE_MS.end()
+            )));
+        }
         let interval = self.capture.poll_interval_ms;
         if !POLL_INTERVAL_RANGE_MS.contains(&interval) {
             return Err(ConfigError(format!(
@@ -361,6 +392,23 @@ mod tests {
             std::fs::write(&path, text).unwrap();
             assert!(Config::load_path(&path, true).is_ok(), "{text}");
         }
+    }
+
+    #[test]
+    fn picker_search_debounce_default_and_range() {
+        assert_eq!(Config::default().picker.search_debounce_ms, 50);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for ms in [0, 1000] {
+            std::fs::write(&path, format!("[picker]\nsearch_debounce_ms = {ms}\n")).unwrap();
+            let (config, _) = Config::load_path(&path, true).unwrap();
+            assert_eq!(config.picker.search_debounce(), std::time::Duration::from_millis(ms));
+        }
+        std::fs::write(&path, "[picker]\nsearch_debounce_ms = 1001\n").unwrap();
+        let err = Config::load_path(&path, true).unwrap_err();
+        assert!(err.to_string().contains("search_debounce_ms"), "{err}");
+        let err = Config::parse("[picker]\ndebounce = 3\n").unwrap_err();
+        assert!(err.to_string().contains("debounce"), "{err}");
     }
 
     #[test]

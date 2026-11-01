@@ -683,6 +683,10 @@ allow_pull = false
 
 # Per-read timeout for a socket client (100 to 60000); a whole request gets twice this.
 timeout_ms = 5000
+
+[picker]
+# The picker searches once you stop typing for this long (0 to 1000; 0 = on every key).
+search_debounce_ms = 50
 ```
 
 **Built-in secret patterns** (Rust regex syntax). The private-key header is skipped wherever it appears in a copy. Every other pattern must match the whole copy, apart from surrounding whitespace: a copy that is nothing but a token is skipped, while prose or a script that contains one (for example a shell script with `export GITHUB_TOKEN=ghp_...` in it) is still saved. Use `ignore_patterns` if you want those skipped too.

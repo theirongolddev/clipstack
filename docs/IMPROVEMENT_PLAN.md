@@ -184,11 +184,11 @@ impl Storage {
 
 `Storage` is `Send + Sync` (it holds a `Mutex<rusqlite::Connection>`). Each process opens its own `Storage`. Write transactions use `BEGIN IMMEDIATE`. `open()` runs `expire()` once (a `SELECT EXISTS` first, so a read-only command normally takes no write lock; `SQLITE_BUSY` here is ignored), so reads never need a retention filter.
 
-### Config (Step 1 adds `[storage]`, Step 2 adds `[capture]` and `[socket]`; `src/config.rs`)
+### Config (Step 1 adds `[storage]`, Step 2 adds `[capture]` and `[socket]`, Step 4 adds `[picker]`; `src/config.rs`)
 
 ```rust
 #[derive(Deserialize, Default)] #[serde(default, deny_unknown_fields)]
-pub struct Config { pub storage: StorageConfig, pub capture: CaptureConfig, pub socket: SocketConfig }
+pub struct Config { pub storage: StorageConfig, pub capture: CaptureConfig, pub socket: SocketConfig, pub picker: PickerConfig }
 
 pub struct StorageConfig {        // defaults in the TOML below
     pub retention_days: u32,      // 0 = never expire
@@ -199,6 +199,7 @@ pub struct StorageConfig {        // defaults in the TOML below
 }
 pub struct CaptureConfig { pub mode: CaptureMode /* Auto|Watch|Poll */, pub poll_interval_ms: u64 }
 pub struct SocketConfig  { pub enabled: bool, pub allow_pull: bool, pub timeout_ms: u64 }
+pub struct PickerConfig  { pub search_debounce_ms: u64 /* Step 4; paste keys in 4-10 */ }
 
 impl Config {
     pub fn load(explicit: Option<&Path>) -> Result<(Config, ConfigSource)>; // missing default file => defaults
@@ -490,13 +491,16 @@ poll_interval_ms = 250
 enabled = true
 allow_pull = false             # rpaste needs this set to true
 timeout_ms = 5000
+
+[picker]                       # Step 4
+search_debounce_ms = 50
 ```
 
 Validation (failure means config error, exit 5 in Step 3):
 - `max_entry_bytes` in `1..=64 MiB`, and `max_total_bytes >= max_entry_bytes`.
 - At most 64 user patterns, compiled with `RegexSetBuilder::size_limit(1 << 20)`.
 - Error messages name the bad pattern and its index.
-- `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`.
+- `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`, `[picker] search_debounce_ms` in `0..=1000`.
 
 Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----` (matches anywhere in the content; ` BLOCK` covers PGP private key blocks)

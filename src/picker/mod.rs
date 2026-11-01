@@ -9,6 +9,7 @@ mod state;
 mod text;
 
 use crate::clipboard::Clipboard;
+use crate::config::PickerConfig;
 use crate::daemon::Daemon;
 use crate::storage::{ClipEntry, IngestOutcome, ListOrder, Source, Storage};
 use anyhow::Result;
@@ -21,7 +22,7 @@ use crossterm::{
 use keys::Action;
 use data::{DeletedEntry, PickerData, UNDO_WINDOW, order_pinned_first};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use search::{FilteredEntry, MatchLocation, SearchState};
+use search::{FilteredEntry, IDLE_POLL, MatchLocation, SearchState, search_timeout};
 use state::{Focus, Mode, StatusLevel, ViewState};
 use std::io::{Stdout, stdout};
 use std::process::{Command, Stdio};
@@ -40,6 +41,8 @@ pub struct Picker {
     data: PickerData,
     view: ViewState,
     search: SearchState,
+    /// Wait after the last keystroke before searching
+    debounce: Duration,
 }
 
 impl Picker {
@@ -48,6 +51,7 @@ impl Picker {
             data: PickerData::new(storage)?,
             view: ViewState::default(),
             search: SearchState::default(),
+            debounce: search::DEBOUNCE,
         };
 
         picker.update_filter();
@@ -68,6 +72,7 @@ impl Picker {
             self.search.results.clear();
         } else {
             // Run two-phase search
+            self.search.runs += 1;
             self.search.results = self.filter_entries(&self.view.query);
 
             // Extract indices for filtered list
@@ -286,7 +291,40 @@ impl Picker {
 
     /// Apply one action; `Some` ends the picker.
     fn apply(&mut self, action: Action) -> Result<Option<Outcome>> {
+        self.apply_at(action, Instant::now())
+    }
+
+    /// Run the pending search if it is due at `now`.
+    fn tick(&mut self, now: Instant) {
+        if search_timeout(self.view.pending_query_at, now, self.debounce, IDLE_POLL).is_zero() {
+            self.run_pending_search();
+        }
+    }
+
+    /// Run the search for the current query now, if one is waiting.
+    fn run_pending_search(&mut self) {
+        if self.view.pending_query_at.take().is_some() {
+            self.update_filter();
+            self.load_preview();
+        }
+    }
+
+    /// The query changed at `now`: search once typing pauses (an empty
+    /// query lists everything, so it needs no wait).
+    fn query_changed(&mut self, now: Instant) {
+        self.view.pending_query_at = Some(now);
+        if self.view.query.is_empty() || self.debounce.is_zero() {
+            self.run_pending_search();
+        }
+    }
+
+    /// `apply` at a given time (tests inject it to check the debounce).
+    fn apply_at(&mut self, action: Action, now: Instant) -> Result<Option<Outcome>> {
         self.view.pending = None;
+        // Every other action acts on the rows, so they must match the query
+        if !matches!(action, Action::None | Action::SearchInput(_) | Action::SearchBackspace) {
+            self.run_pending_search();
+        }
         match action {
             Action::None => {}
             Action::Quit => return Ok(Some(Outcome::Cancelled)),
@@ -309,13 +347,11 @@ impl Picker {
             Action::ExitSearch => self.view.mode = Mode::Normal,
             Action::SearchInput(c) => {
                 self.view.query.push(c);
-                self.update_filter();
-                self.load_preview();
+                self.query_changed(now);
             }
             Action::SearchBackspace => {
                 self.view.query.pop();
-                self.update_filter();
-                self.load_preview();
+                self.query_changed(now);
                 // Exit search mode if query is empty
                 if self.view.query.is_empty() {
                     self.view.mode = Mode::Normal;
@@ -378,9 +414,11 @@ impl Picker {
 
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Option<String>> {
         loop {
+            self.tick(Instant::now());
             terminal.draw(|f| self.render(f))?;
 
-            if event::poll(Duration::from_millis(100))?
+            let timeout = search_timeout(self.view.pending_query_at, Instant::now(), self.debounce, IDLE_POLL);
+            if event::poll(timeout)?
                 && let Event::Key(key) = event::read()?
             {
                 if key.kind != KeyEventKind::Press {
@@ -445,11 +483,12 @@ fn ensure_daemon_running(storage_dir: &std::path::Path) {
 }
 
 /// Run the picker and paste the selected content to clipboard
-pub fn pick_and_paste(storage: Storage) -> Result<bool> {
+pub fn pick_and_paste(storage: Storage, config: &PickerConfig) -> Result<bool> {
     // Ensure daemon is running before showing picker
     ensure_daemon_running(storage.base_dir());
 
     let mut picker = Picker::new(storage)?;
+    picker.debounce = config.search_debounce();
 
     match picker.run() {
         Ok(Some(content)) => {
@@ -581,6 +620,7 @@ pub(super) mod tests {
 
         press(&mut picker, "/dock");
         assert_eq!(picker.view.mode, Mode::Search);
+        picker.tick(Instant::now() + search::DEBOUNCE);
         assert_eq!(previews(&picker), vec!["docker ps"]);
         picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
         assert_eq!(picker.view.mode, Mode::Normal);

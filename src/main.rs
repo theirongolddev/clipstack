@@ -68,7 +68,7 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         // Default action: open picker
-        None | Some(Commands::Pick) => picker::pick_and_paste(storage).map(drop),
+        None | Some(Commands::Pick) => picker::pick_and_paste(storage, &config.picker).map(drop),
         Some(Commands::Copy) => commands::copy(&storage),
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count, json, pinned }) => commands::list(&storage, count, json, pinned),

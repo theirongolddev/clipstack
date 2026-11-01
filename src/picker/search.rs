@@ -8,6 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 /// Where the search match was found
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -24,9 +25,26 @@ pub struct FilteredEntry {
     pub match_location: MatchLocation, // Where match was found
 }
 
+/// Default wait after the last keystroke before searching
+/// (`[picker] search_debounce_ms`).
+pub const DEBOUNCE: Duration = Duration::from_millis(50);
+/// Longest wait for a key while no search is pending (status timers tick).
+pub const IDLE_POLL: Duration = Duration::from_millis(100);
+
+/// How long the event loop may wait for a key: until a pending search is
+/// due, and never longer than `idle`.
+pub fn search_timeout(pending: Option<Instant>, now: Instant, debounce: Duration, idle: Duration) -> Duration {
+    match pending {
+        Some(changed) => (changed + debounce).saturating_duration_since(now).min(idle),
+        None => idle,
+    }
+}
+
 /// The current filter's results.
 #[derive(Default)]
 pub struct SearchState {
+    /// Searches run so far (tests check the debounce with it)
+    pub runs: usize,
     /// Indices into `PickerData::entries`, in display order
     pub filtered: Vec<usize>,
     /// Search results with match metadata (empty without a query)
@@ -117,6 +135,79 @@ mod tests {
     use super::super::Picker;
     use super::super::tests::create_test_storage;
     use super::*;
+
+    use super::super::keys::Action;
+    use std::time::{Duration, Instant};
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// Type `text` into the search box, one key every 10 ms from `t0`.
+    fn type_at(picker: &mut Picker, text: &str, t0: Instant) -> Instant {
+        picker.apply_at(Action::EnterSearch, t0).unwrap();
+        let mut t = t0;
+        for c in text.chars() {
+            t += 10 * MS;
+            picker.apply_at(Action::SearchInput(c), t).unwrap();
+            picker.tick(t);
+        }
+        t
+    }
+
+    #[test]
+    fn rapid_typing_runs_one_search() {
+        let (_temp, storage) = create_test_storage(&["docker ps", "git log", "docker compose up"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let before = picker.search.runs;
+        let last = type_at(&mut picker, "docker", Instant::now());
+        assert_eq!(picker.search.runs, before, "no search while keys arrive 10 ms apart");
+        assert_eq!(picker.search.filtered.len(), 3, "the list is unfiltered until then");
+
+        picker.tick(last + 100 * MS);
+        assert_eq!(picker.search.runs, before + 1);
+        assert_eq!(picker.search.filtered.len(), 2);
+        picker.tick(last + 200 * MS);
+        assert_eq!(picker.search.runs, before + 1, "nothing pending, nothing run");
+    }
+
+    #[test]
+    fn search_runs_after_debounce_elapsed() {
+        let (_temp, storage) = create_test_storage(&["apple", "banana"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let last = type_at(&mut picker, "ban", Instant::now());
+        // The event loop waits at most until the search is due
+        assert_eq!(search_timeout(picker.view.pending_query_at, last, DEBOUNCE, IDLE_POLL), DEBOUNCE);
+        assert_eq!(search_timeout(picker.view.pending_query_at, last + 20 * MS, DEBOUNCE, IDLE_POLL), 30 * MS);
+        assert_eq!(search_timeout(None, last, DEBOUNCE, IDLE_POLL), IDLE_POLL);
+
+        picker.tick(last + 49 * MS);
+        assert_eq!(picker.search.filtered.len(), 2, "49 ms: not yet");
+        picker.tick(last + 50 * MS);
+        assert_eq!(picker.search.filtered.len(), 1, "50 ms after the last key");
+        assert_eq!(picker.view.pending_query_at, None);
+    }
+
+    #[test]
+    fn select_runs_a_pending_search_first() {
+        let (_temp, storage) = create_test_storage(&["apple", "banana"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let last = type_at(&mut picker, "app", Instant::now());
+        // Enter before the debounce elapsed copies the match, not the old first row
+        let outcome = picker.apply_at(Action::Select, last + MS).unwrap();
+        assert_eq!(outcome, Some(super::super::Outcome::Selected("apple".to_string())));
+    }
+
+    #[test]
+    fn deep_match_marked_content() {
+        let deep = format!("{}\nneedle_beyond_the_preview", "x".repeat(150));
+        let (_temp, storage) = create_test_storage(&[&deep, "needle_beyond in the preview"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let last = type_at(&mut picker, "needle_beyond", Instant::now());
+        picker.tick(last + DEBOUNCE);
+        let locations: Vec<_> = picker.search.results.iter().map(|r| r.match_location).collect();
+        assert_eq!(locations, [MatchLocation::Preview, MatchLocation::Content]);
+        assert_eq!(picker.get_match_location(1), Some(MatchLocation::Content));
+        assert_eq!(picker.data.entries[picker.search.filtered[1]].id, picker.data.storage.nth(2).unwrap().unwrap().id);
+    }
 
     // ======== FilteredEntry Type Tests ========
 

@@ -34,6 +34,8 @@ pub struct ViewState {
     /// First visible list row (kept between frames)
     pub list_offset: usize,
     pub query: String,
+    /// When the query last changed, while its search hasn't run yet
+    pub pending_query_at: Option<Instant>,
     pub status: Option<(String, StatusLevel, Instant)>,
     /// First key of a two-key command (`gg`, `dd`)
     pub pending: Option<char>,
@@ -50,6 +52,7 @@ impl Default for ViewState {
             selection: None,
             list_offset: 0,
             query: String::new(),
+            pending_query_at: None,
             status: None,
             pending: None,
             preview_scroll: 0,
