@@ -27,6 +27,9 @@ use std::io::{stdout, Stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// How long a deleted entry can be restored with `u`
+const UNDO_WINDOW: Duration = Duration::from_secs(5);
+
 /// Picker mode for vim-style navigation
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -465,7 +468,7 @@ impl Picker {
 
     fn undo_delete(&mut self) -> Result<()> {
         if let Some(deleted) = self.last_deleted.take() {
-            if deleted.deleted_at.elapsed() < Duration::from_secs(5) {
+            if deleted.deleted_at.elapsed() < UNDO_WINDOW {
                 let preview: String = deleted.entry.preview.chars().take(30).collect();
                 let restored = self.storage.save_entry(&deleted.content)?;
 
@@ -829,15 +832,46 @@ impl Picker {
         frame.render_widget(preview, area);
     }
 
+    /// How long the current status message stays visible. Undo prompts stay
+    /// up for the whole undo window instead of vanishing early.
+    fn status_duration(&self) -> Duration {
+        let is_undo_prompt = self
+            .status_message
+            .as_ref()
+            .is_some_and(|(msg, _, _)| msg.contains("undo"));
+        if is_undo_prompt && self.last_deleted.is_some() {
+            UNDO_WINDOW
+        } else {
+            Duration::from_secs(3)
+        }
+    }
+
+    /// Key help for the status line, based on focus and mode
+    fn help_text(&self) -> String {
+        if self.focus == Focus::Preview {
+            "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  Tab/Esc/q:Back".to_string()
+        } else {
+            let mode_indicator = match self.mode {
+                Mode::Normal => "[NORMAL]",
+                Mode::Search => "[SEARCH]",
+            };
+            format!(
+                "{} j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit",
+                mode_indicator
+            )
+        }
+    }
+
     fn render_status_line(&mut self, frame: &mut Frame, area: Rect) {
         // Check if we have a status message that hasn't expired
+        let ttl = self.status_duration();
         let status_text = if let Some((msg, level, instant)) = &self.status_message {
             let elapsed = instant.elapsed();
-            if elapsed < Duration::from_secs(3) {
+            if elapsed < ttl {
                 // Show undo countdown if applicable
                 let display_msg = if msg.contains("undo") {
                     if let Some(deleted) = &self.last_deleted {
-                        let remaining = 5_u64.saturating_sub(deleted.deleted_at.elapsed().as_secs());
+                        let remaining = UNDO_WINDOW.as_secs().saturating_sub(deleted.deleted_at.elapsed().as_secs());
                         if remaining > 0 {
                             format!("Deleted - Press 'u' to undo ({}s)", remaining)
                         } else {
@@ -864,26 +898,12 @@ impl Picker {
         };
 
         let (text, style) = status_text.unwrap_or_else(|| {
-            // Show different help based on focus mode
-            if self.focus == Focus::Preview {
-                (
-                    "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  Tab/Esc:Back  q:Quit"
-                        .to_string(),
-                    Style::default().fg(Color::Yellow),
-                )
+            let color = if self.focus == Focus::Preview {
+                Color::Yellow
             } else {
-                let mode_indicator = match self.mode {
-                    Mode::Normal => "[NORMAL]",
-                    Mode::Search => "[SEARCH]",
-                };
-                (
-                    format!(
-                        "{} j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit",
-                        mode_indicator
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                )
-            }
+                Color::DarkGray
+            };
+            (self.help_text(), Style::default().fg(color))
         });
 
         let help = Paragraph::new(text).style(style);
@@ -944,7 +964,7 @@ impl Picker {
 
             // Clear expired undo
             if let Some(deleted) = &self.last_deleted
-                && deleted.deleted_at.elapsed() >= Duration::from_secs(5)
+                && deleted.deleted_at.elapsed() >= UNDO_WINDOW
             {
                 self.last_deleted = None;
             }
@@ -1178,6 +1198,34 @@ mod tests {
             storage.save_entry(content).unwrap();
         }
         (temp, storage)
+    }
+
+    // ======== Status line Tests ========
+
+    #[test]
+    fn test_undo_status_lasts_full_undo_window() {
+        let (_temp, storage) = create_test_storage(&["a", "b"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.delete_selected().unwrap();
+        assert_eq!(picker.status_duration(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_regular_status_is_short() {
+        let (_temp, storage) = create_test_storage(&["a"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.set_status("★ Pinned".to_string(), StatusLevel::Success);
+        assert_eq!(picker.status_duration(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_preview_help_does_not_claim_q_quits() {
+        let (_temp, storage) = create_test_storage(&["a"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.focus = Focus::Preview;
+        let help = picker.help_text();
+        assert!(!help.contains("q:Quit"), "q exits preview, not the picker: {help}");
+        assert!(help.contains("q:Back"));
     }
 
     // ======== Pin ordering Tests ========
