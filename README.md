@@ -457,7 +457,7 @@ Clipboard history is stored in `~/.local/share/clipd/`:
 
 Clipboard history often contains passwords and tokens, so the storage directory is created `0700` and the database, WAL and SHM files `0600` (owner only). Stores written by older versions (`0755` directory, `0644` files) are tightened automatically the next time any command opens them; ClipStack prints `[storage] tightened permissions on N files` once when that happens. Only regular files directly inside the directory are changed: symlinks and subdirectories are never followed, and files owned by another user are left alone.
 
-Deleting an entry (or `clear`, or expiry) overwrites its text inside the database (SQLite `secure_delete` and the FTS5 `secure-delete` option) and then truncates the WAL, so the deleted text doesn't linger in the files. If another process (an open picker) is reading at that moment, the WAL is truncated by the next delete instead.
+Deleting an entry (or `clear`, expiry, or pruning when the history passes its entry or size limit) overwrites its text inside the database (SQLite `secure_delete` and the FTS5 `secure-delete` option) and then truncates the WAL, so the deleted text doesn't linger in the files. If another process (an open picker) is reading at that moment, the WAL is truncated by the next delete instead.
 
 ### Upgrading from the JSON store
 

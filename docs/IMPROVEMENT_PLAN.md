@@ -452,7 +452,7 @@ impl Storage {
                        FROM entries WHERE pinned = 0)
        WHERE running > ?max_total_bytes)
      ```
-4. Commit. Skips are logged by callers, never with the content, only `[source] skipped: <reason>`.
+4. Commit. If step 3 deleted anything, do the best-effort checkpoint described under "Deleting secrets". Skips are logged by callers, never with the content, only `[source] skipped: <reason>`.
 
 **`expire()`** runs steps 3-4 alone (no insert) and is called from `Storage::open` and the daemon tick, so expired entries are gone before any read in a fresh process and age out of a long-running daemon. Reads carry no retention filter. If `expire()` deleted anything it also does the best-effort checkpoint described under "Deleting secrets".
 
@@ -532,7 +532,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-o` creates FILE `0600` and refuses to overwrite unless `--force` is given; `--force` truncates and chmods the file `0600` before writing. It prints `Exported N entries to FILE` to stderr.
 - No `import` command in this plan (see Q-misc).
 
-**Deleting secrets:** `clear()`, `delete_entry` and a deleting `expire()` run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten in the db pages, and truncating the WAL removes the frames that carried the plaintext when it was inserted. The checkpoint cannot complete while another connection holds a read transaction (e.g. an open picker); it then returns busy and the next deleting write retries. This is tested by grepping the db, `-wal` and `-shm` files in a single-process test.
+**Deleting secrets:** `clear()`, `delete_entry`, a deleting `expire()` and an `ingest` whose `enforce_limits` pruned anything (it returns the delete count) run inside their transaction, then do a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` followed by `PRAGMA incremental_vacuum`. With `secure_delete` and the FTS `secure-delete` option, deleted plaintext is overwritten in the db pages, and truncating the WAL removes the frames that carried the plaintext when it was inserted. The checkpoint cannot complete while another connection holds a read transaction (e.g. an open picker); it then returns busy and the next deleting write retries. This is tested by grepping the db, `-wal` and `-shm` files in a single-process test.
 
 #### 1.2 Migration and compatibility
 

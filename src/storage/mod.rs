@@ -509,10 +509,6 @@ fn is_busy(err: &anyhow::Error) -> bool {
     err.downcast_ref::<rusqlite::Error>().is_some_and(schema::is_busy)
 }
 
-/// After a deleting write: move the WAL into the database and truncate it
-/// (so frames that carried deleted plaintext are gone), then return free
-/// pages to the filesystem. Best effort: while another connection holds a
-/// read transaction the checkpoint can't finish, and the next delete retries.
 /// The FTS index's own consistency check against the entries table.
 fn fts_state(conn: &Connection) -> Result<FtsState> {
     match conn.execute("INSERT INTO entries_fts(entries_fts, rank) VALUES ('integrity-check', 1)", []) {
@@ -524,6 +520,10 @@ fn fts_state(conn: &Connection) -> Result<FtsState> {
     }
 }
 
+/// After a deleting write: move the WAL into the database and truncate it
+/// (so frames that carried deleted plaintext are gone), then return free
+/// pages to the filesystem. Best effort: while another connection holds a
+/// read transaction the checkpoint can't finish, and the next delete retries.
 fn scrub_deleted(conn: &Connection) {
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     let _ = conn.execute_batch("PRAGMA incremental_vacuum");
@@ -927,6 +927,21 @@ mod tests {
         let bytes = db_file_bytes(&storage);
         assert!(!contains(&bytes, "LARGESECRET-b42d"), "cleared entry left plaintext");
         assert!(!contains(&bytes, "ordinary text"));
+    }
+
+    #[test]
+    fn pruned_entry_not_in_db_files() {
+        // One connection, so nothing blocks the TRUNCATE checkpoint.
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = open(&dir, Some(2));
+        let marker = "ROLLEDOFF-c81e5d0a";
+        add(&storage, marker, 1);
+        assert!(contains(&db_file_bytes(&storage), marker), "sanity: stored");
+
+        add(&storage, "second entry", 2);
+        add(&storage, "third entry", 3);
+        assert_eq!(entry_count(&storage), 2, "marker pruned by max_entries");
+        assert!(!contains(&db_file_bytes(&storage), marker), "pruned entry left plaintext");
     }
 
     #[test]

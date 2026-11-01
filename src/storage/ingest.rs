@@ -184,8 +184,11 @@ impl Storage {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (entry, inserted) = insert_or_bump(&tx, content, source, mime_types, now_ms)?;
-        enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
+        let pruned = enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
         tx.commit()?;
+        if pruned > 0 {
+            super::scrub_deleted(&conn);
+        }
         Ok(if inserted { IngestOutcome::Inserted(entry) } else { IngestOutcome::Bumped(entry) })
     }
 
