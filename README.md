@@ -279,7 +279,7 @@ Launch with `clipstack` or `clipstack pick`:
 │      3h [  12B] quick text   ││                          │
 │     40d [3.1KB] import React ││                          │
 └──────────────────────────────┘└──────────────────────────┘
-[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit
+[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  e:Edit  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit
 ```
 
 The picker uses vim-style modal navigation. In normal mode every letter is a command, so typing a word there never filters (or deletes): press `/` first to search.
@@ -296,6 +296,7 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `/` | Enter search mode |
 | `p` | Toggle pin on selected entry (★); unpinning removes its alias |
 | `P` | Name the selected entry `@name` (pins it); see the alias prompt below |
+| `e` | Edit the selected entry in `$VISUAL` / `$EDITOR` (else `vi`); saving a change copies the new text, adds it to the history and exits |
 | `dd` | Delete selected entry (a single `d` only arms it) |
 | `u` | Undo delete (5 second window) |
 | `Tab` | Enter preview scroll mode |
@@ -312,6 +313,8 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `Enter` | Copy selected entry to clipboard and exit |
 | `Esc` | Leave search mode; the filter stays (Backspace it away, or `/` to edit) |
 | `Ctrl+C` | Exit without copying |
+
+**Editing with `e`.** The picker hands the terminal to your editor with the entry in `$XDG_RUNTIME_DIR/clipstack-edit-<pid>-<id>.txt` (mode `0600`, never in `/tmp`), and deletes the file when the editor exits. `$VISUAL` or `$EDITOR` is run by `sh`, so `EDITOR="code --wait"` works. If you save a change, the new text becomes a new entry (the original stays) and is copied. If the editor exits non-zero, or the text is unchanged or blank, you are back in the picker with nothing copied. A final newline the editor adds to text that had none is dropped.
 
 **Alias prompt** (after `P`; it replaces the search box):
 | Key | Action |
@@ -1038,6 +1041,7 @@ clipstack/
 │   ├── perms.rs         # Private (0700/0600) storage permissions
 │   ├── picker/          # TUI history picker
 │   │   ├── mod.rs       # Picker: actions, event loop, terminal setup, pick_and_paste
+│   │   ├── actions.rs   # Edit in $EDITOR
 │   │   ├── data.rs      # Entries, content cache, undo
 │   │   ├── state.rs     # View state: mode, focus, selection (by id), prompt, toggles
 │   │   ├── search.rs    # Fuzzy preview match + full-content search, debounce

@@ -260,7 +260,7 @@ impl Picker {
                 "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  w:Whitespace  n:Numbers  Tab/Esc/q:Back".to_string()
             }
             (Mode::Normal, Focus::List) => {
-                "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit".to_string()
+                "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  e:Edit  p:Pin  P:Alias  dd:Del  u:Undo  q:Quit".to_string()
             }
         }
     }

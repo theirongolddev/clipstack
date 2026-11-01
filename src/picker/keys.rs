@@ -43,6 +43,7 @@ pub enum Action {
     PromptBackspace,
     PromptSubmit,
     PromptCancel,
+    Edit,
 }
 
 /// The action for `key` in the current mode and focus.
@@ -100,6 +101,7 @@ fn list_key(pending: Option<char>, key: KeyEvent) -> Action {
         (_, Some('/')) => Action::EnterSearch,
         (_, Some('p')) => Action::TogglePin,
         (_, Some('P')) => Action::OpenAliasPrompt,
+        (_, Some('e')) => Action::Edit,
         (_, Some('u')) => Action::Undo,
         _ => Action::None,
     }
@@ -230,6 +232,13 @@ mod tests {
         assert_eq!(map_key(&prompt, key(KeyCode::Backspace)), Action::PromptBackspace);
         assert_eq!(map_key(&prompt, key(KeyCode::Tab)), Action::None);
         assert_eq!(map_key(&prompt, ctrl('c')), Action::Quit);
+    }
+
+    #[test]
+    fn e_edits_in_list_focus_only() {
+        assert_eq!(map_key(&view(Mode::Normal, Focus::List), ch('e')), Action::Edit);
+        assert_eq!(map_key(&view(Mode::Normal, Focus::Preview), ch('e')), Action::None);
+        assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('e')), Action::SearchInput('e'));
     }
 
     #[test]

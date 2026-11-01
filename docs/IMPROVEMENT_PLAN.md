@@ -994,12 +994,13 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 - Unpinning with `p` warns `Unpinned (alias @x removed)`.
 
 **[10] Edit in `$EDITOR`:**
-- `actions::edit_in_editor(content, editor: &str) -> Result<Option<String>>`:
+- `actions::edit_in_editor(content, editor: &str, dir: &Path, id) -> Result<Option<String>>`:
   1. Write content to `<runtime>/clipstack-edit-<pid>-<id>.txt` (`0600`, not `/tmp`).
   2. Run `sh -c "$EDITOR \"$1\"" sh <file>` (`$VISUAL`, then `$EDITOR`, then `vi`).
   3. A non-zero exit returns `None`. Otherwise read the file back, remove it, and return `None` if the content is unchanged or empty.
 - The picker suspends the TUI (leave alt screen, disable raw mode), runs the editor, then resumes.
-- If there is new content: `ingest(Source::Edit, &[])` and return it as the selection (copy and exit, which is what "before copying" means).
+- If there is new content: `ingest(Source::Edit, &[])` and return it as the selection (copy and exit, which is what "before copying" means). Text the ingest policy skips is still copied, with the reason on stderr.
+- A final newline the editor adds to content that had none (vim's `fixeol`) is dropped, so opening and quitting does not count as a change. `edit_in_editor` takes the directory and entry id too, so tests use a temp dir; the picker passes `daemon::runtime_dir()`. The file is opened `create_new`, so a planted file is never reused.
 
 **[7] Paste into the previous window:**
 - `clipstack pick --paste`, or config `[picker] paste_after_pick = true` with `paste_keys = "shift+Insert"` (Shift+Insert pastes in terminals and most GUI apps).

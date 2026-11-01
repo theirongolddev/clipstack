@@ -1,6 +1,7 @@
 //! The history picker (TUI). `data` holds the entries, `state` the view,
 //! `search` the filter, `keys` the key handling and `render` the drawing.
 
+mod actions;
 mod data;
 mod keys;
 mod render;
@@ -11,7 +12,7 @@ mod text;
 use crate::clipboard::Clipboard;
 use crate::config::PickerConfig;
 use crate::daemon::Daemon;
-use crate::storage::{ClipEntry, IngestOutcome, ListOrder, Source, Storage};
+use crate::storage::{ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
@@ -28,9 +29,11 @@ use std::io::{Stdout, stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// How the picker ended.
+/// How the picker ended, or what the event loop must do for it.
 #[derive(Debug, PartialEq)]
 enum Outcome {
+    /// Edit this entry (the event loop suspends the TUI for the editor)
+    Edit(EntryId),
     /// Esc, q or Ctrl+C
     Cancelled,
     /// Enter: this content goes to the clipboard
@@ -146,6 +149,37 @@ impl Picker {
 
     /// Sort entries: pinned first, each group kept in recency (index) order.
     /// The selection is an entry id, so it follows its entry.
+    /// Edit entry `id` with `editor` (temp file in `dir`). New text is saved
+    /// (source `edit`) and selected, which copies it and closes the picker;
+    /// otherwise the picker stays open with a status message.
+    fn edit_entry(&mut self, id: EntryId, editor: &str, dir: &std::path::Path) -> Result<Option<Outcome>> {
+        let edited = self
+            .data
+            .storage
+            .load_content(id)
+            .and_then(|content| actions::edit_in_editor(&content, editor, dir, id));
+        match edited {
+            Ok(Some(text)) => {
+                if let IngestOutcome::Skipped(reason) = self.data.storage.ingest(&text, Source::Edit, &[])? {
+                    // Still copied, as with `clipstack copy`
+                    eprintln!("Edited text not saved to history: {}", self.data.storage.policy().describe_skip(&reason));
+                }
+                Ok(Some(Outcome::Selected(text)))
+            }
+            Ok(None) => {
+                self.view.set_status(
+                    "Edit: not changed (unchanged, empty, or the editor failed)".to_string(),
+                    StatusLevel::Warning,
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                self.view.set_status(format!("Edit failed: {e:#}"), StatusLevel::Warning);
+                Ok(None)
+            }
+        }
+    }
+
     /// Save the prompt's alias (pinning the entry), or remove the alias if
     /// the input is empty. A refused name (invalid, taken, pin limit) shows
     /// in the status line and leaves the prompt open to fix it.
@@ -445,6 +479,11 @@ impl Picker {
             }
             Action::PromptSubmit => self.submit_alias(),
             Action::PromptCancel => self.view.prompt = None,
+            Action::Edit => {
+                if let Some(entry) = self.selected_entry() {
+                    return Ok(Some(Outcome::Edit(entry.id)));
+                }
+            }
         }
         Ok(None)
     }
@@ -482,6 +521,23 @@ impl Picker {
         result
     }
 
+    /// Leave the TUI, edit entry `id` in `$VISUAL`/`$EDITOR`, come back.
+    fn edit_suspended(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>, id: EntryId) -> Result<Option<Outcome>> {
+        let dir = match crate::daemon::runtime_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.view.set_status(format!("Edit failed: {e:#}"), StatusLevel::Warning);
+                return Ok(None);
+            }
+        };
+        let env = |name| std::env::var(name).ok();
+        let editor = actions::choose_editor(env("VISUAL").as_deref(), env("EDITOR").as_deref());
+        suspend_tui(terminal)?;
+        let outcome = self.edit_entry(id, &editor, &dir);
+        resume_tui(terminal)?;
+        outcome
+    }
+
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Option<String>> {
         loop {
             self.tick(Instant::now());
@@ -495,10 +551,14 @@ impl Picker {
                     continue;
                 }
 
-                match self.handle_key(key)? {
+                let mut outcome = self.handle_key(key)?;
+                if let Some(Outcome::Edit(id)) = outcome {
+                    outcome = self.edit_suspended(terminal, id)?;
+                }
+                match outcome {
                     Some(Outcome::Selected(content)) => return Ok(Some(content)),
                     Some(Outcome::Cancelled) => return Ok(None),
-                    None => {}
+                    Some(Outcome::Edit(_)) | None => {}
                 }
             }
 
@@ -511,6 +571,22 @@ impl Picker {
         }
     }
 }
+/// Hand the terminal back (for an editor): normal screen, cooked mode.
+fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.backend_mut().execute(Show)?;
+    disable_raw_mode()?;
+    Ok(())
+}
+
+/// Take the terminal back after `suspend_tui` and redraw everything.
+fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    terminal.backend_mut().execute(EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(())
+}
+
 /// Arguments for auto-spawning the daemon against the picker's storage.
 /// The limit is deliberately omitted so the daemon reuses the saved one.
 fn daemon_spawn_args(storage_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
@@ -771,6 +847,32 @@ pub(super) mod tests {
         press(&mut picker, "p");
         assert_eq!(status(&picker), "Unpinned (alias @work removed)");
         assert_eq!(picker.data.storage.by_alias("work").unwrap(), None);
+    }
+
+    #[test]
+    fn e_edits_then_saves_and_selects_the_new_text() {
+        let (_temp, storage) = create_test_storage(&["other", "before"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let dir = TempDir::new().unwrap();
+        assert_eq!(press(&mut picker, "e"), Some(Outcome::Edit(picker.selected_entry().unwrap().id)));
+
+        let id = picker.selected_entry().unwrap().id;
+        let outcome = picker.edit_entry(id, "sh -c 'printf edited > \"$1\"' --", dir.path()).unwrap();
+        assert_eq!(outcome, Some(Outcome::Selected("edited".to_string())));
+        let saved = picker.data.storage.nth(1).unwrap().unwrap();
+        assert_eq!((saved.preview.as_str(), saved.source), ("edited", Source::Edit));
+        assert_eq!(picker.data.storage.counts().unwrap().total, 3, "the original stays");
+    }
+
+    #[test]
+    fn edit_without_change_stays_in_the_picker() {
+        let (_temp, storage) = create_test_storage(&["before"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let dir = TempDir::new().unwrap();
+        let id = picker.selected_entry().unwrap().id;
+        assert_eq!(picker.edit_entry(id, "true", dir.path()).unwrap(), None);
+        assert!(status(&picker).contains("not changed"), "{}", status(&picker));
+        assert_eq!(picker.data.storage.counts().unwrap().total, 1);
     }
 
     // ======== Daemon auto-start Tests ========
