@@ -1,17 +1,17 @@
 # ClipStack
 
-A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack keeps its history in a single SQLite database and provides vim-style navigation, fuzzy search with full-content matching, and remote clipboard support via SSH tunnels.
+A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack keeps its history in a single SQLite database and provides vim-style navigation, fuzzy search with full-content matching, and remote copy from SSH sessions over a forwarded Unix socket.
 
 Built for developers who live in the terminal and want a clipboard manager that stays out of the way until needed.
 
 ## Features
 
 **Core Functionality**
-- **Clipboard History**: Automatically saves clipboard entries with SHA256 deduplication
+- **Clipboard History**: Automatically saves clipboard entries with SHA256 deduplication; event-driven through `wl-paste --watch`, with polling where the compositor can't watch
 - **Pinned Entries**: Mark important items with `p` to protect them from automatic pruning
 - **TUI Picker**: Fuzzy-searchable history picker with live preview and vim keybindings
-- **Remote Clipboard**: Copy from SSH sessions to your local clipboard via TCP tunnel
-- **Secret Filtering**: Built-in patterns skip private keys and API tokens; add your own regexes in the config file
+- **Remote Clipboard**: Copy from SSH sessions to your local clipboard with `rcopy` over a forwarded Unix socket
+- **Secret Filtering**: Password-manager copies are never saved; built-in patterns skip private keys and API tokens; add your own regexes in the config file
 - **Retention and Size Caps**: Optionally expire old entries and cap entry and total size
 
 **Performance**
@@ -108,13 +108,12 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack paste` | Paste clipboard contents to stdout |
 | `clipstack list [-c N]` | List last N entries (default: 10) |
 | `clipstack clear` | Clear clipboard history |
-| `clipstack daemon` | Run the background monitoring daemon |
-| `clipstack kill` | Stop the running daemon |
+| `clipstack daemon` | Run the background daemon: clipboard capture and the `rcopy` socket |
+| `clipstack kill` | Stop the running daemon (it also stops its watcher and removes its socket) |
 | `clipstack stats` | Show storage statistics |
-| `clipstack status` | Check daemon and system health |
+| `clipstack status` | Check daemon, socket, capture mode and system health |
 | `clipstack check [--repair]` | Check the database and search index; `--repair` rebuilds a damaged search index |
 | `clipstack export [-o FILE] [--force]` | Write the whole history as JSON Lines, oldest first (`-o` creates FILE `0600`; `--force` overwrites) |
-| `clipstack serve [-p PORT]` | Start TCP server for remote clipboard (default: 7779) |
 | `clipstack completions <shell>` | Generate shell completions (bash, zsh, fish, elvish, powershell) |
 
 ### Global Options
@@ -278,7 +277,33 @@ Pin frequently-used text to protect it from automatic pruning:
 
 ## Running the Daemon
 
-The daemon monitors your clipboard, automatically saving new entries to history.
+The daemon saves every new clipboard selection to the history. Run one per login session; a second `clipstack daemon` exits with "Daemon already running". The picker starts one for you if none is running.
+
+### Capture modes
+
+By default (`[capture] mode = "auto"`) the daemon runs `wl-paste --watch`, which calls back into ClipStack once per new selection, so nothing is polled while the clipboard is idle. Watching needs a compositor with the wlroots data-control protocol (Hyprland, Sway and other wlroots compositors, KDE Plasma). Where it is missing (GNOME), `wl-paste --watch` exits at once and the daemon falls back to reading the clipboard every `poll_interval_ms` (250 ms by default), logging why:
+
+```
+[capture] polling every 250 ms: wl-paste --watch exited at once (Watch mode requires a compositor that supports the wlroots data-control protocol)
+```
+
+If the watcher dies later it is restarted after 1, 2, 4 ... up to 30 seconds; after 5 restarts within a minute the daemon falls back to polling. `mode = "watch"` exits with an error instead of polling, and `mode = "poll"` never watches. `clipstack status` shows which mode is in use (`capture=watch` or `capture=poll`).
+
+Either way, copies a password manager marks as secret (the `x-kde-passwordManagerHint` type that KeePassXC and `wl-copy --sensitive` set) are never saved, nor is anything your `ignore_patterns` or the built-in secret patterns match. The daemon logs each capture by id and size only, never the copied text:
+
+```
+[watch] saved id:42 (118 bytes)
+[watch] skipped sensitive
+[watch] skipped: matches ignore_patterns[0]
+```
+
+It also applies retention and the size caps once a minute, so old entries are deleted even when nothing new is copied.
+
+### The daemon socket
+
+The daemon listens on `$XDG_RUNTIME_DIR/clipstack.sock` (usually `/run/user/<uid>/clipstack.sock`), next to its lock file `clipstack.lock`. Without `XDG_RUNTIME_DIR` both go in `/tmp/clipstack-<uid>/`, which ClipStack creates `0700` and refuses to use if another user owns it or it is accessible to others. The socket is `0600`, so only your user can connect. It serves [remote copy](#remote-clipboard-ssh) (`rcopy`) and `clipstack status`. Set `[socket] enabled = false` to turn it off.
+
+A socket left behind by a daemon that crashed is replaced at the next start. A path that isn't a socket, or a socket another process is listening on, is left alone: the daemon then runs without a socket and logs `[socket] disabled: ...`.
 
 ### Manual Start
 
@@ -293,29 +318,48 @@ nohup clipstack daemon > /tmp/clipstack.log 2>&1 &
 clipstack kill
 ```
 
-The daemon stops cleanly on SIGINT, SIGTERM and SIGHUP: Ctrl+C, `clipstack kill`, `kill <pid>` and `systemctl --user stop` all make it print `clipstack daemon stopped` and exit with status 0.
+The daemon stops cleanly on SIGINT, SIGTERM and SIGHUP: Ctrl+C, `clipstack kill`, `kill <pid>` and `systemctl --user stop` all make it stop its `wl-paste --watch` child, remove its socket, print `clipstack daemon stopped` and exit with status 0. If the daemon is killed outright (SIGKILL), the kernel stops the watcher too (`PR_SET_PDEATHSIG`), and the next start replaces the stale socket.
 
 ### Systemd User Service
 
+The unit in `systemd/clipstack.service` runs `~/.cargo/bin/clipstack daemon` with the graphical session:
+
 ```bash
+# The store must exist: the sandbox only allows writing to it if it does
+install -d -m 0700 ~/.local/share/clipd
+
 # Install the service file
-mkdir -p ~/.config/systemd/user
-cp systemd/clipstack.service ~/.config/systemd/user/clipstack.service
+install -D -m 0644 systemd/clipstack.service ~/.config/systemd/user/clipstack.service
+systemctl --user daemon-reload
 
 # Enable and start
-systemctl --user enable clipstack.service
-systemctl --user start clipstack.service
+systemctl --user enable --now clipstack.service
 
 # Check status
 systemctl --user status clipstack.service
+clipstack status
 
 # View logs
 journalctl --user -u clipstack.service -f
 ```
 
+The daemon needs `WAYLAND_DISPLAY`, which the systemd user manager doesn't have unless the compositor exports it. In Hyprland, add to `~/.config/hypr/autostart.conf`:
+
+```bash
+exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY
+```
+
+(Sway: `exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY`. Many distributions' session scripts already do this.)
+
+The unit is sandboxed: the file system is read-only except `~/.local/share/clipd` and the runtime dir (`%t`, for the lock and the socket), `/tmp` is private, only Unix sockets are allowed, and files are created owner-only (`UMask=0077`). If you use `--storage-dir` or a different binary path, edit `ExecStart` and `ReadWritePaths` to match.
+
+Some of these settings (`ProtectSystem`, `ProtectHome`, `PrivateTmp`, `MemoryDenyWriteExecute`) need unprivileged user namespaces in a user unit. Arch and most current distributions allow them. If `systemctl --user status clipstack.service` shows the service failing with a namespace error (`status=226/NAMESPACE`), delete those four lines from your copy of the unit, then run `systemctl --user daemon-reload` and `systemctl --user restart clipstack.service`, and check `clipstack status`.
+
+**Upgrading from the old unit:** earlier versions shipped `systemd/clipd.service`, which couldn't create the lock file in the runtime dir. Copying the new unit over `~/.config/systemd/user/clipstack.service` with the commands above replaces it in place; run `systemctl --user daemon-reload` and `systemctl --user restart clipstack.service`. Stop a daemon of the old version first (`clipstack kill`): the new one refuses to start while the old one holds the lock, and `status` shows such a daemon as `capture=unknown`, because it has no socket.
+
 ### Hyprland Autostart
 
-Add to `~/.config/hypr/autostart.conf`:
+Without systemd, add to `~/.config/hypr/autostart.conf`:
 
 ```bash
 exec-once = clipstack daemon
@@ -347,63 +391,57 @@ for_window [app_id="clipstack-picker"] floating enable, resize set 800 600
 
 ## Remote Clipboard (SSH)
 
-Copy text from a remote server to your local clipboard via SSH tunnel.
+`rcopy` copies text from a remote shell to your local clipboard. ssh forwards the daemon's Unix socket to the remote host, and `rcopy` sends its stdin over it. The text is copied to your clipboard and saved to the history (subject to the same ignore rules as any other copy).
 
 ### Setup
 
-**On your local machine:**
-
-```bash
-# Start the clipboard server
-clipstack serve
-# Output: Clipboard server listening on 127.0.0.1:7779
-```
-
-**SSH to remote with reverse tunnel:**
-
-```bash
-ssh -R 7779:localhost:7779 user@remote-server
-```
-
-**On the remote server:**
-
-```bash
-# Install the rcopy script (from this repo)
-sudo cp scripts/rcopy /usr/local/bin/
-sudo chmod +x /usr/local/bin/rcopy
-
-# Usage examples:
-echo "text from remote" | rcopy
-cat /var/log/syslog | head -50 | rcopy
-rcopy < /etc/hostname
-```
-
-### How It Works
-
-1. `clipstack serve` listens on localhost:7779
-2. SSH reverse tunnel forwards remote:7779 to local:7779
-3. `rcopy` sends stdin to localhost:7779 via netcat
-4. Local `clipstack serve` receives data, saves to history, and copies to system clipboard
-
-### Security
-
-The TCP server includes protections:
-- Reads data in 8KB chunks with a 10MB total limit
-- Rejects non-UTF-8 content
-- Binds only to localhost by default
-
-### Persistent SSH Tunnel
-
-Add to `~/.ssh/config`:
+**On your local machine**, run the daemon (see above) and add to `~/.ssh/config`:
 
 ```
 Host myserver
     HostName server.example.com
     User myuser
-    RemoteForward 7779 localhost:7779
+    RemoteForward /home/myuser/.clipstack.sock /run/user/1000/clipstack.sock
 ```
 
-Then simply: `ssh myserver`
+The first path is on the remote host (where `rcopy` looks by default); the second is your local socket (`clipstack status` prints it; `1000` is your local uid, from `id -u`).
+
+**On the remote server**, let sshd replace a socket left by an earlier connection, in `/etc/ssh/sshd_config` (then reload sshd):
+
+```
+StreamLocalBindUnlink yes
+```
+
+and install `rcopy` (from this repo). It needs `socat`, or `nc` with Unix socket support (`-U`, OpenBSD netcat), or `ncat`:
+
+```bash
+install -m 0755 scripts/rcopy ~/.local/bin/rcopy   # or /usr/local/bin
+
+# Usage examples:
+echo "text from remote" | rcopy
+head -50 /var/log/syslog | rcopy
+rcopy < /etc/hostname
+```
+
+`rcopy` reads `CLIPSTACK_SOCK` for the socket path (default `$HOME/.clipstack.sock`). It exits 0 when the text was copied, and also says so on stderr when the history didn't keep it (`rcopy: copied, but not saved to history (ignored)`); 1 when the daemon refused it (for example `not_utf8`); 3 when there is no socket, no daemon behind it, or no `socat`/`nc`/`ncat`.
+
+**Migrating from `clipstack serve`:** the TCP server (port 7779, `CB_PORT`) is gone, and `clipstack serve` now only prints where the socket is and exits 2. Replace `RemoteForward 7779 localhost:7779` with the socket line above, and install the new `rcopy` on each remote host.
+
+### How It Works
+
+1. The daemon listens on `$XDG_RUNTIME_DIR/clipstack.sock` (`0600`, in a `0700` dir)
+2. `RemoteForward` makes sshd on the remote host create `~/.clipstack.sock` and forward connections to it through your ssh connection to the local socket
+3. `rcopy` sends `CLIPSTACK/1 PUSH <length>`, a newline and its input
+4. The daemon saves the text (unless the ignore rules skip it), copies it with `wl-copy`, and replies `OK 0 stored=1 id=<id>`, `OK 0 stored=0 reason=<why>` or `ERR <code> <message>`
+
+Each connection carries one request. The header is one line of at most 256 bytes; the body is exactly `<length>` bytes, at most `max_entry_bytes`. `PING` reports the version and capture mode (`OK 0 version=0.1.0 capture=watch pull=0`). `PULL`, which reads the local clipboard, is refused unless `[socket] allow_pull = true` (it is for `rpaste`, which isn't released yet).
+
+### Security
+
+- Only your user can connect to the local socket (`0600` in a `0700` runtime dir). There is no TCP port.
+- On the remote host, the forwarded socket is created by sshd as your remote user, `0600` by default (`StreamLocalBindMask`). Anyone who is root there can still use it to put text on your clipboard, so only forward it to hosts you trust.
+- Reading your clipboard from the remote side is off by default (`allow_pull = false`), and refused for offers marked sensitive even when on.
+- A client gets `timeout_ms` (5 s) per read and twice that for the whole request, so a stuck connection can't block the socket for long. Oversized pushes are refused from the header alone; non-UTF-8 text is refused.
 
 ## Storage
 
@@ -450,7 +488,7 @@ The first command of the new version imports the old store automatically:
 
 - **Private permissions**: storage dir `0700`, database files `0600`; existing stores are tightened on open
 - **Transactions**: every change (save, pin, delete, prune) is one SQLite transaction in WAL mode, so a crash or power loss leaves the history as it was before or after the change, never in between
-- **Concurrent processes**: the daemon, picker, CLI and server each open the database; writers wait up to 5 seconds for each other and readers never block writers, so concurrent changes are never lost
+- **Concurrent processes**: the daemon, its watch hook, the picker and the CLI each open the database; writers wait up to 5 seconds for each other and readers never block writers, so concurrent changes are never lost
 - **Integrity check**: `clipstack check` runs SQLite's integrity check and the search index's consistency check; `clipstack check --repair` rebuilds a damaged search index from the entries
 - **Duplicate detection**: identical content is deduplicated by SHA256 hash
 - **Secret filtering**: copies that match the built-in secret patterns or your `ignore_patterns` are never written to the database
@@ -522,6 +560,24 @@ ignore_patterns = []
 # Also skip private keys anywhere in a copy, and copies that are nothing but a GitHub,
 # AWS access key, Slack or sk- style API token.
 builtin_secret_patterns = true
+
+[capture]
+# auto: wl-paste --watch, falling back to polling where the compositor can't watch;
+# watch: never poll (exit with an error instead); poll: never watch.
+mode = "auto"
+
+# How often polling reads the clipboard (50 to 5000).
+poll_interval_ms = 250
+
+[socket]
+# Serve $XDG_RUNTIME_DIR/clipstack.sock for rcopy and `clipstack status`.
+enabled = true
+
+# Let socket clients read the local clipboard (PULL). Off by default.
+allow_pull = false
+
+# Per-read timeout for a socket client (100 to 60000); a whole request gets twice this.
+timeout_ms = 5000
 ```
 
 When a `clipstack copy` isn't saved because of these settings, the text is still copied to the clipboard and ClipStack says why (`Copied N bytes (not saved to history: matches ignore_patterns[0])`); the reason never includes the copied text. The entry limit is not in this file: it comes from `--max-entries`, `CLIPSTACK_MAX_ENTRIES` or the saved value.
@@ -531,7 +587,7 @@ When a `clipstack copy` isn't saved because of these settings, the text is still
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CLIPSTACK_MAX_ENTRIES` | Maximum entries to store (1-10000); overridden by `--max-entries` | saved limit, else `100` |
-| `CB_PORT` | Port for remote clipboard server/client | `7779` |
+| `CLIPSTACK_SOCK` | Socket `rcopy` connects to (on the remote host) | `$HOME/.clipstack.sock` |
 
 ### Recommended Setup
 
@@ -551,7 +607,8 @@ The `clipstack status` command provides a comprehensive health check:
 
 ```
 $ clipstack status
-Daemon:  running  (or: not running)
+Daemon:  running (pid 4242)  (or: not running)
+Socket:  /run/user/1000/clipstack.sock (reachable, capture=watch, pull=off)
 
 Storage:  /home/user/.local/share/clipd
 Database: /home/user/.local/share/clipd/clipstack.db
@@ -572,6 +629,7 @@ Wayland: detected  (or: not detected)
 
 This helps diagnose issues with:
 - **Daemon not running**: Entries won't be saved automatically
+- **Capture mode**: `capture=poll` means the compositor can't watch the clipboard (see [Capture modes](#capture-modes)); `not listening` means no daemon serves the socket; `not reachable; capture=unknown` means a daemon holds the lock but doesn't answer (an older version, or `[socket] enabled = false`)
 - **Wayland not detected**: ClipStack requires a Wayland session
 - **Storage issues**: Shows where data is stored and current usage, and lists any `legacy-backup-*` directory left by an upgrade
 - **Unexpected limit**: Shows where the entry limit comes from: `cli` (`--max-entries`), `env` (`CLIPSTACK_MAX_ENTRIES`), `saved` (in the database), or `default`
@@ -586,12 +644,18 @@ This helps diagnose issues with:
 │  CLI (main.rs)                                                  │
 │  ├── copy/paste    → clipboard.rs (wl-copy/wl-paste wrapper)   │
 │  ├── pick          → picker.rs (TUI with ratatui)              │
-│  ├── daemon        → daemon.rs (polling loop + PID lock file)  │
+│  ├── daemon        → daemon/ (capture, socket, PID lock file)  │
+│  ├── __watch-hook  → Run by wl-paste --watch per selection     │
 │  ├── kill          → Signal the daemon PID from its lock file  │
-│  ├── serve         → TCP server for remote clipboard           │
 │  ├── check/export  → Integrity check, JSONL export             │
-│  ├── status        → Health check (daemon, wayland, storage)   │
+│  ├── status        → Health check (daemon, socket, storage)    │
 │  └── list/stats    → storage/ (SQLite queries)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Daemon (daemon/)                                               │
+│  ├── mod.rs        → Main loop, runtime dir, lock, expiry      │
+│  ├── capture.rs    → wl-paste --watch supervisor, poll fallback│
+│  └── socket.rs     → clipstack.sock: PUSH/PULL/PING (0600)     │
+│  protocol.rs       → CLIPSTACK/1 framing (socket, rcopy)       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Config (config.rs)                                             │
 │  └── config.toml   → retention, size caps, ignore patterns     │
@@ -619,12 +683,13 @@ This helps diagnose issues with:
 1. **Metadata-First Reads**: Lists read only metadata and the 100-char preview; the content column is stored last, so listing never touches a large entry's text. Full content is loaded on demand.
 2. **Indexed Search**: An FTS5 trigram index (external content, first 256 K characters per entry) answers full-content queries without scanning entries one by one.
 3. **SQLite Transactions**: Every change is one transaction in WAL mode. Crashes never leave the history half-written.
-4. **Polling vs Events**: Uses 250ms polling instead of `wl-paste --watch` for reliability across different Wayland compositors.
+4. **Events, Polling as Fallback**: `wl-paste --watch` runs a hidden `clipstack __watch-hook` per new selection, which saves straight to SQLite. Compositors without the data-control protocol fall back to 250 ms polling; a supervisor restarts a dying watcher with backoff.
 5. **SHA256 Deduplication**: Hashes content to prevent duplicates; re-copying moves the existing entry to the top of the list and refreshes its timestamp.
 6. **One Database File**: SQLite (compiled in) instead of a JSON index plus one file per entry. `clipstack export` and `sqlite3 -readonly` keep the data inspectable.
-7. **Locking**: A global daemon lock (which also records the daemon PID) allows only one daemon at a time. SQLite's own locking serializes writes from every process.
-8. **Modal UI Pattern**: Vim-style normal/search/preview modes keep navigation keyboard-only and predictable.
-9. **Pin Protection**: Pinned entries exempt from automatic pruning, with configurable limits to prevent abuse.
+7. **Locking**: A daemon lock in the runtime dir (which also records the daemon PID) allows only one daemon at a time. SQLite's own locking serializes writes from every process.
+8. **Unix Socket, Not TCP**: Remote copy goes through a `0600` socket in the runtime dir, forwarded by ssh, with a small length-prefixed protocol; there is no network port.
+9. **Modal UI Pattern**: Vim-style normal/search/preview modes keep navigation keyboard-only and predictable.
+10. **Pin Protection**: Pinned entries exempt from automatic pruning, with configurable limits to prevent abuse.
 
 ### Design Philosophy
 
@@ -638,7 +703,7 @@ ClipStack is built around several core principles:
 **Performance by Design**
 - Listing 100 entries: < 10ms, whatever their size
 - Content load time: < 20ms even for 500KB entries
-- 250ms polling interval balances responsiveness with CPU usage
+- Event-driven capture: nothing runs while the clipboard is idle (250 ms polling only where watching isn't supported)
 - The search index answers full-content queries without reading every entry
 
 **Reliability First**
@@ -659,7 +724,7 @@ ClipStack is built around several core principles:
 **Unix Philosophy**
 - Does one thing well: manages clipboard history
 - Composable with pipes: `cat file | clipstack copy`, `clipstack paste | grep pattern`
-- Works with SSH tunnels for remote clipboard support
+- Works with ssh socket forwarding for remote copy
 - Generates shell completions for better terminal integration
 
 ### Performance Benchmarks
@@ -706,7 +771,7 @@ ClipStack handles various content types and edge cases gracefully:
 
 ```bash
 # Check wl-clipboard is installed
-which wl-copy wl-paste
+command -v wl-copy wl-paste
 
 # Check you're in a Wayland session
 echo $WAYLAND_DISPLAY
@@ -719,10 +784,26 @@ echo $WAYLAND_DISPLAY
 # Check daemon is running
 clipstack status
 
-# Run in foreground to see output
+# Run in foreground to see output (stop a running daemon first: clipstack kill)
 clipstack daemon
-# Should print "[clipboard] Saved: X bytes..." on copy
+# Should print "[watch] saved id:N (B bytes)" (or "[poll] ...") on copy
 ```
+
+Under systemd, check that the user manager has `WAYLAND_DISPLAY` (`systemctl --user show-environment | grep WAYLAND`); see [Systemd User Service](#systemd-user-service).
+
+### Daemon falls back to polling
+
+`clipstack status` shows `capture=poll`, and the log says `[capture] polling every 250 ms: wl-paste --watch exited at once (...)`. The reason is wl-paste's own error: usually the compositor doesn't support the data-control protocol (GNOME), which polling works around. Polling still saves every copy that stays on the clipboard for at least `poll_interval_ms`. If your compositor should support watching, run `wl-paste --watch cat` in a terminal to see the error, and check that wl-clipboard is 2.0 or newer (`wl-paste --version`).
+
+### Socket unavailable
+
+`clipstack status` shows `Socket: ... (not reachable; capture=unknown)` while the daemon runs. The daemon keeps capturing without a socket; its log says why:
+
+- `[socket] disabled: ... exists and is not a socket` or `... is in use by another process`: something else has the path. The daemon never deletes it; move it away and restart the daemon.
+- `[socket] disabled by config`: `[socket] enabled = false` in the config file.
+- No `[socket]` line at all: an older daemon without a socket holds the lock. Run `clipstack kill` and start the daemon again.
+
+`not listening` means no daemon is running: start one.
 
 ### Corrupted storage
 
@@ -739,15 +820,18 @@ If `check` reports database damage, it prints what to do: save what can still be
 ### Remote copy not working
 
 ```bash
-# On local: verify server is running
-ss -tlnp | grep 7779
+# On local: the daemon serves its socket
+clipstack status          # Socket: /run/user/1000/clipstack.sock (reachable, ...)
 
-# On remote: verify tunnel exists
-ss -tlnp | grep 7779
+# On remote: ssh created the forwarded socket
+ls -l ~/.clipstack.sock   # srw------- ...
 
-# On remote: test manually
-echo "test" | nc localhost 7779
+# On remote: ask the daemon directly
+printf 'CLIPSTACK/1 PING 0\n' | socat - UNIX-CONNECT:$HOME/.clipstack.sock
+# OK 0 version=0.1.0 capture=watch pull=0
 ```
+
+`rcopy` exiting 3 means it found no socket, no daemon behind it, or no `socat`/`nc -U`/`ncat`. A missing `~/.clipstack.sock` usually means the `RemoteForward` line is wrong, or a stale socket from an earlier login is in the way: set `StreamLocalBindUnlink yes` in the remote `sshd_config`, or delete the stale file. If ssh prints `remote port forwarding failed for listen path`, that is the same stale socket.
 
 ### Picker UI looks broken
 
@@ -776,7 +860,8 @@ cargo test --release -- --ignored perf_
 # skipped unless CLIPSTACK_REAL_CLIPBOARD_TESTS is set, even with --ignored.
 CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored test_copy_and_paste test_large_content test_unicode_content
 
-# Shell suites (need a release build and jq)
+# Shell suites (need a release build and jq; e2e_daemon.sh also uses socat,
+# nc -U and systemd-analyze when installed, and skips those checks otherwise)
 cargo build --release
 for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
 ```
@@ -805,9 +890,13 @@ clipstack/
 │   ├── main.rs          # CLI entry point, subcommands
 │   ├── clipboard.rs     # Wayland clipboard operations
 │   ├── config.rs        # config.toml loading and validation
-│   ├── daemon.rs        # Background monitoring daemon
+│   ├── daemon/          # Background daemon
+│   │   ├── mod.rs       # Main loop, runtime dir, lock file, periodic expiry
+│   │   ├── capture.rs   # wl-paste --watch supervisor, watch hook, polling fallback
+│   │   └── socket.rs    # Unix socket server (PUSH/PULL/PING)
 │   ├── perms.rs         # Private (0700/0600) storage permissions
 │   ├── picker.rs        # TUI history picker
+│   ├── protocol.rs      # Socket protocol v1 framing
 │   ├── storage/         # SQLite storage
 │   │   ├── mod.rs       # Storage: open, pin/alias/delete/clear, check
 │   │   ├── schema.rs    # Schema, PRAGMAs, migrations
@@ -817,14 +906,16 @@ clipstack/
 │   └── util.rs          # Formatting utilities (size, time)
 ├── tests/
 │   ├── common/mod.rs    # TestEnv isolation harness for binary tests
-│   ├── daemon_lifecycle.rs  # Daemon start/stop integration tests
+│   ├── daemon_lifecycle.rs  # Daemon start/stop, shutdown, status and serve stub tests
 │   ├── migration_cli.rs     # Import, config, export and check CLI tests
+│   ├── watch_capture.rs     # Watch hook, watch capture and polling fallback tests
+│   ├── socket_protocol.rs   # Socket PUSH/PULL/PING, timeouts and stale-socket tests
 │   ├── fakes/           # Fake wl-paste/wl-copy (never touch the real clipboard)
 │   ├── lib.sh           # isolate_env/cleanup for shell suites
-│   ├── e2e_*.sh         # Shell end-to-end suites
+│   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, rcopy, unit)
 │   └── integration/     # Shell integration suites
 ├── scripts/
-│   └── rcopy            # Remote copy helper script
+│   └── rcopy            # Remote copy over the forwarded daemon socket
 └── systemd/
     └── clipstack.service # Systemd user service file
 ```
