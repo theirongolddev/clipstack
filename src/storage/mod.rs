@@ -146,8 +146,28 @@ pub struct ClipEntry {
     /// Only set on pinned entries
     pub alias: Option<String>,
     pub source: Source,
-    /// Chosen text mime type, e.g. "text/plain;charset=utf-8"
+    /// Chosen text mime type, e.g. "text/plain;charset=utf-8"; "image/png" for images
     pub mime: String,
+    pub kind: Kind,
+    /// Image entries only: pixel size from the PNG header
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// What an entry holds: text (`load_content`) or a PNG image (`load_image`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Text,
+    Image,
+}
+
+impl Kind {
+    /// Parse a stored `kind` column (the schema allows only these two).
+    pub fn from_db(s: &str) -> Kind {
+        if s == "image" { Kind::Image } else { Kind::Text }
+    }
 }
 
 /// Where an entry came from.

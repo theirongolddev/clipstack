@@ -1095,14 +1095,24 @@ thumbnail; the preview shows the full image fitted to the pane.
 
 #### 5.1 Storage schema v2 (images)
 
-Migration v1 -> v2 (`PRAGMA user_version = 2`), additive:
+Migration v1 -> v2 (`PRAGMA user_version = 2`) adds these columns:
 
 ```sql
-ALTER TABLE entries ADD COLUMN kind   TEXT    NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'image'));
-ALTER TABLE entries ADD COLUMN image  BLOB;      -- PNG bytes; NULL for text
-ALTER TABLE entries ADD COLUMN width  INTEGER;   -- image only
-ALTER TABLE entries ADD COLUMN height INTEGER;   -- image only
+kind   TEXT    NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'image')),
+width  INTEGER,   -- image only
+height INTEGER,   -- image only
+image  BLOB       -- PNG bytes; NULL for text
+-- plus a CHECK that image/width/height are set exactly when kind = 'image'
 ```
+
+*Amended during implementation:* the table is **rebuilt** (create `entries_v2`,
+copy the rows with their ids, drop, rename, recreate the indexes and FTS
+triggers, carry the AUTOINCREMENT counter over) instead of `ALTER TABLE ADD
+COLUMN`. Added columns go after `content`, so every list read of `kind` would
+walk the overflow pages of large text entries, which the v1 column order was
+designed to avoid. v2 keeps the small columns first and ends with `content`,
+then `image`. The FTS index is keyed by rowid and stays valid. A new store is
+created as v1 and migrated, so the migration runs everywhere.
 
 - An image entry has `content = ''` (nothing indexed by FTS), `mime = 'image/png'`,
   `preview = 'Image · WxH'`, `size` = PNG byte length.

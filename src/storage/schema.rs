@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Newest schema this binary understands (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// `PRAGMA application_id`: "CLPS".
 pub const APPLICATION_ID: i64 = 0x434C_5053;
@@ -19,11 +19,12 @@ pub const APPLICATION_ID: i64 = 0x434C_5053;
 /// How long a writer waits for another process's write transaction.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Schema v1. `content` is the last stored column, so reading the small
-/// columns never walks a large entry's overflow pages. `search_text` is a
-/// virtual generated column, so only the first 256 Ki characters of each
-/// entry are indexed; the FTS table is external content over it and is kept
-/// in sync by the triggers.
+/// Schema v1 (`user_version` 1). `content` is the last stored column, so
+/// reading the small columns never walks a large entry's overflow pages.
+/// `search_text` is a virtual generated column, so only the first 256 Ki
+/// characters of each entry are indexed; the FTS table is external content
+/// over it and is kept in sync by the triggers. A new database is created as
+/// v1 and then migrated, so the migration runs on every store.
 const SCHEMA_V1: &str = "
 CREATE TABLE entries (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,8 +40,6 @@ CREATE TABLE entries (
   content     TEXT    NOT NULL,
   search_text TEXT    GENERATED ALWAYS AS (substr(content, 1, 262144)) VIRTUAL
 );
-CREATE INDEX entries_by_recency      ON entries (last_used DESC, id DESC);
-CREATE INDEX entries_unpinned_by_age ON entries (pinned, last_used);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 
@@ -48,6 +47,13 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(
   search_text, content='entries', content_rowid='id', tokenize='trigram'
 );
 INSERT INTO entries_fts(entries_fts, rank) VALUES ('secure-delete', 1);
+";
+
+/// Indexes and FTS triggers of `entries` (v1 and v2 alike). Dropping the
+/// table drops them, so the v2 rebuild creates them again.
+const ENTRIES_INDEXES_AND_TRIGGERS: &str = "
+CREATE INDEX entries_by_recency      ON entries (last_used DESC, id DESC);
+CREATE INDEX entries_unpinned_by_age ON entries (pinned, last_used);
 
 CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
   INSERT INTO entries_fts(rowid, search_text) VALUES (new.id, new.search_text);
@@ -60,6 +66,59 @@ CREATE TRIGGER entries_au AFTER UPDATE OF content ON entries BEGIN
   INSERT INTO entries_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
 ";
+
+/// Migration v1 -> v2 (images). The plan's additive `ALTER TABLE ADD COLUMN`
+/// would append `kind`/`width`/`height` after `content`, so every list read
+/// would walk the overflow pages of large text entries; the table is
+/// rebuilt instead with the small columns first and the two large ones
+/// (`content`, then the PNG `image`) last. Ids are copied, so the FTS index
+/// (keyed by rowid) stays valid, and the AUTOINCREMENT counter is carried
+/// over by the caller. An image entry has `content = ''` (nothing indexed).
+const ENTRIES_V2: &str = "
+CREATE TABLE entries_v2 (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  hash        BLOB    NOT NULL UNIQUE CHECK (length(hash) = 32),
+  size        INTEGER NOT NULL CHECK (size >= 0),
+  preview     TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  last_used   INTEGER NOT NULL,
+  pinned      INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  alias       TEXT    UNIQUE CHECK (alias IS NULL OR (pinned = 1 AND length(alias) BETWEEN 1 AND 32)),
+  source      TEXT    NOT NULL DEFAULT 'unknown',
+  mime        TEXT    NOT NULL DEFAULT 'text/plain;charset=utf-8',
+  kind        TEXT    NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'image')),
+  width       INTEGER CHECK (width IS NULL OR width > 0),
+  height      INTEGER CHECK (height IS NULL OR height > 0),
+  content     TEXT    NOT NULL,
+  search_text TEXT    GENERATED ALWAYS AS (substr(content, 1, 262144)) VIRTUAL,
+  image       BLOB,
+  CHECK (CASE kind
+           WHEN 'image' THEN image IS NOT NULL AND width IS NOT NULL AND height IS NOT NULL
+           ELSE image IS NULL AND width IS NULL AND height IS NULL
+         END)
+);
+INSERT INTO entries_v2 (id, hash, size, preview, created_at, last_used, pinned, alias, source, mime, content)
+  SELECT id, hash, size, preview, created_at, last_used, pinned, alias, source, mime, content FROM entries;
+DROP TABLE entries;
+ALTER TABLE entries_v2 RENAME TO entries;
+";
+
+/// Rebuild `entries` as v2 inside the caller's transaction.
+fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    // DROP TABLE removes the sqlite_sequence row; without it a deleted top
+    // id would be handed out again
+    let seq: Option<i64> = tx
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name = 'entries'", [], |r| r.get(0))
+        .optional()?;
+    tx.execute_batch(ENTRIES_V2)?;
+    tx.execute_batch(ENTRIES_INDEXES_AND_TRIGGERS)?;
+    if let Some(seq) = seq {
+        tx.execute("DELETE FROM sqlite_sequence WHERE name = 'entries'", [])?;
+        tx.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('entries', ?1)", [seq])?;
+    }
+    Ok(())
+}
 
 /// Open `path`, set the connection PRAGMAs and bring the schema to
 /// `SCHEMA_VERSION`.
@@ -195,7 +254,12 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
     if found == 0 {
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.execute_batch(SCHEMA_V1)?;
+        tx.execute_batch(ENTRIES_INDEXES_AND_TRIGGERS)?;
         tx.pragma_update(None, "user_version", 1)?;
+    }
+    if found <= 1 {
+        migrate_v1_to_v2(&tx)?;
+        tx.pragma_update(None, "user_version", 2)?;
     }
     tx.commit()?;
     Ok(())
@@ -225,9 +289,9 @@ mod tests {
     }
 
     #[test]
-    fn content_is_the_last_stored_column() {
-        // Small columns first: reading size/pinned/last_used (limits, lists)
-        // must not walk a large entry's overflow pages.
+    fn content_and_image_are_the_last_stored_columns() {
+        // Small columns first: reading size/pinned/last_used/kind (limits,
+        // lists) must not walk a large entry's overflow pages.
         let dir = TempDir::new().unwrap();
         let conn = open_connection(&db(&dir)).unwrap();
         let mut stmt = conn.prepare("SELECT name, hidden FROM pragma_table_xinfo('entries')").unwrap();
@@ -238,7 +302,97 @@ mod tests {
             .filter(|(_, hidden)| *hidden == 0)
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(stored.last().map(String::as_str), Some("content"), "{stored:?}");
+        assert_eq!(stored[stored.len() - 2..], ["content", "image"], "{stored:?}");
+    }
+
+    /// A v1 database as the Step 1 binary left it, with `rows` entries
+    /// (the newest one pinned with an alias) and the top id deleted.
+    fn v1_store(path: &Path, rows: i64) {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(ENTRIES_INDEXES_AND_TRIGGERS).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        for i in 1..=rows + 1 {
+            let mut hash = [0u8; 32];
+            hash[0] = u8::try_from(i).unwrap();
+            conn.execute(
+                "INSERT INTO entries (content, hash, size, preview, created_at, last_used, source)
+                 VALUES (?1, ?2, length(?1), ?1, ?3, ?3, 'copy')",
+                rusqlite::params![format!("old entry number {i}"), hash.to_vec(), i * 1000],
+            )
+            .unwrap();
+        }
+        conn.execute("UPDATE entries SET pinned = 1, alias = 'sig' WHERE id = ?1", [rows]).unwrap();
+        conn.execute("DELETE FROM entries WHERE id = ?1", [rows + 1]).unwrap();
+    }
+
+    #[test]
+    fn migrates_populated_v1_store_to_v2() {
+        let dir = TempDir::new().unwrap();
+        let path = db(&dir);
+        v1_store(&path, 5);
+
+        let conn = open_connection(&path).unwrap();
+        assert_eq!(pragma_i64(&conn, "user_version"), 2);
+        type Row = (i64, String, String, Option<i64>, Option<i64>, bool, Option<String>);
+        let rows: Vec<Row> = conn
+            .prepare("SELECT id, content, kind, width, height, image IS NULL, alias FROM entries ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+        for (i, (id, content, kind, width, height, no_image, alias)) in rows.iter().enumerate() {
+            assert_eq!(*id, i as i64 + 1);
+            assert_eq!(content, &format!("old entry number {id}"));
+            assert_eq!(kind, "text");
+            assert_eq!((*width, *height, *no_image), (None, None, true));
+            assert_eq!(alias.as_deref(), (*id == 5).then_some("sig"));
+        }
+
+        // The search index, triggers and indexes survive the rebuild
+        let hits: i64 = conn
+            .query_row("SELECT count(*) FROM entries_fts WHERE entries_fts MATCH '\"number 3\"'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hits, 1);
+        conn.execute("INSERT INTO entries_fts(entries_fts, rank) VALUES ('integrity-check', 1)", [])
+            .unwrap();
+        assert_eq!(names(&conn, "trigger"), ["entries_ad", "entries_ai", "entries_au"]);
+        let indexes = names(&conn, "index");
+        assert!(indexes.contains(&"entries_by_recency".to_string()), "{indexes:?}");
+        assert!(indexes.contains(&"entries_unpinned_by_age".to_string()), "{indexes:?}");
+        assert!(!names(&conn, "table").contains(&"entries_v2".to_string()));
+
+        // AUTOINCREMENT: the deleted top id 6 is never reused
+        conn.execute(
+            "INSERT INTO entries (content, hash, size, preview, created_at, last_used)
+             VALUES ('new', zeroblob(32), 3, 'new', 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 7);
+        let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(check, "ok");
+    }
+
+    #[test]
+    fn kind_and_image_must_agree() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_connection(&db(&dir)).unwrap();
+        let insert = |kind: &str, image: Option<&[u8]>, w: Option<i64>| {
+            conn.execute(
+                "INSERT INTO entries (content, hash, size, preview, created_at, last_used, kind, image, width, height)
+                 VALUES ('', randomblob(32), 1, 'p', 1, 1, ?1, ?2, ?3, ?3)",
+                rusqlite::params![kind, image, w],
+            )
+        };
+        assert!(insert("image", Some(b"png"), Some(1)).is_ok());
+        assert!(insert("image", None, Some(1)).is_err(), "image entry without bytes");
+        assert!(insert("image", Some(b"png"), None).is_err(), "image entry without dimensions");
+        assert!(insert("text", Some(b"png"), None).is_err(), "text entry with bytes");
+        assert!(insert("gif", None, None).is_err());
     }
 
     #[test]

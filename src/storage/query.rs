@@ -1,6 +1,6 @@
 //! Reads: list, get, nth, alias lookup, counts and FTS5 search.
 
-use super::{ClipEntry, Counts, EntryId, ListOrder, Source, Storage};
+use super::{ClipEntry, Counts, EntryId, Kind, ListOrder, Source, Storage};
 use rusqlite::types::Value;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, Row};
@@ -9,7 +9,7 @@ use std::io::Write;
 
 /// Columns for `entry_from_row`, in order.
 pub(crate) const ENTRY_COLUMNS: &str =
-    "id, created_at, last_used, size, preview, pinned, alias, source, mime";
+    "id, created_at, last_used, size, preview, pinned, alias, source, mime, kind, width, height";
 
 pub(crate) fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<ClipEntry> {
     let size: i64 = row.get(3)?;
@@ -24,6 +24,9 @@ pub(crate) fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<ClipEntry> {
         alias: row.get(6)?,
         source: Source::from_db(&source),
         mime: row.get(8)?,
+        kind: Kind::from_db(&row.get::<_, String>(9)?),
+        width: row.get(10)?,
+        height: row.get(11)?,
     })
 }
 
@@ -189,7 +192,7 @@ impl Storage {
 }
 
 /// Number of columns in `ENTRY_COLUMNS`.
-const ENTRY_COLUMN_COUNT: usize = 9;
+const ENTRY_COLUMN_COUNT: usize = 12;
 
 /// One `export` line: the entry without its preview, plus the content.
 #[derive(Serialize)]
@@ -224,6 +227,19 @@ mod tests {
 
     fn ids(entries: Vec<ClipEntry>) -> Vec<EntryId> {
         entries.into_iter().map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn text_entry_is_kind_text_without_dimensions() {
+        let (storage, _dir) = test_storage();
+        let id = add(&storage, "plain", 1);
+        let entry = storage.get(id).unwrap().unwrap();
+        assert_eq!(entry.kind, crate::storage::Kind::Text);
+        assert_eq!((entry.width, entry.height), (None, None));
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["kind"], "text");
+        assert_eq!(json["width"], serde_json::Value::Null);
+        assert_eq!(json["height"], serde_json::Value::Null);
     }
 
     #[test]
