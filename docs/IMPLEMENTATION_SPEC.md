@@ -1,5 +1,7 @@
 # ClipStack Implementation Specification
 
+> **Historical.** This document describes the old JSON store (`index.json` plus one file per entry, `index.lock`, write-then-rename and `recover`). Since IMPROVEMENT_PLAN Step 1 ClipStack stores its history in SQLite; see the README and `docs/IMPROVEMENT_PLAN.md` for the current design.
+
 > **Status**: Implementation-Ready
 > **Last Updated**: 2026-01-13
 > **Decision Log**: All ambiguities resolved per user input

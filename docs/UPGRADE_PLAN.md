@@ -1,5 +1,7 @@
 # ClipStack Upgrade Plan
 
+> **Historical.** This document describes the old JSON store (`index.json` plus one file per entry, `index.lock`, write-then-rename and `recover`). Since IMPROVEMENT_PLAN Step 1 ClipStack stores its history in SQLite; see the README and `docs/IMPROVEMENT_PLAN.md` for the current design.
+
 > A strategic roadmap for making ClipStack more robust, reliable, and user-friendly.
 
 ## Executive Summary

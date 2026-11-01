@@ -66,6 +66,8 @@ Ensure all interactive operations remain responsive as history grows:
 ## Architectural Changes (enablers for Phases 1-5)
 
 ### 0.0 Storage Correctness Contract (must define before feature work)
+
+> **Superseded by IMPROVEMENT_PLAN Step 1.** Storage is a single SQLite database in WAL mode: every write is a transaction, SQLite serializes writers across processes, and `clipstack check` replaces the recovery ideas below. The global daemon lock (PID file) still prevents two daemons.
 - **Single-writer lock**: prevent two ClipStack instances from mutating history concurrently.
   - Use a lock file with PID + timestamp; fail with actionable UI if locked.
 - **Atomic writes**:
@@ -92,6 +94,8 @@ Ensure all interactive operations remain responsive as history grows:
   - derived UI flags (has_unread, match counts, etc.)
 
 ### 0.2 Introduce Asynchronous Content Loading
+
+> **Superseded by IMPROVEMENT_PLAN Step 1.** SQLite reads are synchronous and fast (loading a 500 KB entry takes well under 20 ms; full-content search uses an FTS5 index), so no background worker is needed.
 - Add a lightweight background worker (single thread is sufficient initially) with a strict protocol:
   - All requests include `{ request_id, generation, priority }`
   - UI maintains `active_generation` per concern (preview/search) and drops stale responses
@@ -112,6 +116,8 @@ Ensure all interactive operations remain responsive as history grows:
 - UI shows partial results and a subtle "searching..." affordance while deep search completes
 
 ### 0.3 Add Caching (bounded memory)
+
+> **Superseded by IMPROVEMENT_PLAN Step 1.** With SQLite reads this fast (and SQLite's own page cache), no LRU content cache is needed.
 - LRU cache for loaded content by `entry_id` (and optionally by `content_hash`):
   - Avoids repeated disk reads during search + preview
 - Optional cache for "render-ready lines" (highlighted spans) keyed by `(entry_id, query, scroll_window)`
@@ -268,11 +274,15 @@ fn classify_match(&self, text: &str, query: &str, original: &str) -> (MatchClass
 ```
 
 ### Deep Search Implementation Notes
+
+> **Replaced by `Storage::search` (IMPROVEMENT_PLAN Step 1).** The picker's full-content phase is one query against an FTS5 trigram index over the first 256 K characters of each entry (substring scan for words under 3 characters). There is no worker, time budget or file-load cap; this section and the next are historical.
 - Add a background request: `SearchContent { query, min_score, budget_ms, exclude_ids }`
 - Budget defaults: 5-15ms per UI tick; cancels on query change
 - Deep matches display a subtle "[content]" tag as planned
 
 ### Deep Search Acceleration (optional but recommended)
+
+> **Done differently in IMPROVEMENT_PLAN Step 1:** the FTS5 trigram index replaces candidate-rejection metadata and bloom filters.
 - Add per-entry "candidate rejection" metadata computed at ingest:
   - normalized lowercase preview tokens (bounded)
   - optional trigram bloom filter for content (very small, fast reject)
@@ -1668,7 +1678,7 @@ fn detect_content_type(content: &str) -> ContentType {
 ```
 
 ### Storage/Model Change (revised)
-- Add `content_type` to entry metadata persisted alongside preview/timestamp
+- Add `content_type` to entry metadata persisted alongside preview/timestamp. With the SQLite store (IMPROVEMENT_PLAN Step 1) this is a schema v2 migration: `ALTER TABLE entries ADD COLUMN content_type` plus a `user_version` bump, backfilled from existing content
 - Optionally store `language` when content_type == Code
 
 **Visual indicators:**
@@ -1704,7 +1714,7 @@ ClipStack only handles text. Users copying screenshots/images have no history.
 
 ### Scope
 This is a significant architectural change requiring:
-1. Binary content storage
+1. Binary content storage. With the SQLite store (IMPROVEMENT_PLAN Step 1) this means a `blobs` table in a future schema version: `entries.content` is TEXT and feeds the FTS index, so image bytes don't belong there
 2. Wayland image clipboard support (wl-copy/wl-paste with image types)
 3. Image preview rendering (sixel/kitty graphics protocol)
 4. Thumbnail generation
@@ -1874,6 +1884,8 @@ Capture `ratatui::buffer::Buffer` state for key UI scenarios:
 ## Additional Recommendations (high-value tweaks)
 
 ### Config Surface Area Discipline
+
+> **Done in IMPROVEMENT_PLAN Step 1:** one `Config` struct with explicit defaults, loaded from `config.toml` (or `--config`), unknown keys rejected, and every option documented in the README's "Configuration File" section. The entry limit stays a CLI/env/saved setting.
 - Start with a single `Config` struct and explicit defaults
 - Avoid "env everywhere" pattern; prefer a unified config source
 - Document all config options in one place
