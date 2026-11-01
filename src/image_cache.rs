@@ -29,7 +29,7 @@ pub fn ensure(storage: &Storage, entry: &ClipEntry) -> Result<PathBuf> {
     }
     let dir = dir()?;
     perms::ensure_private_dir(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    prune_in(&dir, &storage.image_ids()?);
+    prune_in(&dir, || storage.image_ids());
 
     let path = file_path(&dir, entry.id);
     let cached = std::fs::symlink_metadata(&path)
@@ -56,10 +56,7 @@ pub fn prune_dir(storage: &Storage, dir: &Path) {
     if !dir.is_dir() {
         return;
     }
-    match storage.image_ids() {
-        Ok(live) => prune_in(dir, &live),
-        Err(e) => eprintln!("[images] cannot list image entries to clean the cache: {e:#}"),
-    }
+    prune_in(dir, || storage.image_ids());
 }
 
 /// Remove the cached file of entry `id`, if any.
@@ -83,18 +80,34 @@ fn file_path(dir: &Path, id: EntryId) -> PathBuf {
     dir.join(format!("{id}.png"))
 }
 
-/// Remove every `<id>.png` in `dir` whose id is not in `live`; other names
-/// are left alone.
-fn prune_in(dir: &Path, live: &HashSet<EntryId>) {
+/// Remove every `<id>.png` in `dir` whose id is not among the image ids
+/// `live` returns; other names are left alone. The dir is listed before
+/// `live` runs: a file is only written for an entry that exists, and ids are
+/// never reused, so a listed file whose id is missing afterwards is stale,
+/// while one another process caches meanwhile (for an entry newer than the
+/// id query) is not listed and survives. Errors are logged, never returned.
+fn prune_in(dir: &Path, live: impl FnOnce() -> Result<HashSet<EntryId>>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(id) = name.to_str().and_then(cached_id) else { continue };
+    let cached: Vec<(EntryId, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| Some((entry.file_name().to_str().and_then(cached_id)?, entry.path())))
+        .collect();
+    if cached.is_empty() {
+        return;
+    }
+    let live = match live() {
+        Ok(live) => live,
+        Err(e) => {
+            eprintln!("[images] cannot list image entries to clean the cache: {e:#}");
+            return;
+        }
+    };
+    for (id, path) in cached {
         if !live.contains(&id)
-            && let Err(e) = std::fs::remove_file(entry.path())
+            && let Err(e) = std::fs::remove_file(&path)
             && e.kind() != io::ErrorKind::NotFound
         {
-            eprintln!("[images] cannot remove {}: {e}", entry.path().display());
+            eprintln!("[images] cannot remove {}: {e}", path.display());
         }
     }
 }
@@ -144,11 +157,26 @@ mod tests {
         for name in ["1.png", "2.png", "notes.txt"] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
-        prune_in(dir.path(), &HashSet::from([2]));
+        prune_in(dir.path(), || Ok(HashSet::from([2])));
         let mut left: Vec<_> =
             std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         left.sort();
         assert_eq!(left, ["2.png", "notes.txt"]);
+    }
+
+    #[test]
+    fn prune_keeps_a_file_written_while_the_ids_were_read() {
+        // Another process saves entry 5 and caches it after this prune read
+        // the live ids: its file must survive (ids are never reused, so only
+        // a file listed before the ids were read can be stale)
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("1.png"), b"x").unwrap();
+        prune_in(dir.path(), || {
+            std::fs::write(dir.path().join("5.png"), b"new").unwrap();
+            Ok(HashSet::new())
+        });
+        assert!(dir.path().join("5.png").exists());
+        assert!(!dir.path().join("1.png").exists());
     }
 
     #[test]
