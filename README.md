@@ -524,6 +524,36 @@ for_window [app_id="clipstack-picker"] floating enable, resize set 800 600
 
 `clipstack pick --paste` (or `paste_after_pick = true` under `[picker]` in the config file) copies the entry you choose, closes the picker, and 150 ms later types `paste_keys` with wtype, by default `shift+Insert`, which pastes the clipboard in terminals and most GUI apps. The delay lets the picker's window close and focus go back to the window you came from. If that window pastes something else on Shift+Insert (xterm pastes the primary selection), set `paste_keys = "ctrl+shift+v"` for terminals or `"ctrl+v"` for GUI apps. `paste_keys` is modifiers (`shift`, `ctrl`, `alt`, `altgr`, `super`) and one key (`Insert`, `Return`, or a letter or digit), joined with `+`. Without wtype the entry is still copied, and ClipStack says it didn't paste. Cancelling the picker pastes nothing.
 
+## Omarchy Overlay
+
+On [Omarchy](https://omarchy.org), ClipStack also comes as an omarchy-shell overlay plugin (`omarchy/clipstack/`): a Maccy-style panel with the history on the left and the full entry on the right. Open it, type to filter, press Enter, and the entry is pasted into the window you were in. Pinned entries come first, then Today, Yesterday and Earlier; while you search, one Matches group with the query marked in each row. Text previews show line numbers (the first 2000 lines); images show a thumbnail in the list and the whole image fitted to the preview.
+
+The overlay never reads the clipboard or the history itself: every list, search, preview and action runs the `clipstack` CLI (`list --json`, `search --json`, `get`, `get --image-path`, `get --paste`, `get --copy`, `pin`, `unpin`, `alias`, `delete`, `edit`), so the daemon stays the only thing that captures copies. If a command fails, its error shows in the panel's footer. The terminal picker (`clipstack pick`) stays for other desktops and SSH sessions.
+
+Install it from a checkout (it links the folder, so `git pull` updates the plugin):
+
+```bash
+scripts/install-omarchy-plugin.sh              # link to ~/.config/omarchy/plugins/solsystemlabs.clipstack and enable
+scripts/install-omarchy-plugin.sh --uninstall  # disable and remove the link
+```
+
+The script refuses to replace anything at that path that isn't a symlink. To open the overlay from a key, bind `omarchy-shell shell toggle solsystemlabs.clipstack '{}'`.
+
+| Key | Action |
+|-----|--------|
+| Type | Filter (the search field has focus when the overlay opens) |
+| `↑` / `↓`, `Ctrl+K` / `Ctrl+J` | Move selection |
+| `Page Up` / `Page Down`, `Home` / `End` | Jump a page, to the first or last entry |
+| `Enter` | Paste into the previous window (the overlay closes first) |
+| `Shift+Enter` | Copy only, and close |
+| `Ctrl+P` | Pin or unpin (unpinning removes the alias) |
+| `Ctrl+A` | Name the entry: an inline prompt checks the alias as you type (`a-z`, `0-9`, `_`, `-`, up to 32, starting with a letter or digit) and says when another entry has it; `Enter` saves, `Esc` cancels |
+| `Ctrl+E` | Edit a text entry in your editor (`omarchy-launch-tui ... clipstack edit`; the overlay closes) |
+| `Ctrl+Backspace` | Delete the entry |
+| `Esc` | Clear the search; a second `Esc` closes |
+
+Every action is also a button showing its key. Click selects a row, double-click pastes it.
+
 ## Remote Clipboard (SSH)
 
 Two small POSIX `sh` scripts work from a remote shell through ssh:
@@ -1060,7 +1090,13 @@ CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored test_copy_and_paste tes
 # when installed, and skip those checks otherwise; e2e_remote.sh needs one of the two.
 cargo build --release
 for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
+
+# Omarchy overlay: Logic.js node tests, qmllint, omarchy plugin validate;
+# --render also draws its four states headless (needs quickshell) into a temp dir
+scripts/test-overlay.sh --render
 ```
+
+The overlay checks run against `omarchy/clipstack/tests/fake-clipstack`, a stand-in CLI with canned entries (set `CLIPSTACK_BIN` to point the overlay at it), so they never touch the real history or the running shell.
 
 Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; every shell suite sources `tests/lib.sh` and calls `isolate_env`. The shell suites build old-format stores and check the import through `clipstack export | jq`. `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy`/`wtype` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
 
@@ -1124,9 +1160,13 @@ clipstack/
 │   ├── lib.sh           # isolate_env/cleanup for shell suites
 │   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, unit; e2e_remote.sh: rcopy, rpaste)
 │   └── integration/     # Shell integration suites
+├── omarchy/clipstack/    # omarchy-shell overlay plugin (QML; Logic.js holds the pure logic)
+│   └── tests/           # node tests for Logic.js, fake-clipstack, headless render harness
 ├── scripts/
 │   ├── rcopy            # Remote copy over the forwarded daemon socket
-│   └── rpaste           # Remote paste (needs allow_pull = true)
+│   ├── rpaste           # Remote paste (needs allow_pull = true)
+│   ├── install-omarchy-plugin.sh  # Link and enable the overlay plugin (--uninstall)
+│   └── test-overlay.sh  # Overlay checks: node tests, qmllint, plugin validate, --render
 └── systemd/
     └── clipstack.service # Systemd user service file
 ```

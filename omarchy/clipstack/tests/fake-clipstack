@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# A stand-in for the clipstack CLI that serves canned entries, so the overlay
+# can be exercised without touching the real history. Implements the
+# overlay's subset of the Step 5.3 contract: list/search --json, get
+# (text, --image-path, --copy, --paste), pin, unpin, alias, delete, edit.
+#
+# State lives in $CLIPSTACK_FAKE_DIR (default $XDG_RUNTIME_DIR/clipstack-fake)
+# and is seeded on first use; delete the dir to start over. Every call is
+# appended to calls.log there. CLIPSTACK_FAKE_FAIL=<command> makes that
+# command fail with exit 4 and an "Error:" line, to test the status line.
+set -euo pipefail
+
+dir=${CLIPSTACK_FAKE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/clipstack-fake}
+db=$dir/entries.json
+mkdir -p "$dir/content" "$dir/images"
+chmod 700 "$dir"
+printf '%q ' "$@" >>"$dir/calls.log"
+echo >>"$dir/calls.log"
+
+die() { echo "Error: $2" >&2; exit "$1"; }
+
+seed() {
+  local now=$(( $(date +%s) * 1000 )) m=60000 h=3600000 d=86400000
+  jq -n --argjson now "$now" --argjson m "$m" --argjson h "$h" --argjson d "$d" '
+    def e($id; $ago; $preview; $size; $pinned; $alias; $kind; $w; $hh):
+      { id: $id, created_at: ($now - $ago), last_used: ($now - $ago), size: $size,
+        preview: $preview, pinned: $pinned, alias: $alias, source: "watch",
+        mime: (if $kind == "image" then "image/png" else "text/plain;charset=utf-8" end),
+        kind: $kind, width: $w, height: $hh };
+    [ e(1; 30*$d; "Best regards, Sam Rivera"; 24; true; "sig"; "text"; null; null),
+      e(2; 9*$d; "ssh -R ~/.clipstack.sock:/run/user/1000/clipstack.sock devbox"; 60; true; "devbox"; "text"; null; null),
+      e(3; 2*$m; "docker compose up -d --build"; 28; false; null; "text"; null; null),
+      e(4; 1*$h; "FROM rust:1.89 AS build RUN apt-get update && apt-get install -y pkg-config"; 412; false; null; "text"; null; null),
+      e(5; 3*$h; "https://docs.docker.com/compose/how-tos/environment-variables/"; 63; false; null; "text"; null; null),
+      e(6; 5*$h; "Image · 1440x900"; 0; false; null; "image"; 1440; 900),
+      e(7; 1*$d + 2*$h; "Thanks for the quick turnaround. I'"'"'ll review the PR tonight."; 61; false; null; "text"; null; null),
+      e(8; 1*$d + 4*$h; "SELECT id, preview FROM entries WHERE pinned = 1 ORDER BY last_used DESC;"; 72; false; null; "text"; null; null),
+      e(9; 4*$d; "cargo test --release -- --ignored"; 33; false; null; "text"; null; null) ]' >"$db"
+  printf 'Best regards,\nSam Rivera' >"$dir/content/1"
+  printf 'ssh -R ~/.clipstack.sock:/run/user/1000/clipstack.sock devbox' >"$dir/content/2"
+  printf 'docker compose up -d --build' >"$dir/content/3"
+  cat >"$dir/content/4" <<'EOF'
+FROM rust:1.89 AS build
+RUN apt-get update && apt-get install -y pkg-config
+ENV CARGO_TERM_COLOR=always
+
+WORKDIR /app
+COPY Dockerfile Cargo.toml Cargo.lock ./
+RUN cargo build --release
+COPY src ./src
+RUN touch src/main.rs && cargo build --release
+
+FROM debian:trixie-slim
+COPY --from=build /app/target/release/api /usr/local/bin/
+CMD ["api"]
+EOF
+  printf 'https://docs.docker.com/compose/how-tos/environment-variables/' >"$dir/content/5"
+  printf "Thanks for the quick turnaround. I'll review the PR tonight." >"$dir/content/7"
+  printf 'SELECT id, preview\nFROM entries\nWHERE pinned = 1\nORDER BY last_used DESC;' >"$dir/content/8"
+  printf 'cargo test --release -- --ignored' >"$dir/content/9"
+  # A 1440x900 PNG drawn like the C3 mockup (stdlib only)
+  python3 -I - "$dir/images/6.png" <<'EOF'
+import struct, sys, zlib
+W, H = 1440, 900
+rects = [(0, 0, W, 70, (26, 33, 51)), (64, 124, 540, 38, (74, 90, 128)),
+         (64, 210, 400, 600, (59, 74, 106)), (512, 210, 864, 280, (52, 66, 94)),
+         (512, 520, 400, 290, (52, 66, 94)), (944, 520, 432, 290, (59, 74, 106))]
+rows = []
+for y in range(H):
+    row = bytearray([0])
+    for x in range(W):
+        t = (x + y) / (W + H)
+        c = (int(46 - 16 * t), int(58 - 20 * t), int(85 - 29 * t))
+        for rx, ry, rw, rh, col in rects:
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                c = col
+        row += bytes(c)
+    rows.append(bytes(row))
+def chunk(t, d):
+    return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)) \
+    + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b"")
+open(sys.argv[1], "wb").write(png)
+EOF
+  local size; size=$(stat -c %s "$dir/images/6.png")
+  jq --argjson s "$size" 'map(if .id == 6 then .size = $s else . end)' "$db" >"$db.tmp" && mv "$db.tmp" "$db"
+}
+
+[[ -f $db ]] || seed
+
+cmd=${1:-}
+shift || true
+if [[ -n ${CLIPSTACK_FAKE_FAIL:-} && $CLIPSTACK_FAKE_FAIL == "$cmd" ]]; then
+  die 4 "cannot open the history: database is locked"
+fi
+
+# id:N -> N, or exit 1 like the CLI
+entry_id() {
+  local ref=$1
+  [[ $ref =~ ^id:([0-9]+)$ ]] || die 2 "the fake only understands id:N references"
+  local id=${BASH_REMATCH[1]}
+  jq -e --argjson id "$id" 'any(.[]; .id == $id)' "$db" >/dev/null || die 1 "no entry for $ref"
+  echo "$id"
+}
+
+update() { jq "$@" "$db" >"$db.tmp" && mv "$db.tmp" "$db"; }
+
+positioned='sort_by(-.last_used) | to_entries | map(.value + {position: (.key + 1)})'
+
+case $cmd in
+  list)
+    jq -c "$positioned" "$db"
+    ;;
+  search)
+    query=
+    while (($#)); do
+      case $1 in
+        --) shift; query="$*"; break ;;
+        --json) ;;
+        -c) shift ;;
+        *) query="$query $1" ;;
+      esac
+      shift
+    done
+    # Every word must appear in the content (case-insensitive), as with FTS5
+    hits=()
+    for file in "$dir"/content/*; do
+      ok=1
+      for word in $query; do
+        grep -qiF -- "$word" "$file" || { ok=0; break; }
+      done
+      ((ok)) && hits+=("${file##*/}")
+    done
+    out=$(jq -c --argjson hits "[$(IFS=,; echo "${hits[*]}")]" "$positioned"'
+      | map(select(.id as $id | $hits | index($id)))
+      | sort_by((if .pinned then 0 else 1 end), -.last_used)' "$db")
+    echo "$out"
+    [[ $out != "[]" ]] || exit 1
+    ;;
+  get)
+    id=$(entry_id "$1"); shift
+    kind=$(jq -r --argjson id "$id" '.[] | select(.id == $id) | .kind' "$db")
+    case ${1:-} in
+      --image-path)
+        [[ $kind == image ]] || die 1 "id:$id is text; --image-path is for images"
+        echo "$dir/images/$id.png" ;;
+      --copy|--paste)
+        now=$(( $(date +%s) * 1000 ))
+        update --argjson id "$id" --argjson now "$now" 'map(if .id == $id then .last_used = $now else . end)'
+        echo "Copied to clipboard" >&2 ;;
+      "")
+        [[ $kind == text ]] || die 2 "refusing to write PNG bytes to a terminal"
+        cat "$dir/content/$id" ;;
+      *) die 2 "unexpected argument '$1' found" ;;
+    esac
+    ;;
+  pin)
+    id=$(entry_id "$1")
+    update --argjson id "$id" 'map(if .id == $id then .pinned = true else . end)'
+    ;;
+  unpin)
+    id=$(entry_id "$1")
+    had=$(jq -r --argjson id "$id" '.[] | select(.id == $id) | .alias // ""' "$db")
+    update --argjson id "$id" 'map(if .id == $id then .pinned = false | .alias = null else . end)'
+    [[ -z $had ]] || echo "Removed @$had (unpinned entries have no alias)"
+    ;;
+  alias)
+    id=$(entry_id "$1"); name=${2#@}
+    [[ $name =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die 2 "invalid value '$2' for '<NAME>'"
+    owner=$(jq -r --arg n "$name" '.[] | select(.alias == $n) | .id' "$db")
+    [[ -z $owner || $owner == "$id" ]] || die 1 "alias @$name already used by id:$owner"
+    update --argjson id "$id" --arg n "$name" 'map(if .id == $id then .alias = $n | .pinned = true else . end)'
+    echo "id:$id is now @$name (pinned)"
+    ;;
+  delete)
+    id=$(entry_id "$1")
+    update --argjson id "$id" 'map(select(.id != $id))'
+    rm -f "$dir/images/$id.png" "$dir/content/$id"
+    ;;
+  edit)
+    id=$(entry_id "$1")
+    [[ $(jq -r --argjson id "$id" '.[] | select(.id == $id) | .kind' "$db") == text ]] || die 1 "id:$id is an image; only text can be edited"
+    ;;
+  *)
+    die 2 "the fake does not implement '$cmd'"
+    ;;
+esac

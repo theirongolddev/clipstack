@@ -1181,6 +1181,11 @@ evicted by `max_entries` or `max_total_bytes`).
 
 #### 5.4 Overlay plugin (`omarchy/clipstack/`)
 
+> **Implementation status:** built against the 5.3 contract; checked by
+> `scripts/test-overlay.sh` (node tests, `qmllint --max-warnings 0`, `omarchy plugin
+> validate`; `--render` draws C1-C4 headless against `tests/fake-clipstack`). The live
+> shell test (focus, paste into the previous window, edit launcher) is still to do.
+
 - Manifest: id `solsystemlabs.clipstack`, kind `overlay`, `keepLoaded: true`, entry
   point `Overlay.qml`. Validated with `omarchy plugin validate`.
 - It never captures anything: all data comes from the CLI through
@@ -1188,8 +1193,9 @@ evicted by `max_entries` or `max_total_bytes`).
   debounced 60 ms; `clipstack get id:N` for the selected text entry (preview shows
   at most the first 2000 lines); `get id:N --image-path` for images.
 - Actions: Enter `get id:N --paste` (overlay closes first); Shift+Enter
-  `get id:N --copy`; Ctrl+P `pin`/`unpin`; Ctrl+A inline alias prompt (`alias`,
-  validates `[a-z0-9_-]{1,32}` live); Ctrl+E `omarchy-launch-tui --app-id=org.omarchy.clipstack clipstack edit id:N`
+  `get id:N --copy` (overlay closes, as picking does in Maccy); Ctrl+P `pin`/`unpin`;
+  Ctrl+A inline alias prompt (`alias`, validates `[a-z0-9_-]{1,32}` with a letter or
+  digit first, as the CLI does, live, and flags a name another entry has); Ctrl+E `omarchy-launch-tui --app-id=org.omarchy.clipstack clipstack edit id:N`
   (overlay closes); Ctrl+Backspace `delete`. Every action is also a button with its
   shortcut shown; mouse click selects, double-click pastes.
 - Groups: PINNED, TODAY, YESTERDAY, EARLIER; while searching, one MATCHES group
@@ -1198,10 +1204,14 @@ evicted by `max_entries` or `max_total_bytes`).
   1040x620 centred over a dimmed scrim. No `Commons.Color.menu` tokens.
 - Pure logic (grouping, relative age, highlight spans, key map, alias validation)
   lives in `Logic.js` with node unit tests (`omarchy/clipstack/tests/*.test.mjs`,
-  run by `scripts/test-overlay.sh`); QML is checked with `qmllint`.
+  run by `scripts/test-overlay.sh`); QML is checked with `qmllint`. Manual and render
+  checks use `omarchy/clipstack/tests/fake-clipstack` (canned entries, an image, forced
+  failures) through `CLIPSTACK_BIN`, never the real binary. CLI failures show in the
+  footer status line.
 - Install: `scripts/install-omarchy-plugin.sh` symlinks the folder into
-  `~/.config/omarchy/plugins/solsystemlabs.clipstack` and runs
-  `omarchy plugin enable`.
+  `~/.config/omarchy/plugins/solsystemlabs.clipstack` (refusing to replace anything
+  that is not a symlink) and runs `omarchy plugin enable`; `--uninstall` disables it
+  and removes the link.
 
 #### 5.5 Desktop integration (on this machine, after 5.1-5.4 land)
 
