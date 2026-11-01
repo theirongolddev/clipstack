@@ -95,11 +95,12 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(storage: Storage) -> Result<Self> {
-        let index = storage.load_index()?;
+        let mut entries = storage.load_index()?.entries;
+        order_pinned_first(&mut entries);
 
         let mut picker = Self {
             storage,
-            entries: index.entries,
+            entries,
             filtered: Vec::new(),
             filtered_entries: Vec::new(),
             selected: ListState::default(),
@@ -249,17 +250,11 @@ impl Picker {
         Ok(())
     }
 
-    /// Sort entries: pinned first (by timestamp), then unpinned (by timestamp)
+    /// Sort entries: pinned first, each group kept in recency (index) order
     fn sort_entries_by_pin(&mut self) {
         let selected_id = self.selected_entry().map(|e| e.id.clone());
 
-        self.entries.sort_by(|a, b| {
-            match (a.pinned, b.pinned) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.timestamp.cmp(&a.timestamp), // Most recent first
-            }
-        });
+        order_pinned_first(&mut self.entries);
 
         self.update_filter();
 
@@ -1111,6 +1106,13 @@ impl Picker {
     }
 }
 
+/// Stable sort: pinned entries first, preserving the index's recency order
+/// within each group (the index, not timestamps, is the source of truth for
+/// recency since re-copies move entries to the front).
+fn order_pinned_first(entries: &mut [ClipEntry]) {
+    entries.sort_by_key(|e| !e.pinned);
+}
+
 /// Arguments for auto-spawning the daemon against the picker's storage.
 /// The limit is deliberately omitted so the daemon reuses the stored one.
 fn daemon_spawn_args(storage_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
@@ -1176,6 +1178,24 @@ mod tests {
             storage.save_entry(content).unwrap();
         }
         (temp, storage)
+    }
+
+    // ======== Pin ordering Tests ========
+
+    #[test]
+    fn test_pinned_entries_shown_first_on_open() {
+        let (_temp, storage) = create_test_storage(&["oldest", "middle", "newest"]);
+        let oldest_id = storage.load_index().unwrap().entries[2].id.clone();
+        storage.toggle_pin(&oldest_id).unwrap();
+
+        let picker = Picker::new(storage).unwrap();
+        let order: Vec<&str> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.entries[i].preview.as_str())
+            .collect();
+        // Pinned first, then the rest in recency (index) order
+        assert_eq!(order, vec!["oldest", "newest", "middle"]);
     }
 
     // ======== Daemon auto-start Tests ========
