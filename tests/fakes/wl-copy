@@ -1,7 +1,7 @@
 #!/bin/sh
 # Fake wl-copy for tests (first on PATH via TestEnv / isolate_env).
 # It never execs the real wl-copy, so a test cannot write the real clipboard.
-# Stdin is stored in $FAKE_CLIP_DIR/wl-copy.last; calls are logged to
+# Stdin is stored in $FAKE_CLIP_DIR/content; calls are logged to
 # $FAKE_CLIP_DIR/wl-copy.calls. Step 2 extends this with clipboard state.
 
 if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
@@ -14,4 +14,4 @@ if [ "$#" -ne 0 ]; then
     echo "fake wl-copy: unsupported arguments: $*" >&2
     exit 2
 fi
-cat > "$FAKE_CLIP_DIR/wl-copy.last"
+cat > "$FAKE_CLIP_DIR/content"
