@@ -243,7 +243,7 @@ The picker uses vim-style modal navigation with multiple modes:
 - Status messages for actions (delete confirmation, undo countdown)
 - Preview shows `[+N lines, Tab to scroll]` for truncated content
 
-**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running. The daemon uses the same `--storage-dir` as the picker and keeps the saved entry limit.
+**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running. The daemon is the same executable as the picker (not whichever `clipstack` is first on `PATH`), uses the same `--storage-dir` and keeps the saved entry limit.
 
 ### Search Features
 
@@ -285,6 +285,8 @@ nohup clipstack daemon > /tmp/clipstack.log 2>&1 &
 # Stop the running daemon
 clipstack kill
 ```
+
+The daemon stops cleanly on SIGINT, SIGTERM and SIGHUP: Ctrl+C, `clipstack kill`, `kill <pid>` and `systemctl --user stop` all make it print `clipstack daemon stopped` and exit with status 0.
 
 ### Systemd User Service
 
@@ -407,6 +409,8 @@ Clipboard history is stored in `~/.local/share/clipd/`:
 └── {timestamp}_{nnn}.txt   # Full content files (named by unique ID)
 ```
 
+Clipboard history often contains passwords and tokens, so the storage directory is created `0700` and every file in it `0600` (owner only). Stores written by older versions (`0755` directory, `0644` files) are tightened automatically the next time any command opens them; ClipStack prints `[storage] tightened permissions on N files` once when that happens. Only regular files directly inside the directory are changed: symlinks and subdirectories are never followed, and files owned by another user are left alone.
+
 ### Storage Limits
 
 | Limit | Value | Notes |
@@ -447,6 +451,7 @@ The `index.json` file contains entry metadata for fast loading:
 
 ### Data Safety
 
+- **Private permissions**: Storage dir `0700`, content and index files `0600`; existing stores are tightened on open
 - **Atomic writes**: All file writes use write-to-temp, fsync, then atomic rename
 - **Index lock**: Daemon, picker, and server updates are serialized via `index.lock`, so concurrent changes are never lost
 - **Orphaned temp cleanup**: Interrupted writes are cleaned up on startup
@@ -459,6 +464,8 @@ The `index.json` file contains entry metadata for fast loading:
 clipstack --storage-dir /path/to/custom/dir daemon
 clipstack --storage-dir /path/to/custom/dir list
 ```
+
+The directory is treated as ClipStack's own: it is created if missing and chmod'ed to `0700`, and its files to `0600`, even if it already existed. Don't point `--storage-dir` at a shared directory.
 
 ### Inspecting Storage Manually
 
@@ -548,6 +555,7 @@ This helps diagnose issues with:
 │  ├── index.json    → Entry metadata (id, timestamp, hash, etc) │
 │  ├── {id}.txt      → Full content files (one per entry)        │
 │  ├── index.lock    → Cross-process lock for index updates      │
+│  ├── perms.rs      → 0700 dir / 0600 files, tightened on open  │
 │  └── atomic_write  → Write-temp-fsync-rename pattern           │
 ├─────────────────────────────────────────────────────────────────┤
 │  Picker (picker.rs)                                             │
@@ -717,12 +725,18 @@ alacritty -e clipstack pick
 ### Running Tests
 
 ```bash
-# Unit tests (no Wayland required)
+# Unit and integration tests (no Wayland required)
 cargo test
 
-# Integration tests (requires Wayland session)
+# Clipboard round-trip tests (requires Wayland session)
 cargo test -- --ignored
+
+# Shell suite (needs a release build)
+cargo build --release
+./tests/integration/test_component_interaction.sh
 ```
+
+Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; shell suites source `tests/lib.sh` and call `isolate_env` (so far `test_component_interaction.sh`; the `e2e_*.sh` and `test_v11_features.sh` suites only pass `--storage-dir` with a temp dir). `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
 
 ### Building
 
@@ -746,9 +760,17 @@ clipstack/
 │   ├── main.rs          # CLI entry point, subcommands
 │   ├── clipboard.rs     # Wayland clipboard operations
 │   ├── daemon.rs        # Background monitoring daemon
+│   ├── perms.rs         # Private (0700/0600) storage permissions
 │   ├── picker.rs        # TUI history picker
 │   ├── storage.rs       # History storage management
 │   └── util.rs          # Formatting utilities (size, time)
+├── tests/
+│   ├── common/mod.rs    # TestEnv isolation harness for binary tests
+│   ├── daemon_lifecycle.rs  # Daemon start/stop integration tests
+│   ├── fakes/           # Fake wl-paste/wl-copy (never touch the real clipboard)
+│   ├── lib.sh           # isolate_env/cleanup for shell suites
+│   ├── e2e_*.sh         # Shell end-to-end suites
+│   └── integration/     # Shell integration suites
 ├── scripts/
 │   └── rcopy            # Remote copy helper script
 └── systemd/
