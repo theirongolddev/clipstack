@@ -801,7 +801,7 @@ This helps diagnose issues with:
 │  ├── copy/paste    → clipboard.rs (wl-copy/wl-paste wrapper)   │
 │  ├── get/search    → storage/ (by position, id:ID, @alias; FTS)│
 │  ├── alias         → Name (and pin) an entry                   │
-│  ├── pick          → picker.rs (TUI with ratatui)              │
+│  ├── pick          → picker/ (TUI with ratatui); --paste: wtype│
 │  ├── daemon        → daemon/ (capture, socket, PID lock file)  │
 │  ├── __watch-hook  → Run by wl-paste --watch per selection     │
 │  ├── kill          → Signal the daemon PID from its lock file  │
@@ -825,14 +825,18 @@ This helps diagnose issues with:
 │  ├── legacy.rs     → One-time import of the old JSON store     │
 │  └── perms.rs      → 0700 dir / 0600 files, tightened on open  │
 ├─────────────────────────────────────────────────────────────────┤
-│  Picker (picker.rs)                                             │
-│  ├── Search (preview fuzzy match + FTS5 content search)        │
-│  ├── Focus modes (List, Preview)                               │
-│  └── Pin management                                             │
+│  Picker (picker/)                                               │
+│  ├── keys.rs       → map_key: one pure key → action table      │
+│  ├── search.rs     → Fuzzy preview + FTS5 content, debounced   │
+│  ├── state.rs      → Mode, focus, selection by id, prompt      │
+│  ├── text.rs       → Wrap by display width, whitespace, ages   │
+│  ├── render.rs     → List, preview, status line                │
+│  └── actions.rs    → Edit in $EDITOR, wtype paste keys         │
 ├─────────────────────────────────────────────────────────────────┤
 │  External                                                       │
 │  ├── wl-copy       → Write to Wayland clipboard                │
-│  └── wl-paste      → Read from Wayland clipboard               │
+│  ├── wl-paste      → Read from Wayland clipboard               │
+│  └── wtype         → Optional: paste keys for pick --paste     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -875,9 +879,8 @@ ClipStack is built around several core principles:
 **Vim-Native Workflow**
 - Modal interface feels natural to vim users
 - `j/k` navigation, `gg/G` jumps, `/` for search
-- Single-key commands (`d` delete, `u` undo, `p` pin)
+- Letters are commands (`dd` delete, `u` undo, `p` pin, `P` name, `e` edit), so typing in normal mode never filters or deletes by accident; `/` starts a search
 - `Tab` switches between list and preview focus
-- Auto-start typing enters search mode without explicit `/`
 
 **Unix Philosophy**
 - Does one thing well: manages clipboard history

@@ -1,6 +1,7 @@
 # ClipStack Improvement Plan
 
-> Status: **REVIEWED**. Steps 0-4 below are fully specified and the open
+> Status: **IMPLEMENTED** (Steps 0-4, 2026-11-01; each step has an
+> "Implementation status" line). Steps 0-4 below were fully specified and the open
 > questions are decided. The user chose the recommended answers for Q2
 > (retention off by default) and Q10 (`/` starts a search).
 >
@@ -249,6 +250,8 @@ code     = "bad_request" / "too_large" / "not_utf8" / "forbidden" / "sensitive"
 
 ### Step 0: Quick fixes on the current code
 
+> **Implementation status:** done (a65f3c8..b715b88): permissions helper, test harness, SIGTERM handling, `current_exe` autostart.
+
 Independent changes that survive the storage migration.
 - [1] Permissions helper: create storage dir `0700`, files `0600`; tighten existing stores at startup.
 - [5] Enable `ctrlc`'s `termination` feature so SIGTERM stops the daemon cleanly.
@@ -334,6 +337,8 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 ---
 
 ### Step 1: Storage core (`storage.rs` → SQLite module)
+
+> **Implementation status:** done (89eb9a9..a52ae06, 4290549): SQLite/FTS5 storage, migration from `index.json`, `export`.
 
 - [13] SQLite (WAL) + FTS5. Schema columns planned for later steps: `pinned`, `alias`, `source`, `mime`, `size`, `last_used`, `storage_version`.
 - One-time migration from `index.json` + content files; `clipstack export`.
@@ -648,6 +653,8 @@ Also add a "historical" banner to `docs/UPGRADE_PLAN.md` and `docs/IMPLEMENTATIO
 
 ### Step 2: Daemon (`daemon.rs`, `clipboard.rs`, systemd)
 
+> **Implementation status:** done (9e736eb..4262c21, fixes through 43a1895): `wl-paste --watch`, Unix socket, systemd unit.
+
 - [12] `wl-paste --watch` with polling fallback; read `--list-types` per change and pass mime types to `ingest` ([2]).
 - [3] Unix socket in `$XDG_RUNTIME_DIR`; framed `push`/`pull` protocol ([11] ready); read timeout; one connection at a time. TCP `serve` removed; rcopy rewritten in the same commit.
 - [5] Verify clean shutdown with the watch child process.
@@ -856,6 +863,8 @@ WantedBy=graphical-session.target
 
 ### Step 3: Command line (`main.rs`, `scripts/`)
 
+> **Implementation status:** done (6ef5026..e31d08d): `cli.rs` split, exit codes, refs, `get`, `list`/`search --json`, `alias`, `rpaste`.
+
 - [8] `list --json`, `get <n|id>`, `search <q> --json` (FTS5), stable exit codes.
 - [9] `get @alias`, `alias <id> <name>`.
 - [11] `rpaste` over SSH Unix-socket forwarding (rcopy landed in 2-13); README setup docs.
@@ -948,7 +957,9 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 
 ---
 
-### Step 4: Picker (`picker.rs`)
+### Step 4: Picker (`picker/`)
+
+> **Implementation status:** done (5843009..def2d59, docs in the commit after): `picker/` modules, `map_key`, selection by id, debounced FTS search, wrapping, age column, `w`/`n`, `P` alias, `e` edit, `pick --paste`.
 
 - Restructure first (FEATURE_PLAN §0.1, §0.4): split view state from data; debounce search; search queries FTS5.
 - [15] Wrap to pane width, [16] fixed-width time column, [17] whitespace toggle.

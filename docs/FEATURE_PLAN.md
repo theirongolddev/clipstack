@@ -87,6 +87,8 @@ Ensure all interactive operations remain responsive as history grows:
 - `test_storage_version_mismatch_renders_error`
 
 ### 0.1 Separate "Domain" from "UI State"
+
+> **Done in IMPROVEMENT_PLAN Step 4.** The picker is `src/picker/`: `data.rs` holds the domain (`PickerData`: storage, entries, content cache, undo), `state.rs` the UI state (`ViewState`: mode, focus, selection by entry id, query, prompt, preview toggles, status), `search.rs` the filter results, and `keys.rs` maps keys to actions in one pure function. No separate ViewModel layer was needed; the filter is `search::filter_entries` and the derived counts are computed in `render.rs`.
 - **Domain**: entries metadata, storage access, clip content types
 - **UI State**: selection, scroll, mode, overlays, query, transient banners
 - Introduce a small "ViewModel" layer for:
@@ -123,6 +125,8 @@ Ensure all interactive operations remain responsive as history grows:
 - Optional cache for "render-ready lines" (highlighted spans) keyed by `(entry_id, query, scroll_window)`
 
 ### 0.4 Add Cancellation + Debouncing
+
+> **Done in IMPROVEMENT_PLAN Step 4.** The search runs 50 ms after the last keystroke (`[picker] search_debounce_ms`); an action on the rows (Enter, a move) runs a pending search first. There is nothing to cancel: the FTS5 search is synchronous (§0.2). `test_debounce_prevents_rapid_refilter` is `picker::search::tests::rapid_typing_runs_one_search`.
 - Debounce query updates (e.g. 30-75ms) to avoid re-filtering on every keystroke
 - Cancel in-flight deep searches when query changes
 
@@ -301,7 +305,7 @@ fn classify_match(&self, text: &str, query: &str, original: &str) -> (MatchClass
 - Smartcase: queries with uppercase force case-sensitive matching
 
 ### TDD Test Cases
-Add to `mod tests` in picker.rs:
+Add to the tests in `src/picker/` (the module whose code changes):
 - `test_match_class_exact_substring_beats_fuzzy`: exact substring ranks higher than scattered
 - `test_match_class_word_boundary_beats_scattered`: word boundary matches rank higher
 - `test_scattered_dropped_for_len_ge_threshold`: "abc" should NOT match "a_big_car"
@@ -321,6 +325,8 @@ Add to `mod tests` in picker.rs:
 ---
 
 ## Feature 2: Ctrl+d/u Scrolling in Preview Mode
+
+> **Module paths since IMPROVEMENT_PLAN Step 4.** `handle_preview_mode()` and `handle_normal_mode()` are gone: keys map to actions in `src/picker/keys.rs` (`preview_key`, `list_key`), which `Picker::apply` in `src/picker/mod.rs` carries out. This feature is a few rows in `preview_key` plus a test in `keys::tests`; Ctrl+D/U in preview focus are not bound yet. Its tests go in `src/picker/keys.rs`.
 
 ### Problem
 When focused in the content pane (Tab to enter), only `j/k` work for line-by-line scrolling. Users expect `Ctrl+d/u` for half-page scrolling (vim convention).
@@ -377,7 +383,7 @@ To:
 - Already at bounds: `saturating_sub` and `.min(max_scroll)` prevent over-scroll
 
 ### TDD Test Cases
-Add to `mod tests` in picker.rs:
+Add to the tests in `src/picker/` (the module whose code changes):
 - `test_preview_scroll_ctrl_d_moves_half_page`: verify scroll increases by height/2
 - `test_preview_scroll_ctrl_u_moves_half_page`: verify scroll decreases by height/2
 - `test_preview_scroll_respects_max_bounds`: Ctrl+d at near-end stops at max
@@ -394,6 +400,8 @@ Add to `mod tests` in picker.rs:
 ---
 
 ## Feature 3: Highlight Search Matches in Content Pane
+
+> **Module paths since IMPROVEMENT_PLAN Step 4.** `highlight_matches()` is in `src/picker/search.rs`, `render_list()`/`render_preview()` in `src/picker/render.rs`. The preview now draws `ViewState::preview_lines`, the content wrapped to the pane width (`text::layout_preview`), so highlight spans must be computed on those wrapped rows. Not implemented yet.
 
 ### Problem
 When searching, matched characters are highlighted in the list view (yellow/bold), but the content preview pane shows plain text with no highlighting.
@@ -488,7 +496,7 @@ let preview = Paragraph::new(preview_lines)
 - Performance: highlighting runs per-render; acceptable for typical preview sizes
 
 ### TDD Test Cases
-Add to `mod tests` in picker.rs:
+Add to the tests in `src/picker/` (the module whose code changes):
 - `test_highlight_matches_returns_styled_spans`: verify matched chars get yellow/bold style
 - `test_highlight_matches_empty_query_returns_plain`: no styling when query is empty
 - `test_highlight_matches_no_match_returns_plain`: unmatched text returns single plain span
@@ -506,6 +514,8 @@ Add to `mod tests` in picker.rs:
 ---
 
 ## Feature 4: Cursor Stability on Unpin (with General Selection Policy)
+
+> **Implemented in IMPROVEMENT_PLAN Step 4 (commit 4-3).** The selection is an `EntryId` in `ViewState` (`src/picker/state.rs`) and survives re-sorting and filtering. Pin follows the entry; unpin keeps the cursor's row (`Picker::toggle_pin_selected` in `src/picker/mod.rs`); delete selects the entry now on the same row; undo selects the restored entry. The tests are `state::tests::selection_survives_unpin`, `selection_follows_entry_when_filter_keeps_it`, `selection_none_when_filter_empty` and `delete_selects_the_next_row`. Each call site picks its policy directly; the `SelectionRestore` enum below was not needed.
 
 ### Problem
 When unpinning an item, the cursor follows the item to its new position (after pinned items). User wants the cursor to stay at the same list position.
@@ -596,7 +606,7 @@ self.sort_entries_by_pin(if is_pinned {
 - Unpin last pinned item: cursor stays, now points to first unpinned item
 
 ### TDD Test Cases (selection invariants)
-Add to `mod tests` in picker.rs:
+Add to the tests in `src/picker/` (the module whose code changes):
 - `test_unpin_cursor_stays_at_position`: unpin item at pos 2, cursor should stay at pos 2
 - `test_pin_cursor_follows_item`: pin item, cursor moves to new position in pinned section
 - `test_unpin_cursor_clamps_to_valid_range`: cursor at end, unpin causes list reorder, cursor clamps
@@ -616,16 +626,16 @@ Add to `mod tests` in picker.rs:
 
 | Feature | Location | Key Change |
 |---------|----------|------------|
-| 1. Stricter search | `filter_entries()` | Add `min_score` threshold + incremental deep search |
-| 2. Ctrl+d/u scroll | `handle_preview_mode()` | Add key handlers |
-| 3. Content highlighting | `render_preview()` | Call `highlight_matches()` |
-| 4. Cursor on unpin | `sort_entries_by_pin()` | `SelectionRestore` policy |
+| 1. Stricter search | `picker/search.rs::filter_entries()` | Add `min_score` threshold + incremental deep search |
+| 2. Ctrl+d/u scroll | `picker/keys.rs::preview_key()` | Add key rows |
+| 3. Content highlighting | `picker/render.rs::render_preview()` | Call `highlight_matches()` on the wrapped rows |
+| 4. Cursor on unpin | `picker/mod.rs::toggle_pin_selected()` | Done in IMPROVEMENT_PLAN Step 4 (selection by id; unpin keeps the row) |
 
 ## Verification Checklist
 
 ### Before Implementation
 - [ ] `cargo test` passes (establish baseline)
-- [ ] Read and understand existing test patterns in picker.rs tests module
+- [ ] Read and understand existing test patterns in the `src/picker/*.rs` tests modules
 
 ### Per Feature (TDD Cycle)
 - [ ] Write failing tests first (RED)
@@ -648,7 +658,7 @@ Add to `mod tests` in picker.rs:
 ### Problem
 Current colors are functional but lack visual cohesion. The UI feels utilitarian rather than polished. Colors are scattered across the codebase without a unified palette.
 
-### Current Color Usage (picker.rs)
+### Current Color Usage (`src/picker/render.rs`)
 - Yellow: Pin indicator (★), search highlights, warnings, preview mode border
 - Cyan: Size text `[1.5KB]`, preview border
 - Blue: Selected item background
@@ -800,7 +810,7 @@ These invariants must hold in all theme modes to ensure usability:
 - Focus border must differ from normal border
 - Match highlight must be visible against both selected and unselected backgrounds
 
-### Implementation Changes (picker.rs)
+### Implementation Changes (`src/picker/render.rs`)
 
 **Replace hardcoded colors with theme constants:**
 
@@ -1339,15 +1349,17 @@ Users must remember keybindings or read external docs.
 ├──────────────────────────────────────────────┤
 │  NAVIGATION                                  │
 │    j/k, ↑/↓      Move selection              │
-│    g/G           Jump to top/bottom          │
-│    Ctrl+d/u      Half-page scroll            │
+│    gg/G          Jump to top/bottom          │
+│    Ctrl+d/u      Move 10 entries             │
 │    /             Start search                │
 │    Esc           Exit search / close help    │
 │                                              │
 │  ACTIONS                                     │
 │    Enter         Copy to clipboard & exit    │
 │    p             Toggle pin                  │
-│    d             Delete entry                │
+│    P             Name the pin (alias)        │
+│    e             Edit in $EDITOR             │
+│    dd            Delete entry                │
 │    u             Undo delete (5s)            │
 │    Tab           Toggle preview focus        │
 │                                              │
@@ -1811,7 +1823,7 @@ image = "0.25"
 ## Must Have (Phase 0-2)
 0. Architecture & performance guardrails (Phase 0)
 1. ✅ Stricter search filtering
-2. ✅ Ctrl+d/u scrolling in preview
+2. Ctrl+d/u scrolling in preview (not built yet: preview focus has Page Up/Down only)
 3. ✅ Highlight search matches in content
 4. ✅ Cursor stability on unpin
 5. Premium color scheme
@@ -1920,7 +1932,7 @@ trait ClipboardBackend {
 
 ### Before Implementation
 - [ ] `cargo test` passes (establish baseline)
-- [ ] Read and understand existing test patterns in picker.rs tests module
+- [ ] Read and understand existing test patterns in the `src/picker/*.rs` tests modules
 
 ### Per Feature (TDD Cycle)
 - [ ] Write failing tests first (RED)
