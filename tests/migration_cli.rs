@@ -256,3 +256,53 @@ fn export_to_closed_pipe_exits_quietly() {
     assert!(out.status.success(), "status {:?}, stderr: {stderr}", out.status);
     assert!(stderr.is_empty(), "stderr: {stderr}");
 }
+
+/// Wipe the FTS index of the test store directly, leaving the entries.
+fn damage_fts(env: &TestEnv) {
+    let conn = rusqlite::Connection::open(env.storage_dir.join("clipstack.db")).unwrap();
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES ('delete-all')", []).unwrap();
+}
+
+#[test]
+fn check_reports_ok_counts_and_backups() {
+    let env = TestEnv::new();
+    write_legacy(&env, &[(&format!("{}", now_ms()), now_ms(), false, "imported")]);
+    let (stdout, _) = ok(&env, &["check"], None);
+    assert!(stdout.contains("Integrity:    ok"), "stdout: {stdout}");
+    assert!(stdout.contains("Search index: ok"), "stdout: {stdout}");
+    assert!(stdout.contains("Entries:      1"), "stdout: {stdout}");
+    assert!(stdout.contains("legacy-backup-"), "stdout: {stdout}");
+}
+
+#[test]
+fn check_fails_on_damaged_index_until_repaired() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("findable text"));
+    damage_fts(&env);
+
+    let out = run(&env, &["check"], None);
+    assert!(!out.status.success(), "a damaged index fails the check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("check --repair"), "stderr: {stderr}");
+
+    let (stdout, _) = ok(&env, &["check", "--repair"], None);
+    assert!(stdout.contains("Search index: rebuilt"), "stdout: {stdout}");
+    let (stdout, _) = ok(&env, &["check"], None);
+    assert!(stdout.contains("Search index: ok"), "stdout: {stdout}");
+}
+
+#[test]
+fn recover_alias_prints_recovery_complete() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("one"));
+    ok(&env, &["copy"], Some("two"));
+    damage_fts(&env);
+    let (stdout, _) = ok(&env, &["recover"], None);
+    assert!(stdout.contains("Recovery complete. 2 entries."), "stdout: {stdout}");
+    let (stdout, _) = ok(&env, &["check"], None);
+    assert!(stdout.contains("Search index: ok"), "recover repaired it: {stdout}");
+
+    let (help, _) = ok(&env, &["--help"], None);
+    assert!(!help.contains("recover"), "recover is hidden: {help}");
+    assert!(help.contains("check"), "help: {help}");
+}

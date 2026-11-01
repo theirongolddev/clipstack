@@ -23,6 +23,8 @@ pub enum StorageError {
     AliasTaken(String),
     /// Not `^[a-z0-9][a-z0-9_-]{0,31}$`
     InvalidAlias(String),
+    /// `check` found damage it didn't (or couldn't) repair
+    Corrupt(String),
 }
 
 impl fmt::Display for StorageError {
@@ -45,6 +47,7 @@ impl fmt::Display for StorageError {
                 "Invalid alias {alias:?}: use 1-32 characters from a-z, 0-9, '_' and '-', \
                  starting with a letter or digit"
             ),
+            StorageError::Corrupt(what) => write!(f, "{what}"),
         }
     }
 }
@@ -87,6 +90,32 @@ pub enum ListOrder {
     Recency,
     /// Pinned entries first, each group by recency (picker)
     PinnedFirst,
+}
+
+/// State of the FTS search index found by `check`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsState {
+    Ok,
+    /// Doesn't match the entries; `check --repair` rebuilds it
+    Damaged,
+    /// Was damaged and `check --repair` rebuilt it
+    Rebuilt,
+}
+
+/// What `Storage::check` found.
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    /// `PRAGMA integrity_check` problems; empty when the database is sound
+    pub integrity_errors: Vec<String>,
+    pub fts: FtsState,
+    pub counts: Counts,
+    pub legacy_backups: Vec<PathBuf>,
+}
+
+impl CheckReport {
+    pub fn is_ok(&self) -> bool {
+        self.integrity_errors.is_empty() && self.fts != FtsState::Damaged
+    }
 }
 
 /// History totals for `stats`/`status`.
@@ -266,6 +295,42 @@ impl Storage {
     /// `legacy-backup-*` dirs left by the import, oldest first.
     pub fn legacy_backup_dirs(&self) -> Vec<PathBuf> {
         legacy::backup_dirs(&self.base_dir)
+    }
+
+    /// Run SQLite's `integrity_check` and the FTS index's `integrity-check`
+    /// (rank 1: compared against the entries). With `repair`, a damaged FTS
+    /// index is rebuilt from the entries, then the WAL is checkpointed.
+    /// Core database damage is reported, never repaired here.
+    pub fn check(&self, repair: bool) -> Result<CheckReport> {
+        let (integrity_errors, fts) = {
+            let mut conn = self.conn();
+            let integrity_errors: Vec<String> = conn
+                .prepare("PRAGMA integrity_check")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter(|row| !matches!(row.as_deref(), Ok("ok")))
+                .collect::<rusqlite::Result<_>>()?;
+            let mut fts = fts_state(&conn)?;
+            if repair {
+                if fts == FtsState::Damaged {
+                    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    tx.execute("INSERT INTO entries_fts(entries_fts) VALUES ('rebuild')", [])
+                        .context("Failed to rebuild the search index")?;
+                    tx.commit()?;
+                    if fts_state(&conn)? == FtsState::Ok {
+                        fts = FtsState::Rebuilt;
+                    }
+                }
+                // Best effort: busy while another process reads
+                let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+            }
+            (integrity_errors, fts)
+        };
+        Ok(CheckReport {
+            integrity_errors,
+            fts,
+            counts: self.counts()?,
+            legacy_backups: self.legacy_backup_dirs(),
+        })
     }
 
     pub fn default_dir() -> PathBuf {
@@ -448,6 +513,17 @@ fn is_busy(err: &anyhow::Error) -> bool {
 /// (so frames that carried deleted plaintext are gone), then return free
 /// pages to the filesystem. Best effort: while another connection holds a
 /// read transaction the checkpoint can't finish, and the next delete retries.
+/// The FTS index's own consistency check against the entries table.
+fn fts_state(conn: &Connection) -> Result<FtsState> {
+    match conn.execute("INSERT INTO entries_fts(entries_fts, rank) VALUES ('integrity-check', 1)", []) {
+        Ok(_) => Ok(FtsState::Ok),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseCorrupt => {
+            Ok(FtsState::Damaged)
+        }
+        Err(e) => Err(e).context("Search index check failed"),
+    }
+}
+
 fn scrub_deleted(conn: &Connection) {
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     let _ = conn.execute_batch("PRAGMA incremental_vacuum");
@@ -465,6 +541,61 @@ pub(crate) fn test_storage() -> (Storage, tempfile::TempDir) {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    // ======== check (1-15) ========
+
+    /// Wipe the FTS index while the entries stay: `check` must see the mismatch.
+    fn damage_fts(storage: &Storage) {
+        storage.with_conn(|c| {
+            c.execute("INSERT INTO entries_fts(entries_fts) VALUES ('delete-all')", []).unwrap();
+        });
+    }
+
+    #[test]
+    fn check_ok_on_fresh_db() {
+        let (storage, _dir) = test_storage();
+        storage.ingest_at("hello world", Source::Copy, &[], 1).unwrap();
+        let report = storage.check(false).unwrap();
+        assert!(report.is_ok(), "{report:?}");
+        assert!(report.integrity_errors.is_empty());
+        assert_eq!(report.fts, FtsState::Ok);
+        assert_eq!(report.counts.total, 1);
+        assert!(report.legacy_backups.is_empty());
+    }
+
+    #[test]
+    fn check_without_repair_reports_damaged_fts() {
+        let (storage, _dir) = test_storage();
+        storage.ingest_at("hello world", Source::Copy, &[], 1).unwrap();
+        damage_fts(&storage);
+        let report = storage.check(false).unwrap();
+        assert_eq!(report.fts, FtsState::Damaged);
+        assert!(!report.is_ok());
+        assert!(storage.search("world", 10).unwrap().is_empty(), "index really is empty");
+    }
+
+    #[test]
+    fn check_repair_rebuilds_fts_after_delete_all() {
+        let (storage, _dir) = test_storage();
+        storage.ingest_at("hello world", Source::Copy, &[], 1).unwrap();
+        storage.ingest_at("another entry", Source::Copy, &[], 2).unwrap();
+        damage_fts(&storage);
+
+        let report = storage.check(true).unwrap();
+        assert_eq!(report.fts, FtsState::Rebuilt);
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(storage.search("world", 10).unwrap().len(), 1);
+        assert_eq!(storage.check(false).unwrap().fts, FtsState::Ok);
+    }
+
+    #[test]
+    fn check_repair_on_healthy_db_changes_nothing() {
+        let (storage, _dir) = test_storage();
+        storage.ingest_at("hello world", Source::Copy, &[], 1).unwrap();
+        let report = storage.check(true).unwrap();
+        assert_eq!(report.fts, FtsState::Ok, "no rebuild when the index is fine");
+        assert!(report.is_ok());
+    }
 
     const DAY_MS: i64 = 86_400_000;
 

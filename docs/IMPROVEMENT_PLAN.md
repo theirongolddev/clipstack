@@ -523,7 +523,8 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 
 **`recover` → `check`:**
 - `clipstack check [--repair]` runs `PRAGMA integrity_check` and FTS `integrity-check` (rank 1), and reports counts plus the legacy backups found.
-- With `--repair`, it runs FTS `rebuild` if the FTS check failed, then `PRAGMA wal_checkpoint(TRUNCATE)`. Core database corruption gets an actionable message: `clipstack export > backup.jsonl`, then `sqlite3 clipstack.db .recover`.
+- With `--repair`, it runs FTS `rebuild` if the FTS check failed (and re-checks; the report says `rebuilt`), then `PRAGMA wal_checkpoint(TRUNCATE)`. Core database corruption gets an actionable message: `clipstack export -o backup.jsonl`, then `sqlite3 clipstack.db .recover | sqlite3 recovered.db` (`.recover` writes SQL to stdout, so it has to be piped into a new database).
+- `Storage::check` returns `CheckReport { integrity_errors, fts: FtsState::{Ok, Damaged, Rebuilt}, counts, legacy_backups }`. A failed check (core damage, or a damaged index without `--repair`) is `StorageError::Corrupt`, so Step 3-2 maps it to exit 4; until then it exits 1.
 - `recover` stays as a hidden alias for `check --repair` and prints `Recovery complete. N entries.` so existing scripts that grep for "Recovery complete" keep working.
 
 **`export`:**
@@ -581,7 +582,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 | 1-12b | Switch picker to the SQLite storage; delete storage/json.rs and `util::compute_hash_string` | picker `test_content_search_finds_non_preview_match` (unchanged test, now via FTS), `test_pinned_entries_shown_first_on_open` ported to integer IDs, `undo_restores_deleted_entry_with_pin_and_alias`, `undo_restores_unpinned_entry_unpinned`, `undo_after_window_does_not_restore` |
 | 1-13 | Drop fs2; daemon lock via std File::try_lock | daemon `lock_is_held_while_a_daemon_runs_and_released_on_drop` (`is_running` delegates to `lock_is_held(path)` so the check is testable on a temp path); the existing daemon lock tests stay green |
 | 1-14 | Add `export` (JSONL) | `query::tests::export_jsonl_oldest_first_with_all_fields`, `export_jsonl_empty_store_writes_nothing`, `tests/migration_cli.rs::export_jsonl_roundtrips_content`, `export_file_created_0600`, `export_refuses_overwrite_without_force`, `export_to_closed_pipe_exits_quietly` |
-| 1-15 | Replace `recover` with `check [--repair]` (keep alias) | `storage::tests::check_ok_on_fresh_db`, `check_repair_rebuilds_fts_after_delete_all`, `tests/migration_cli.rs::recover_alias_prints_recovery_complete` |
+| 1-15 | Replace `recover` with `check [--repair]` (keep alias) | `storage::tests::check_ok_on_fresh_db`, `check_without_repair_reports_damaged_fts`, `check_repair_rebuilds_fts_after_delete_all`, `check_repair_on_healthy_db_changes_nothing`, `tests/migration_cli.rs::check_reports_ok_counts_and_backups`, `check_fails_on_damaged_index_until_repaired`, `recover_alias_prints_recovery_complete` (core-database damage can't be produced reliably in a test; that branch is reviewed, not tested) |
 | 1-16 | Update E2E scripts for SQLite storage | Shell: scripts fail first against new behaviour, then are updated |
 | 1-17 | Document SQLite storage, config file, export and check | — |
 

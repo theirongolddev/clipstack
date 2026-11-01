@@ -71,7 +71,15 @@ enum Commands {
     /// Check daemon status and system health
     Status,
 
-    /// Attempt to recover from corrupted storage
+    /// Check the database and search index; --repair rebuilds a damaged index
+    Check {
+        /// Rebuild a damaged search index and checkpoint the WAL
+        #[arg(long)]
+        repair: bool,
+    },
+
+    /// Old name for `check --repair`
+    #[command(hide = true)]
     Recover,
 
     /// Write the whole history as JSON Lines, oldest first
@@ -251,9 +259,16 @@ fn main() -> Result<()> {
             print_status(&storage, limit_source, &config, &config_source)?;
         }
 
+        Some(Commands::Check { repair }) => {
+            let report = storage.check(repair)?;
+            print_check(&storage, &report)?;
+            check_result(&storage, &report)?;
+        }
+
         Some(Commands::Recover) => {
-            // Opening the database already checked it; `check --repair` replaces this in 1-15
-            println!("Recovery complete. {} entries.", storage.counts()?.total);
+            let report = storage.check(true)?;
+            check_result(&storage, &report)?;
+            println!("Recovery complete. {} entries.", report.counts.total);
         }
 
         Some(Commands::Export { output, force }) => match output {
@@ -435,6 +450,57 @@ fn print_status(
 }
 
 /// Generate shell completions
+/// Print what `check` found.
+fn print_check(storage: &storage::Storage, report: &storage::CheckReport) -> Result<()> {
+    println!("Database:     {}", storage.db_path().display());
+    if report.integrity_errors.is_empty() {
+        println!("Integrity:    ok");
+    } else {
+        println!("Integrity:    \x1b[31m{} problems\x1b[0m", report.integrity_errors.len());
+        for problem in report.integrity_errors.iter().take(10) {
+            println!("  {problem}");
+        }
+    }
+    let fts = match report.fts {
+        storage::FtsState::Ok => "ok",
+        storage::FtsState::Damaged => "\x1b[31mdamaged\x1b[0m",
+        storage::FtsState::Rebuilt => "rebuilt",
+    };
+    println!("Search index: {fts}");
+    let counts = &report.counts;
+    println!(
+        "Entries:      {} ({} pinned, {})",
+        counts.total,
+        counts.pinned,
+        util::format_size(usize::try_from(counts.total_bytes)?)
+    );
+    for dir in &report.legacy_backups {
+        println!("Legacy backup: {} (delete after checking)", dir.display());
+    }
+    Ok(())
+}
+
+/// A failed check as an error with what to do next.
+fn check_result(storage: &storage::Storage, report: &storage::CheckReport) -> Result<()> {
+    if report.is_ok() {
+        return Ok(());
+    }
+    if !report.integrity_errors.is_empty() {
+        return Err(storage::StorageError::Corrupt(format!(
+            "the database is damaged ({} problems). Save what can still be read with \
+             `clipstack export -o backup.jsonl`, then try \
+             `sqlite3 {} .recover | sqlite3 recovered.db`",
+            report.integrity_errors.len(),
+            storage.db_path().display()
+        ))
+        .into());
+    }
+    Err(storage::StorageError::Corrupt(
+        "the search index is damaged; run `clipstack check --repair`".to_string(),
+    )
+    .into())
+}
+
 /// Create the `export -o` file 0600. Without `force` an existing file is an
 /// error; with it the file is truncated and tightened to 0600 before any
 /// content is written.
