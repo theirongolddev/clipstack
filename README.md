@@ -1,6 +1,6 @@
 # ClipStack
 
-A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack provides lazy-loading history, vim-style navigation, fuzzy search, and remote clipboard support via SSH tunnels.
+A fast, keyboard-driven clipboard manager for Linux/Wayland. ClipStack provides lazy-loading history, vim-style navigation, fuzzy search with deep content matching, and remote clipboard support via SSH tunnels.
 
 Built for developers who live in the terminal and want a clipboard manager that stays out of the way until needed.
 
@@ -8,20 +8,22 @@ Built for developers who live in the terminal and want a clipboard manager that 
 
 **Core Functionality**
 - **Clipboard History**: Automatically saves clipboard entries with SHA256 deduplication
-- **Dual Selection Support**: Monitors both regular clipboard (Ctrl+C) and PRIMARY selection (mouse highlight)
+- **Pinned Entries**: Mark important items with `p` to protect them from automatic pruning
 - **TUI Picker**: Fuzzy-searchable history picker with live preview and vim keybindings
 - **Remote Clipboard**: Copy from SSH sessions to your local clipboard via TCP tunnel
 
 **Performance**
 - **Lazy Loading**: Index contains only metadata; full content loaded on demand
+- **Two-Phase Search**: Searches previews first (fast), then full content for deep matches
+- **Atomic Writes**: Crash-safe storage with write-then-rename pattern prevents data corruption
 - **Sub-100ms Startup**: Picker opens instantly even with large history
-- **Efficient Storage**: Separate content files prevent index bloat
 
 **User Experience**
 - **Vim-Style Navigation**: Modal interface with `j/k`, `gg/G`, `/` search
-- **Fuzzy Search**: Type to filter with highlighted matches
+- **Preview Scrolling**: Press `Tab` to enter scrollable preview mode for long content
+- **Fuzzy Search**: Type to filter with highlighted matches and `[content]` indicator for deep matches
 - **Delete with Undo**: Remove entries with 5-second undo window
-- **Auto-Start Daemon**: Picker automatically starts background monitoring
+- **Configurable Limits**: Set 1-10,000 max entries via CLI or environment variable
 - **Shell Completions**: Tab completion for bash, zsh, fish, elvish, powershell
 
 ## Why ClipStack?
@@ -41,9 +43,10 @@ Built for developers who live in the terminal and want a clipboard manager that 
 | TUI interface | Yes | No (GUI) | No (GUI) | No |
 | Vim keybindings | Yes | No | No | No |
 | Fuzzy search | Yes | Yes | No | No |
+| Deep content search | Yes | No | No | No |
+| Pinned entries | Yes | Yes | No | No |
 | Remote clipboard | Yes | No | No | No |
 | Single binary | Yes | No | No | Yes |
-| No daemon option | Yes | No | No | No |
 
 ## Requirements
 
@@ -105,8 +108,16 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack daemon` | Run the background monitoring daemon |
 | `clipstack stats` | Show storage statistics |
 | `clipstack status` | Check daemon and system health |
+| `clipstack recover` | Rebuild index from content files (for corrupted storage) |
 | `clipstack serve [-p PORT]` | Start TCP server for remote clipboard (default: 7779) |
 | `clipstack completions <shell>` | Generate shell completions (bash, zsh, fish, elvish, powershell) |
+
+### Global Options
+
+| Option | Description |
+|--------|-------------|
+| `--storage-dir PATH` | Custom storage directory |
+| `--max-entries N` | Maximum entries to store (1-10000, default: 100) |
 
 ### Examples
 
@@ -128,6 +139,12 @@ clipstack paste | grep "pattern" | clipstack copy
 
 # View recent history
 clipstack list -c 20
+
+# Use custom max entries limit
+clipstack --max-entries 500 daemon
+
+# Recover from corrupted storage
+clipstack recover
 
 # Check storage stats
 clipstack stats
@@ -165,17 +182,17 @@ Launch with `clipstack` or `clipstack pick`:
 ┌─Search (/ to search, type to filter)────────────────┐
 │                                                     │
 └─────────────────────────────────────────────────────┘
-┌─History (5/5)──────────────┐┌─Preview─────5m─1.2KB──┐
-│> 14:32 [  1.2KB] function  ││const example = () => │
-│  14:30 [   45B] hello worl ││  return "hello";     │
-│  14:28 [  256B] {"type":"j ││};                    │
-│  14:25 [   12B] quick text ││                      │
-│  14:20 [  3.1KB] import Re ││                      │
-└────────────────────────────┘└──────────────────────┘
-[NORMAL] j/k:Nav  /:Search  Enter:Paste  d:Delete  u:Undo  G:End  gg:Top  q:Quit
+┌─History (5/5) - 1 pinned─────┐┌─Preview─────5m─1.2KB──┐
+│> ★ 14:32 [  1.2KB] function  ││const example = () => │
+│    14:30 [   45B] hello worl ││  return "hello";     │
+│    14:28 [  256B] {"type":"j ││};                    │
+│    14:25 [   12B] quick text ││                      │
+│    14:20 [  3.1KB] import Re ││                      │
+└──────────────────────────────┘└──────────────────────┘
+[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit
 ```
 
-The picker uses vim-style modal navigation with two modes:
+The picker uses vim-style modal navigation with multiple modes:
 
 **Normal Mode** (default):
 | Key | Action |
@@ -187,8 +204,10 @@ The picker uses vim-style modal navigation with two modes:
 | `Ctrl+D` / `Page Down` | Jump down 10 entries |
 | `Ctrl+U` / `Page Up` | Jump up 10 entries |
 | `/` | Enter search mode |
+| `p` | Toggle pin on selected entry (★) |
 | `d` | Delete selected entry |
 | `u` | Undo delete (5 second window) |
+| `Tab` | Enter preview scroll mode |
 | `Enter` | Copy selected entry to clipboard and exit |
 | `Esc` / `q` | Exit without copying |
 | _any letter_ | Start typing to filter (enters search mode) |
@@ -203,19 +222,55 @@ The picker uses vim-style modal navigation with two modes:
 | `Enter` | Copy selected entry to clipboard and exit |
 | `Esc` | Exit search mode (return to normal) |
 
+**Preview Mode** (after pressing `Tab`):
+| Key | Action |
+|-----|--------|
+| `j` / `k` / `↑` / `↓` | Scroll one line |
+| `Page Up` / `Page Down` | Scroll one page |
+| `g` / `Home` | Jump to top of content |
+| `G` / `End` | Jump to bottom of content |
+| `Tab` / `Esc` / `q` | Exit preview mode |
+
 **Visual Features:**
-- Mode indicator shows `[NORMAL]` or `[SEARCH]` in status bar
+- Mode indicator shows `[NORMAL]`, `[SEARCH]`, or `[PREVIEW]` in status bar
+- Pinned entries show `★` indicator and appear at the top of the list
 - Matched characters highlighted in **yellow** during fuzzy search
+- `[content]` indicator for matches found in full content (not just preview)
 - Scrollbar shows position in long lists
 - Relative timestamps (e.g., "5m ago", "2h ago")
 - Entry size displayed in human-readable format (e.g., "1.2KB")
 - Status messages for actions (delete confirmation, undo countdown)
+- Preview shows `[+N lines, Tab to scroll]` for truncated content
 
-**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't already running.
+**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running.
+
+### Search Features
+
+ClipStack uses a two-phase search algorithm:
+
+1. **Phase 1 (Fast)**: Searches the 100-character preview stored in memory
+2. **Phase 2 (Deep)**: For non-matches, loads and searches full content from disk
+
+When a match is found in full content but not in the preview, a `[content]` indicator appears in the list. This allows finding text that appears deep within clipboard entries.
+
+Search performance limits ensure responsive UI:
+- Stops after finding 10 content matches
+- Stops after loading 50 files
+
+### Pinned Entries
+
+Pin frequently-used text to protect it from automatic pruning:
+
+- Press `p` to toggle pin status on selected entry
+- Pinned entries show a `★` indicator
+- Pinned entries always appear at the top of the list (sorted by timestamp)
+- Maximum 25 pinned entries allowed
+- Pinned entries survive when the history limit is exceeded
+- Re-copying pinned content moves it to the top while preserving pin status
 
 ## Running the Daemon
 
-The daemon monitors your clipboard and PRIMARY selection, automatically saving new entries to history.
+The daemon monitors your clipboard, automatically saving new entries to history.
 
 ### Manual Start
 
@@ -304,9 +359,6 @@ ssh -R 7779:localhost:7779 user@remote-server
 sudo cp scripts/rcopy /usr/local/bin/
 sudo chmod +x /usr/local/bin/rcopy
 
-# Or install via cargo (if clipstack is installed on remote)
-# The rcopy script will be in ~/.cargo/bin/
-
 # Usage examples:
 echo "text from remote" | rcopy
 cat /var/log/syslog | head -50 | rcopy
@@ -319,6 +371,13 @@ rcopy < /etc/hostname
 2. SSH reverse tunnel forwards remote:7779 to local:7779
 3. `rcopy` sends stdin to localhost:7779 via netcat
 4. Local `clipstack serve` receives data, saves to history, and copies to system clipboard
+
+### Security
+
+The TCP server includes protections:
+- Reads data in 8KB chunks with a 10MB total limit
+- Rejects non-UTF-8 content
+- Binds only to localhost by default
 
 ### Persistent SSH Tunnel
 
@@ -339,15 +398,16 @@ Clipboard history is stored in `~/.local/share/clipd/`:
 
 ```
 ~/.local/share/clipd/
-├── index.json          # Metadata index (timestamps, hashes, previews)
-└── {timestamp}.txt     # Full content files (named by millisecond timestamp)
+├── index.json              # Metadata index (timestamps, hashes, previews)
+└── {timestamp}_{nanos}.txt # Full content files (named by unique ID)
 ```
 
 ### Storage Limits
 
 | Limit | Value | Notes |
 |-------|-------|-------|
-| Max entries | 100 | Oldest entries automatically pruned |
+| Max entries | 100 (default) | Configurable 1-10,000; oldest unpinned entries pruned |
+| Max pinned | 25 | Pinned entries exempt from pruning |
 | Max preview | 100 characters | Stored in index for fast display |
 | Max entry size | Unlimited | Each entry stored in separate file |
 
@@ -360,11 +420,12 @@ The `index.json` file contains entry metadata for fast loading:
   "max_entries": 100,
   "entries": [
     {
-      "id": "1736789123456",
+      "id": "1736789123456_123",
       "timestamp": 1736789123456,
       "size": 1234,
       "preview": "First 100 characters of content...",
-      "hash": "sha256:a1b2c3d4e5..."
+      "hash": "sha256:a1b2c3d4e5...",
+      "pinned": false
     }
   ]
 }
@@ -372,11 +433,19 @@ The `index.json` file contains entry metadata for fast loading:
 
 | Field | Description |
 |-------|-------------|
-| `id` | Unique identifier (millisecond timestamp) |
+| `id` | Unique identifier (millisecond timestamp + nanoseconds) |
 | `timestamp` | Unix timestamp in milliseconds |
 | `size` | Content size in bytes |
 | `preview` | First 100 characters (control chars sanitized) |
 | `hash` | SHA256 hash for deduplication |
+| `pinned` | Whether entry is protected from pruning |
+
+### Data Safety
+
+- **Atomic writes**: All file writes use write-to-temp, fsync, then atomic rename
+- **Orphaned temp cleanup**: Interrupted writes are cleaned up on startup
+- **Recovery command**: `clipstack recover` rebuilds the index from content files
+- **Duplicate detection**: Identical content is deduplicated by hash
 
 ### Custom Storage Location
 
@@ -402,32 +471,31 @@ cat ~/.local/share/clipd/index.json | jq '.entries | length'
 
 # Find large entries (over 10KB)
 cat ~/.local/share/clipd/index.json | jq '.entries[] | select(.size > 10000)'
+
+# Find pinned entries
+cat ~/.local/share/clipd/index.json | jq '.entries[] | select(.pinned)'
 ```
 
-## Configuration for AI Agents
-
-### Integration with Claude Code / AI Assistants
-
-ClipStack can be used by AI coding assistants to manage clipboard operations:
-
-```bash
-# AI can copy generated code to clipboard
-echo "const x = 42;" | clipstack copy
-
-# AI can read current clipboard
-clipstack paste
-
-# AI can search clipboard history
-clipstack list -c 50
-```
-
-For programmatic access to stored entries, see [Inspecting Storage Manually](#inspecting-storage-manually).
+## Configuration
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `CLIPSTACK_MAX_ENTRIES` | Maximum entries to store (1-10000) | `100` |
 | `CB_PORT` | Port for remote clipboard server/client | `7779` |
+
+### Recommended Setup
+
+Add to your shell rc file:
+
+```bash
+# Set custom history limit
+export CLIPSTACK_MAX_ENTRIES=500
+
+# Start daemon on login (if not using systemd)
+pgrep -x clipstack > /dev/null || clipstack daemon &
+```
 
 ### Status Command
 
@@ -461,28 +529,37 @@ This helps diagnose issues with:
 │  ├── pick          → picker.rs (TUI with ratatui)              │
 │  ├── daemon        → daemon.rs (polling loop + lock file)      │
 │  ├── serve         → TCP server for remote clipboard           │
+│  ├── recover       → Rebuild index from content files          │
 │  ├── status        → Health check (daemon, wayland, storage)   │
 │  └── list/stats    → storage.rs (JSON index + content files)   │
 ├─────────────────────────────────────────────────────────────────┤
 │  Storage (storage.rs)                                           │
 │  ├── index.json    → Entry metadata (id, timestamp, hash, etc) │
-│  └── {id}.txt      → Full content files (one per entry)        │
+│  ├── {id}.txt      → Full content files (one per entry)        │
+│  └── atomic_write  → Write-temp-fsync-rename pattern           │
+├─────────────────────────────────────────────────────────────────┤
+│  Picker (picker.rs)                                             │
+│  ├── Two-phase search (preview fast, content lazy)             │
+│  ├── Focus modes (List, Preview)                               │
+│  └── Pin management                                             │
 ├─────────────────────────────────────────────────────────────────┤
 │  External                                                       │
 │  ├── wl-copy       → Write to Wayland clipboard                │
-│  └── wl-paste      → Read from Wayland clipboard/PRIMARY       │
+│  └── wl-paste      → Read from Wayland clipboard               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Design Decisions
 
 1. **Lazy Loading**: Index contains only metadata + 100-char preview. Full content loaded on demand, keeping memory usage low.
-2. **Polling vs Events**: Uses 250ms polling instead of `wl-paste --watch` for reliability across different Wayland compositors.
-3. **Dual Selection**: Monitors both clipboard (Ctrl+C) and PRIMARY (mouse selection) to capture all copy operations.
-4. **SHA256 Deduplication**: Hashes content to prevent duplicates; re-copying moves existing entry to top of list.
-5. **File-Based Storage**: Simple JSON index + separate content files. Human-readable, inspectable, no database required.
-6. **Lock File Synchronization**: Prevents multiple daemon instances from corrupting storage.
-7. **Modal UI Pattern**: Vim-style normal/search modes keep navigation keyboard-only and predictable.
+2. **Two-Phase Search**: Previews searched first (instant), then full content loaded only for non-matches. Performance limits prevent UI freezes.
+3. **Atomic Writes**: All file operations use write-to-temp, fsync, atomic-rename pattern. Crashes never corrupt storage.
+4. **Polling vs Events**: Uses 250ms polling instead of `wl-paste --watch` for reliability across different Wayland compositors.
+5. **SHA256 Deduplication**: Hashes content to prevent duplicates; re-copying moves existing entry to top of list.
+6. **File-Based Storage**: Simple JSON index + separate content files. Human-readable, inspectable, no database required.
+7. **Lock File Synchronization**: Prevents multiple daemon instances from corrupting storage.
+8. **Modal UI Pattern**: Vim-style normal/search/preview modes keep navigation keyboard-only and predictable.
+9. **Pin Protection**: Pinned entries exempt from automatic pruning, with configurable limits to prevent abuse.
 
 ### Design Philosophy
 
@@ -498,17 +575,21 @@ ClipStack is built around several core principles:
 - Content load time: < 50ms even for 500KB entries
 - 250ms polling interval balances responsiveness with CPU usage
 - Preview truncation keeps index small regardless of entry size
+- Two-phase search prevents scanning entire history for every keystroke
 
 **Reliability First**
+- Atomic writes prevent data corruption on crash or power loss
 - Lock file prevents multiple daemon instances from corrupting storage
 - SHA256 hashing ensures exact duplicate detection
+- Recovery command can rebuild from orphaned content files
 - Graceful handling of empty clipboard, missing files, and Unicode edge cases
 - Preview sanitizes control characters to prevent display corruption
 
 **Vim-Native Workflow**
 - Modal interface feels natural to vim users
 - `j/k` navigation, `gg/G` jumps, `/` for search
-- Single-key commands (`d` delete, `u` undo)
+- Single-key commands (`d` delete, `u` undo, `p` pin)
+- `Tab` switches between list and preview focus
 - Auto-start typing enters search mode without explicit `/`
 
 **Unix Philosophy**
@@ -536,7 +617,7 @@ Tested on a typical development machine:
 
 **Storage efficiency:**
 - Deduplication: Re-copying identical content reuses existing entry
-- Automatic pruning: Old entries removed when limit reached
+- Automatic pruning: Old unpinned entries removed when limit reached
 - Separate content files: Large entries don't bloat the index
 
 ### Data Handling
@@ -546,6 +627,7 @@ ClipStack handles various content types and edge cases gracefully:
 **Unicode Support**
 - Full UTF-8 support for all operations (copy, paste, search, preview)
 - Multi-byte characters (emoji, CJK, etc.) handled correctly in previews
+- Line wrapping uses character count, not byte count
 - Fuzzy search works across all Unicode text
 
 **Edge Cases**
@@ -582,6 +664,16 @@ pgrep -f "clipstack daemon"
 # Run in foreground to see output
 clipstack daemon
 # Should print "[clipboard] Saved: X bytes..." on copy
+```
+
+### Corrupted storage
+
+```bash
+# Check for orphaned temp files or corrupted index
+ls ~/.local/share/clipd/
+
+# Rebuild index from content files
+clipstack recover
 ```
 
 ### Remote copy not working
@@ -628,6 +720,9 @@ cargo build
 
 # Release build (recommended for installation)
 cargo build --release
+
+# Check for warnings
+cargo clippy
 ```
 
 ### Project Structure
