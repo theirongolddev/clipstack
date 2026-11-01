@@ -12,7 +12,6 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
-use std::net::TcpListener;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,11 +94,12 @@ enum Commands {
         force: bool,
     },
 
-    /// Start a TCP server for remote clipboard (use with SSH reverse tunnel)
+    /// Removed TCP server: prints where the daemon's socket is and exits 2
+    #[command(hide = true, disable_help_flag = true)]
     Serve {
-        /// Port to listen on
-        #[arg(short, long, default_value = "7779")]
-        port: u16,
+        /// Old flags (`--port`) are accepted and ignored
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
     },
 
     /// Run by `wl-paste --watch` once per new selection (internal)
@@ -124,6 +124,16 @@ fn main() -> Result<()> {
             let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
         }
         return Ok(());
+    }
+
+    if matches!(cli.command, Some(Commands::Serve { .. })) {
+        let sock = daemon::Daemon::socket_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "$XDG_RUNTIME_DIR/clipstack.sock".to_string());
+        eprintln!(
+            "serve was removed: the daemon listens on {sock}; see README \"Remote clipboard\" for rcopy over ssh"
+        );
+        std::process::exit(2);
     }
 
     // Check dependencies on commands that need clipboard access
@@ -312,9 +322,7 @@ fn main() -> Result<()> {
             }
         },
 
-        Some(Commands::Serve { port }) => {
-            serve_clipboard(storage, port)?;
-        }
+        Some(Commands::Serve { .. }) => unreachable!("handled before storage is opened"),
 
         Some(Commands::Completions { shell }) => {
             generate_completions(shell);
@@ -603,87 +611,6 @@ fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
     generate(shell, &mut cmd, name, &mut io::stdout());
-}
-
-/// Maximum size for incoming TCP data (10MB)
-const MAX_TCP_CONTENT_SIZE: usize = 10 * 1024 * 1024;
-
-fn serve_clipboard(storage: storage::Storage, port: u16) -> Result<()> {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(&addr)?;
-    eprintln!("Clipboard server listening on {}", addr);
-    eprintln!("SSH usage: ssh -R {}:localhost:{} remote", port, port);
-    eprintln!("Remote usage: cat file | nc localhost {}", port);
-    eprintln!("Max content size: {} bytes", MAX_TCP_CONTENT_SIZE);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                // Read with size limit to prevent memory exhaustion attacks
-                let mut content = Vec::new();
-                let mut buffer = [0u8; 8192];
-                let mut total_read = 0;
-
-                loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            total_read += n;
-                            if total_read > MAX_TCP_CONTENT_SIZE {
-                                eprintln!(
-                                    "Connection rejected: content exceeds {} byte limit",
-                                    MAX_TCP_CONTENT_SIZE
-                                );
-                                break;
-                            }
-                            content.extend_from_slice(&buffer[..n]);
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading from connection: {}", e);
-                            break;
-                        }
-                    }
-                }
-
-                if total_read > MAX_TCP_CONTENT_SIZE || content.is_empty() {
-                    continue;
-                }
-
-                // Convert to string, rejecting non-UTF-8 content
-                let content = match String::from_utf8(content) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        eprintln!("Rejected non-UTF-8 content");
-                        continue;
-                    }
-                };
-
-                // Save to storage and clipboard
-                match storage.ingest(&content, Source::Remote, &[]) {
-                    Ok(outcome) => {
-                        if let Err(e) = clipboard::Clipboard::system().copy(&content) {
-                            eprintln!("Warning: couldn't copy to system clipboard: {}", e);
-                        }
-                        match outcome {
-                            IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry) => {
-                                // Use chars().take() for safe Unicode truncation
-                                let preview: String = entry.preview.chars().take(40).collect();
-                                eprintln!("Received {} bytes: {}...", entry.size, preview);
-                            }
-                            IngestOutcome::Skipped(reason) => eprintln!(
-                                "[remote] skipped: {}",
-                                storage.policy().describe_skip(&reason)
-                            ),
-                        }
-                    }
-                    Err(e) => eprintln!("Error saving entry: {}", e),
-                }
-            }
-            Err(e) => eprintln!("Connection error: {}", e),
-        }
-    }
-
-    Ok(())
 }
 
 fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {

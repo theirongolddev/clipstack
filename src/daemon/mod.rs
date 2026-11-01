@@ -61,6 +61,11 @@ impl Daemon {
         Ok(runtime_dir()?.join("clipstack.lock"))
     }
 
+    /// The daemon socket: `<runtime dir>/clipstack.sock`.
+    pub fn socket_path() -> Result<PathBuf> {
+        Ok(runtime_dir()?.join(SOCKET_NAME))
+    }
+
     /// Check if daemon is currently running by testing the lock file
     pub fn is_running() -> bool {
         Self::lock_file_path().is_ok_and(|path| lock_is_held(&path))

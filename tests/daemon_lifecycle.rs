@@ -88,3 +88,23 @@ fn sigkill_daemon_terminates_watch_child() {
         "watch child {watch} outlived the killed daemon"
     );
 }
+
+#[test]
+fn serve_prints_migration_message_exits_2() {
+    let mut env = TestEnv::new();
+    for args in [&["serve"][..], &["serve", "--port", "7779"], &["serve", "-p", "1"]] {
+        // Spawned and waited with a timeout: the old TCP server never exits
+        let mut cmd = env.cmd();
+        cmd.args(args);
+        let pid = env.spawn(cmd);
+        let done = env.wait_for_exit(pid, Duration::from_secs(5)).expect("serve exits at once");
+        let stderr = done.stderr;
+        assert_eq!(done.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("serve was removed"), "{stderr}");
+        let sock = env.socket_path();
+        assert!(stderr.contains(&*sock.to_string_lossy()), "names the socket: {stderr}");
+        assert!(stderr.contains("Remote clipboard"), "{stderr}");
+    }
+    // Exits before opening (and so creating) the store
+    assert!(!env.storage_dir.exists(), "serve opened the store");
+}
