@@ -3,6 +3,7 @@
 use super::{ClipEntry, Counts, EntryId, Kind, ListOrder, Source, Storage, StorageError};
 use rusqlite::types::Value;
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use rusqlite::{OptionalExtension, Row};
 use serde::Serialize;
 use std::io::Write;
@@ -183,13 +184,14 @@ impl Storage {
     pub fn export_jsonl(&self, out: &mut dyn Write) -> Result<usize> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {ENTRY_COLUMNS}, content FROM entries ORDER BY last_used ASC, id ASC"
+            "SELECT {ENTRY_COLUMNS}, content, image FROM entries ORDER BY last_used ASC, id ASC"
         ))?;
         let mut rows = stmt.query([])?;
         let mut written = 0;
         while let Some(row) = rows.next()? {
             let entry = entry_from_row(row)?;
             let content: String = row.get(ENTRY_COLUMN_COUNT)?;
+            let image: Option<Vec<u8>> = row.get(ENTRY_COLUMN_COUNT + 1)?;
             let line = ExportRow {
                 id: entry.id,
                 created_at: entry.created_at,
@@ -199,7 +201,11 @@ impl Storage {
                 alias: entry.alias.as_deref(),
                 source: entry.source,
                 mime: &entry.mime,
+                kind: entry.kind,
+                width: entry.width,
+                height: entry.height,
                 content: &content,
+                image_base64: image.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
             };
             serde_json::to_writer(&mut *out, &line)?;
             out.write_all(b"\n")?;
@@ -213,7 +219,9 @@ impl Storage {
 /// Number of columns in `ENTRY_COLUMNS`.
 const ENTRY_COLUMN_COUNT: usize = 12;
 
-/// One `export` line: the entry without its preview, plus the content.
+/// One `export` line: the entry without its preview, plus the content. An
+/// image row has `content: ""`, its dimensions and the PNG as standard
+/// base64 in `image_base64`; text rows have none of those three keys.
 #[derive(Serialize)]
 struct ExportRow<'a> {
     id: EntryId,
@@ -224,7 +232,14 @@ struct ExportRow<'a> {
     alias: Option<&'a str>,
     source: Source,
     mime: &'a str,
+    kind: Kind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_base64: Option<String>,
 }
 
 #[cfg(test)]
@@ -431,12 +446,38 @@ mod tests {
         assert_eq!(rows[1]["mime"], "text/plain;charset=utf-8");
         let keys: Vec<&str> = rows[1].as_object().unwrap().keys().map(String::as_str).collect();
         let mut expected = vec![
-            "id", "created_at", "last_used", "size", "pinned", "alias", "source", "mime", "content",
+            "id", "created_at", "last_used", "size", "pinned", "alias", "source", "mime", "kind", "content",
         ];
         expected.sort_unstable();
         let mut keys = keys;
         keys.sort_unstable();
         assert_eq!(keys, expected, "exactly the documented fields, no preview");
+    }
+
+    #[test]
+    fn export_jsonl_writes_images_as_base64() {
+        use base64::Engine as _;
+        let (storage, _dir) = test_storage();
+        let png = crate::png::test_png(3, 2, b"export");
+        storage.ingest_image_at(&png, Source::Watch, &[], 1).unwrap();
+        add(&storage, "text after", 2);
+
+        let mut out = Vec::new();
+        assert_eq!(storage.export_jsonl(&mut out).unwrap(), 2);
+        let rows: Vec<serde_json::Value> =
+            String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(rows[0]["kind"], "image");
+        assert_eq!(rows[0]["mime"], "image/png");
+        assert_eq!(rows[0]["content"], "");
+        assert_eq!((rows[0]["width"].as_u64(), rows[0]["height"].as_u64()), (Some(3), Some(2)));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(rows[0]["image_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+        assert_eq!(rows[1]["kind"], "text");
+        for key in ["image_base64", "width", "height"] {
+            assert!(rows[1].get(key).is_none(), "text rows have no {key}");
+        }
     }
 
     #[test]

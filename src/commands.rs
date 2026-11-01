@@ -539,6 +539,14 @@ fn print_check(storage: &Storage, report: &storage::CheckReport) -> Result<()> {
         storage::FtsState::Rebuilt => "rebuilt",
     };
     println!("Search index: {fts}");
+    if report.image_errors.is_empty() {
+        println!("Images:       ok");
+    } else {
+        println!("Images:       \x1b[31m{} damaged\x1b[0m", report.image_errors.len());
+        for problem in report.image_errors.iter().take(10) {
+            println!("  {problem}");
+        }
+    }
     let counts = &report.counts;
     println!(
         "Entries:      {} ({} pinned, {})",
@@ -567,9 +575,18 @@ fn check_result(storage: &Storage, report: &storage::CheckReport) -> Result<()> 
         ))
         .into());
     }
-    Err(storage::StorageError::Corrupt(
-        "the search index is damaged; run `clipstack check --repair`".to_string(),
-    )
+    if report.fts == storage::FtsState::Damaged {
+        return Err(storage::StorageError::Corrupt(
+            "the search index is damaged; run `clipstack check --repair`".to_string(),
+        )
+        .into());
+    }
+    let ids: Vec<&str> = report.image_errors.iter().filter_map(|e| e.split(':').nth(1)).collect();
+    Err(storage::StorageError::Corrupt(format!(
+        "{} image entries are damaged; remove them with `clipstack delete id:N` (id:{})",
+        ids.len(),
+        ids.join(", id:")
+    ))
     .into())
 }
 

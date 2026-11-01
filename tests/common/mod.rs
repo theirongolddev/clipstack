@@ -334,3 +334,55 @@ fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
+
+/// CRC-32 as PNG chunks use it.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// A small PNG of `width` x `height` (signature, IHDR, a private chunk
+/// holding `tag` so images of one size can differ, empty IDAT, IEND).
+pub fn test_png(width: u32, height: u32, tag: &[u8]) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut out = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"tEXt", tag);
+    chunk(&mut out, b"IDAT", &[]);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+impl TestEnv {
+    /// Store `png` as an image entry the way the daemon would: a watch hook
+    /// run with the fake clipboard offering only `image/png` (wl-paste
+    /// passes `CLIPBOARD_STATE=nil` when no text type is offered).
+    pub fn put_image(&self, png: &[u8]) {
+        std::fs::write(self.fake_clip_dir.join("content"), png).expect("write fake content");
+        std::fs::write(self.fake_clip_dir.join("types"), "image/png\n").expect("write fake types");
+        let status = self
+            .cmd()
+            .arg("__watch-hook")
+            .env("CLIPBOARD_STATE", "nil")
+            .status()
+            .expect("run watch hook");
+        assert!(status.success());
+    }
+}

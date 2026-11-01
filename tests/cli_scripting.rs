@@ -73,6 +73,26 @@ fn damaged_index_exits_4() {
 }
 
 #[test]
+fn damaged_image_row_fails_check_with_exit_4() {
+    let env = TestEnv::new();
+    run(&env, &["copy"], Some("some text"));
+    let db = env.storage_dir.join("clipstack.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO entries (content, hash, size, preview, created_at, last_used, mime, kind, width, height, image)
+             VALUES ('', randomblob(32), 4, 'Image', 1, 1, 'image/png', 'image', 1, 1, x'00010203')",
+            [],
+        )
+        .unwrap();
+    let out = run(&env, &["check"], None);
+    assert_eq!(code(&out), 4, "stdout: {}\nstderr: {}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("Images:"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("not a PNG"), "{}", stdout(&out));
+    assert!(stderr(&out).contains("clipstack delete id:"), "{}", stderr(&out));
+}
+
+#[test]
 fn clipboard_tool_failure_exits_6() {
     let env = TestEnv::new();
     // FAKE_CLIP_DIR is a file, so the fake wl-copy fails

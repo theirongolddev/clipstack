@@ -116,13 +116,16 @@ pub struct CheckReport {
     /// `PRAGMA integrity_check` problems; empty when the database is sound
     pub integrity_errors: Vec<String>,
     pub fts: FtsState,
+    /// Image rows whose bytes are not a PNG or don't match their recorded
+    /// size or dimensions, one line each (`id:N: ...`); never repaired
+    pub image_errors: Vec<String>,
     pub counts: Counts,
     pub legacy_backups: Vec<PathBuf>,
 }
 
 impl CheckReport {
     pub fn is_ok(&self) -> bool {
-        self.integrity_errors.is_empty() && self.fts != FtsState::Damaged
+        self.integrity_errors.is_empty() && self.fts != FtsState::Damaged && self.image_errors.is_empty()
     }
 }
 
@@ -362,7 +365,7 @@ impl Storage {
     /// index is rebuilt from the entries, then the WAL is checkpointed.
     /// Core database damage is reported, never repaired here.
     pub fn check(&self, repair: bool) -> Result<CheckReport> {
-        let (integrity_errors, fts) = {
+        let (integrity_errors, fts, image_errors) = {
             let mut conn = self.conn();
             let integrity_errors: Vec<String> = conn
                 .prepare("PRAGMA integrity_check")?
@@ -383,11 +386,13 @@ impl Storage {
                 // Best effort: busy while another process reads
                 let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
             }
-            (integrity_errors, fts)
+            let image_errors = image_errors(&conn)?;
+            (integrity_errors, fts, image_errors)
         };
         Ok(CheckReport {
             integrity_errors,
             fts,
+            image_errors,
             counts: self.counts()?,
             legacy_backups: self.legacy_backup_dirs(),
         })
@@ -590,6 +595,38 @@ fn fts_state(conn: &Connection) -> Result<FtsState> {
     }
 }
 
+/// Image rows that don't hold a PNG matching their `size`, `width` and
+/// `height`. Reads one image at a time.
+fn image_errors(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id, size, width, height, image FROM entries WHERE kind = 'image'")?;
+    let mut rows = stmt.query([])?;
+    let mut errors = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: EntryId = row.get(0)?;
+        let size: i64 = row.get(1)?;
+        let dims: (Option<u32>, Option<u32>) = (row.get(2)?, row.get(3)?);
+        let image: Vec<u8> = row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default();
+        let problem = match crate::png::parse_header(&image) {
+            None => Some("the image is not a PNG".to_string()),
+            Some(_) if i64::try_from(image.len()).ok() != Some(size) => {
+                Some(format!("size is {size} but the image has {} bytes", image.len()))
+            }
+            Some(info) if dims != (Some(info.width), Some(info.height)) => Some(format!(
+                "recorded as {}x{} but the PNG header says {}x{}",
+                dims.0.unwrap_or(0),
+                dims.1.unwrap_or(0),
+                info.width,
+                info.height
+            )),
+            Some(_) => None,
+        };
+        if let Some(problem) = problem {
+            errors.push(format!("id:{id}: {problem}"));
+        }
+    }
+    Ok(errors)
+}
+
 /// `settings` key set while a scrub couldn't finish; the daemon tick retries.
 const SETTING_SCRUB_PENDING: &str = "scrub_pending";
 
@@ -672,6 +709,34 @@ mod tests {
         assert!(report.is_ok(), "{report:?}");
         assert_eq!(storage.search("world", 10).unwrap().len(), 1);
         assert_eq!(storage.check(false).unwrap().fts, FtsState::Ok);
+    }
+
+    #[test]
+    fn check_verifies_image_rows() {
+        let (storage, _dir) = test_storage();
+        let png = crate::png::test_png(4, 4, b"check");
+        let image = match storage.ingest_image(&png, Source::Copy, &[]).unwrap() {
+            IngestOutcome::Inserted(e) => e,
+            other => panic!("{other:?}"),
+        };
+        let report = storage.check(false).unwrap();
+        assert!(report.is_ok() && report.image_errors.is_empty(), "{report:?}");
+
+        let damage = |sql: &str| {
+            storage.with_conn(|c| c.execute(sql, [image.id]).unwrap());
+            let report = storage.check(true).unwrap();
+            assert!(!report.is_ok(), "{sql}: {report:?}");
+            assert_eq!(report.image_errors.len(), 1, "{sql}: {report:?}");
+            assert!(report.image_errors[0].starts_with(&format!("id:{}", image.id)), "{report:?}");
+            report.image_errors[0].clone()
+        };
+        assert!(damage("UPDATE entries SET width = 5 WHERE id = ?1").contains("4x4"));
+        storage.with_conn(|c| c.execute("UPDATE entries SET width = 4 WHERE id = ?1", [image.id]).unwrap());
+        assert!(damage("UPDATE entries SET size = 1 WHERE id = ?1").contains("size"));
+        storage.with_conn(|c| {
+            c.execute("UPDATE entries SET size = ?2 WHERE id = ?1", rusqlite::params![image.id, png.len() as i64]).unwrap()
+        });
+        assert!(damage("UPDATE entries SET image = x'00010203', size = 4 WHERE id = ?1").contains("PNG"));
     }
 
     #[test]
