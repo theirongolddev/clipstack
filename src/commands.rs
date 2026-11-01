@@ -1,8 +1,8 @@
 //! One function per subcommand. `main` parses the command line, loads the
 //! config, opens storage and dispatches here.
 
-use crate::cli::{Cli, CliError, Exit, LimitSource, resolve_max_entries};
-use crate::storage::{self, IngestOutcome, ListOrder, Source, Storage};
+use crate::cli::{Cli, CliError, EntryRef, Exit, LimitSource, resolve_max_entries};
+use crate::storage::{self, ClipEntry, IngestOutcome, ListOrder, Source, Storage};
 use crate::{clipboard, config, daemon, perms, protocol, util};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
@@ -74,6 +74,36 @@ pub fn list(storage: &Storage, count: usize) -> Result<()> {
         println!("... and {} more", total - entries.len());
     }
     Ok(())
+}
+
+/// The entry `reference` names; not found is exit 1 (`no entry for REF`).
+fn resolve(storage: &Storage, reference: &EntryRef) -> Result<ClipEntry> {
+    let entry = match reference {
+        EntryRef::Position(n) => storage.nth(n.get())?,
+        EntryRef::Id(id) => storage.get(*id)?,
+        EntryRef::Alias(name) => storage.by_alias(name)?,
+    };
+    entry.ok_or_else(|| CliError::new(Exit::NotFound, format!("no entry for {reference}")).into())
+}
+
+/// `get REF [--copy]`: the content to stdout as stored, with no newline
+/// added. `--copy` also puts it on the clipboard and bumps it through
+/// `ingest`, so it is the newest entry without needing the daemon (the watch
+/// hook's own bump, if a daemon runs, changes nothing).
+pub fn get(storage: &Storage, reference: &EntryRef, copy: bool) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    let content = storage.load_content(entry.id)?;
+    if copy {
+        clipboard::Clipboard::system().copy(&content)?;
+        if let IngestOutcome::Skipped(reason) = storage.ingest(&content, Source::Copy, &[])? {
+            eprintln!("Copied, but not kept in the history: {}", storage.policy().describe_skip(&reason));
+        }
+    }
+    let mut out = io::stdout().lock();
+    match out.write_all(content.as_bytes()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 /// `clear`: every entry and the legacy backup dirs.

@@ -72,6 +72,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Commands::Copy) => commands::copy(&storage),
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count }) => commands::list(&storage, count),
+        Some(Commands::Get { entry, copy }) => commands::get(&storage, &entry, copy),
         Some(Commands::Clear) => commands::clear(&storage),
         Some(Commands::Daemon) => commands::run_daemon(storage, &config, cli.config.as_deref()),
         Some(Commands::Kill) => commands::kill(),

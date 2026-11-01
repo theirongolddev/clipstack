@@ -50,6 +50,17 @@ pub enum Commands {
         count: usize,
     },
 
+    /// Print one entry's content (no newline added); --copy also puts it on the clipboard
+    Get {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
+
+        /// Also copy it to the clipboard and make it the newest entry
+        #[arg(long)]
+        copy: bool,
+    },
+
     /// Clear clipboard history
     Clear,
 
@@ -110,7 +121,6 @@ pub enum Commands {
 /// Which entry a command means: `N` (1-based position, newest first),
 /// `id:ID` (the stable entry id) or `@alias`. Not `#ID`: a shell drops a
 /// word starting with `#` as a comment.
-#[cfg_attr(not(test), expect(dead_code, reason = "first caller is `get` (commit 3-4)"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryRef {
     Position(NonZeroUsize),
