@@ -2,11 +2,13 @@
 
 use crate::clipboard::ClipboardError;
 use crate::config::ConfigError;
-use crate::storage::StorageError;
+use crate::storage::{EntryId, StorageError, is_valid_alias};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(name = "clipstack")]
@@ -103,6 +105,63 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+/// Which entry a command means: `N` (1-based position, newest first),
+/// `id:ID` (the stable entry id) or `@alias`. Not `#ID`: a shell drops a
+/// word starting with `#` as a comment.
+#[cfg_attr(not(test), expect(dead_code, reason = "first caller is `get` (commit 3-4)"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryRef {
+    Position(NonZeroUsize),
+    Id(EntryId),
+    Alias(String),
+}
+
+impl FromStr for EntryRef {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const FORMS: &str = "use N (position, 1 = newest), id:ID or @alias";
+        /// Non-empty and all ASCII digits (`usize::from_str` also takes `+3`).
+        fn all_digits(s: &str) -> bool {
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+        }
+        if let Some(name) = s.strip_prefix('@') {
+            return if is_valid_alias(name) {
+                Ok(EntryRef::Alias(name.to_string()))
+            } else {
+                Err(format!(
+                    "invalid alias {s:?}: 1-32 characters from a-z, 0-9, '_' and '-', \
+                     starting with a letter or digit"
+                ))
+            };
+        }
+        if let Some(digits) = s.strip_prefix("id:") {
+            return match digits.parse::<EntryId>() {
+                Ok(id) if id > 0 && all_digits(digits) => Ok(EntryRef::Id(id)),
+                _ => Err(format!("invalid entry id {s:?}: {FORMS}")),
+            };
+        }
+        if let Some(id) = s.strip_prefix('#').filter(|id| all_digits(id)) {
+            return Err(format!("{s:?}: write id:{id} (a shell drops words starting with #)"));
+        }
+        match s.parse::<usize>().ok().filter(|_| all_digits(s)).map(NonZeroUsize::new) {
+            Some(Some(n)) => Ok(EntryRef::Position(n)),
+            Some(None) => Err(format!("position 0: positions start at 1 (the newest entry); {FORMS}")),
+            None => Err(format!("invalid entry {s:?}: {FORMS}")),
+        }
+    }
+}
+
+impl fmt::Display for EntryRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EntryRef::Position(n) => write!(f, "{n}"),
+            EntryRef::Id(id) => write!(f, "id:{id}"),
+            EntryRef::Alias(name) => write!(f, "@{name}"),
+        }
+    }
 }
 
 /// Exit status, stable for scripts (README "Scripting"). 3 (daemon or
@@ -259,6 +318,42 @@ mod tests {
         assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "default");
         open(Some(5));
         assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "saved");
+    }
+
+    #[test]
+    fn parses_position_id_alias() {
+        let parse = |s: &str| s.parse::<EntryRef>();
+        assert_eq!(parse("1"), Ok(EntryRef::Position(NonZeroUsize::new(1).unwrap())));
+        assert_eq!(parse("42"), Ok(EntryRef::Position(NonZeroUsize::new(42).unwrap())));
+        assert_eq!(parse("id:42"), Ok(EntryRef::Id(42)));
+        assert_eq!(parse("@sig"), Ok(EntryRef::Alias("sig".into())));
+        assert_eq!(parse("@my-alias_2"), Ok(EntryRef::Alias("my-alias_2".into())));
+        // Display gives back the form that was parsed (used in messages)
+        for s in ["7", "id:42", "@sig"] {
+            assert_eq!(parse(s).unwrap().to_string(), s);
+        }
+    }
+
+    #[test]
+    fn rejects_zero_position() {
+        let err = "0".parse::<EntryRef>().unwrap_err();
+        assert!(err.contains("1"), "{err}");
+        assert!("id:0".parse::<EntryRef>().is_err());
+        assert!("id:-3".parse::<EntryRef>().is_err());
+        assert!("-1".parse::<EntryRef>().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_alias_chars() {
+        for bad in ["@", "@Sig", "@a b", "@-lead", "@a.b", &format!("@{}", "a".repeat(33))] {
+            assert!(bad.parse::<EntryRef>().is_err(), "{bad:?} accepted");
+        }
+        for bad in ["", "abc", "id:", "id:x", "+3", " 3"] {
+            assert!(bad.parse::<EntryRef>().is_err(), "{bad:?} accepted");
+        }
+        // `#42` is what a shell turns into a comment; say what to use instead
+        let err = "#42".parse::<EntryRef>().unwrap_err();
+        assert!(err.contains("id:42"), "{err}");
     }
 
     #[test]

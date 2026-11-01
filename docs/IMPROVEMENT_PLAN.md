@@ -913,7 +913,7 @@ JSON timestamps are unix ms integers. No new dependency is needed for this.
 |---|--------|-----------------------|
 | 3-1 | Move clap definitions and handlers out of main.rs | Existing suite (pure refactor) |
 | 3-2 | Map errors to stable exit codes | `cli::tests::exit_code_for_storage_config_clipboard_errors`, `cli_scripting::newer_schema_exits_4`, `bad_config_exits_5` |
-| 3-3 | Parse entry references (N, #id, @alias) | `cli::tests::parses_position_id_alias`, `rejects_zero_position`, `rejects_invalid_alias_chars` |
+| 3-3 | Parse entry references (N, id:ID, @alias) | `cli::tests::parses_position_id_alias`, `rejects_zero_position`, `rejects_invalid_alias_chars` |
 | 3-4 | Add `get` (remove the `expect(dead_code)` on `Storage::get`/`nth`/`by_alias`) | `cli_scripting::get_1_prints_newest_without_newline`, `get_by_id`, `get_by_alias`, `get_missing_exits_1`, `get_copy_puts_content_on_fake_clipboard` |
 | 3-5 | Add `list --json` | `cli_scripting::list_json_fields_and_positions`, `list_json_respects_count`, `list_json_empty_array` |
 | 3-6 | Add `search` with FTS5 and `--json` | `cli_scripting::search_finds_deep_match`, `search_json_shape`, `search_no_match_exits_1` |
