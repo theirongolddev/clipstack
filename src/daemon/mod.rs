@@ -1,10 +1,12 @@
 pub mod capture;
 
 use crate::clipboard::Clipboard;
+use crate::config::{CaptureConfig, SocketConfig};
 use crate::perms;
-use crate::storage::{IngestOutcome, Source, Storage};
-use crate::util;
+use crate::storage::Storage;
 use anyhow::{Context, Result};
+use capture::Capture;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -16,11 +18,37 @@ use std::time::{Duration, Instant};
 /// How often a running daemon applies retention and the size caps, so
 /// entries age out without a new copy or command.
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(60);
+/// The main loop's tick (watcher checks, `running` checks); polling ticks
+/// at its own interval when that is shorter.
+const TICK: Duration = Duration::from_millis(100);
+
+/// What the daemon runs with, from the config file and `main`.
+#[derive(Debug, Clone)]
+pub struct DaemonOptions {
+    pub capture: CaptureConfig,
+    #[expect(dead_code, reason = "read by the socket server")]
+    pub socket: SocketConfig,
+    pub clipboard: Clipboard,
+    /// The command `wl-paste --watch` runs per selection:
+    /// `<clipstack> --storage-dir <dir> [--config <file>] __watch-hook`
+    pub hook: Vec<OsString>,
+}
+
+impl Default for DaemonOptions {
+    fn default() -> Self {
+        Self {
+            capture: CaptureConfig::default(),
+            socket: SocketConfig::default(),
+            clipboard: Clipboard::system(),
+            hook: Vec::new(),
+        }
+    }
+}
 
 pub struct Daemon {
     storage: Storage,
+    options: DaemonOptions,
     running: Arc<AtomicBool>,
-    poll_interval: Duration,
     _lock_file: File, // Keep lock file open to maintain lock
 }
 
@@ -47,12 +75,12 @@ impl Daemon {
     }
 
     /// A daemon saving into `storage`, holding the global lock file.
-    pub fn new(storage: Storage) -> Result<Self> {
-        Self::with_lock_path(storage, &Self::lock_file_path()?)
+    pub fn new(storage: Storage, options: DaemonOptions) -> Result<Self> {
+        Self::with_lock_path(storage, options, &Self::lock_file_path()?)
     }
 
     /// A daemon holding the lock at `lock_path` (tests use a temp path).
-    pub fn with_lock_path(storage: Storage, lock_path: &Path) -> Result<Self> {
+    pub fn with_lock_path(storage: Storage, options: DaemonOptions, lock_path: &Path) -> Result<Self> {
         // Acquire exclusive lock - fails if another daemon is running.
         let mut lock_file = open_lock_file(lock_path)?;
         lock_file
@@ -66,82 +94,48 @@ impl Daemon {
 
         Ok(Self {
             storage,
+            options,
             running: Arc::new(AtomicBool::new(false)),
-            poll_interval: Duration::from_millis(250),
             _lock_file: lock_file,
         })
     }
 
-    #[allow(dead_code)]
-    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
-        self.poll_interval = interval;
-        self
-    }
-
-    /// Run the daemon, monitoring clipboard and saving changes
+    /// Run until stopped (SIGTERM/SIGINT/SIGHUP or `stop()`). Must be called
+    /// from the main thread: the watch child is spawned from it.
     pub fn run(&self) -> Result<()> {
         self.running.store(true, Ordering::SeqCst);
+        eprintln!("clipstack daemon started");
 
-        let mut last_clipboard_hash: Option<Vec<u8>> = None;
+        let poll_interval = Duration::from_millis(self.options.capture.poll_interval_ms);
+        let mut capture = Capture::new(
+            self.options.capture.mode,
+            poll_interval,
+            self.options.clipboard.clone(),
+            self.options.hook.clone(),
+        );
         let mut last_expire = Instant::now();
 
-        eprintln!("clipstack daemon started, monitoring clipboard...");
-
-        while self.running.load(Ordering::SeqCst) {
-            // Check regular clipboard (Ctrl+C copies only)
-            self.check_and_save(Clipboard::system().paste_text(), &mut last_clipboard_hash, "clipboard");
-
-            if last_expire.elapsed() >= EXPIRE_INTERVAL {
-                last_expire = Instant::now();
+        let result = loop {
+            if !self.running.load(Ordering::SeqCst) {
+                break Ok(());
+            }
+            let now = Instant::now();
+            if let Err(e) = capture.step(&self.storage, now) {
+                break Err(e);
+            }
+            if now.saturating_duration_since(last_expire) >= EXPIRE_INTERVAL {
+                last_expire = now;
                 if let Err(e) = self.storage.expire() {
                     eprintln!("[storage] expiry failed: {e:#}");
                 }
             }
+            let tick = if capture.is_polling() { TICK.min(poll_interval) } else { TICK };
+            std::thread::sleep(tick);
+        };
 
-            std::thread::sleep(self.poll_interval);
-        }
-
+        capture.stop();
         eprintln!("clipstack daemon stopped");
-        Ok(())
-    }
-
-    fn check_and_save(
-        &self,
-        result: Result<String>,
-        last_hash: &mut Option<Vec<u8>>,
-        source: &str,
-    ) {
-        match result {
-            Ok(content) if !content.is_empty() => {
-                let hash = util::compute_hash(&content);
-
-                if last_hash.as_ref() != Some(&hash) {
-                    *last_hash = Some(hash);
-
-                    match self.storage.ingest(&content, Source::Poll, &[]) {
-                        Ok(IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry)) => {
-                            // Use chars().take() for safe Unicode truncation
-                            let preview: String = entry.preview.chars().take(40).collect();
-                            eprintln!(
-                                "[{}] Saved: {} bytes, preview: {}...",
-                                source,
-                                entry.size,
-                                preview
-                            );
-                        }
-                        Ok(IngestOutcome::Skipped(reason)) => {
-                            let reason = self.storage.policy().describe_skip(&reason);
-                            eprintln!("[{source}] skipped: {reason}");
-                        }
-                        Err(e) => {
-                            eprintln!("[{}] Error saving entry: {}", source, e);
-                        }
-                    }
-                }
-            }
-            Ok(_) => {} // Empty, ignore
-            Err(_) => {} // Silently ignore errors (selection might be empty)
-        }
+        result
     }
 
     /// Stop the daemon
@@ -231,13 +225,13 @@ fn open_lock_file(lock_path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{IngestPolicy, ListOrder};
+    use crate::storage::IngestPolicy;
     use tempfile::TempDir;
 
     /// A daemon on a temp store with its lock in the same temp dir.
     fn test_daemon(dir: &TempDir) -> Result<Daemon> {
         let storage = Storage::open(dir.path().to_path_buf(), Some(100), IngestPolicy::default())?;
-        Daemon::with_lock_path(storage, &dir.path().join("clipstack.lock"))
+        Daemon::with_lock_path(storage, DaemonOptions::default(), &dir.path().join("clipstack.lock"))
     }
 
     #[test]
@@ -266,21 +260,6 @@ mod tests {
         let second = test_daemon(&dir);
         assert!(second.is_err(), "second daemon must not acquire the lock");
         assert_eq!(Daemon::read_pid(&lock), Some(std::process::id()));
-    }
-
-    #[test]
-    fn saves_new_clipboard_content_once_with_poll_source() {
-        let dir = TempDir::new().unwrap();
-        let daemon = test_daemon(&dir).unwrap();
-        let mut last = None;
-        daemon.check_and_save(Ok("copied text".to_string()), &mut last, "clipboard");
-        daemon.check_and_save(Ok("copied text".to_string()), &mut last, "clipboard");
-        daemon.check_and_save(Ok(String::new()), &mut last, "clipboard");
-
-        let entries = daemon.storage.list(ListOrder::Recency, None).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].source, Source::Poll);
-        assert_eq!(daemon.storage.load_content(entries[0].id).unwrap(), "copied text");
     }
 
     #[test]

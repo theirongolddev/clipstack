@@ -18,14 +18,17 @@ fn harness_isolates_runtime_dir() {
     );
     assert!(env.lock_path().starts_with(env.root()));
 
-    // The daemon polls the fake, never the real wl-paste
+    // The daemon watches through the fake, never the real wl-paste
     let calls = env.fake_clip_dir.join("wl-paste.calls");
     assert!(
         wait_until(Duration::from_secs(5), || calls.exists()),
         "daemon should have called tests/fakes/wl-paste"
     );
     let log = std::fs::read_to_string(&calls).unwrap();
-    assert!(log.lines().any(|l| l == "--no-newline --type text"), "calls: {log:?}");
+    assert!(
+        log.lines().any(|l| l.starts_with("--no-newline --type text --watch ")),
+        "calls: {log:?}"
+    );
 
     // Storage went to --storage-dir, not $XDG_DATA_HOME/clipd
     assert!(env.storage_dir.is_dir());

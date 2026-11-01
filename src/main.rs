@@ -12,6 +12,7 @@ use clap_complete::{generate, Shell};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpListener;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use storage::{IngestOutcome, ListOrder, Source};
@@ -202,8 +203,14 @@ fn main() -> Result<()> {
         }
 
         Some(Commands::Daemon) => {
+            let options = daemon::DaemonOptions {
+                capture: config.capture.clone(),
+                socket: config.socket.clone(),
+                clipboard: clipboard::Clipboard::system(),
+                hook: watch_hook_command(storage.base_dir(), cli.config.as_deref())?,
+            };
             // The lock file is global even with a custom storage dir
-            let daemon = daemon::Daemon::new(storage)?;
+            let daemon = daemon::Daemon::new(storage, options)?;
 
             // Stop cleanly on SIGINT, SIGTERM and SIGHUP (ctrlc "termination")
             let running = daemon.stop_handle();
@@ -316,6 +323,30 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The command `wl-paste --watch` runs per selection: this executable with
+/// the daemon's storage dir and config file (absolute, so the hook's working
+/// dir doesn't matter) and `__watch-hook`. The environment is inherited, so
+/// `CLIPSTACK_MAX_ENTRIES` resolves the same in the hook.
+fn watch_hook_command(storage_dir: &Path, config: Option<&Path>) -> Result<Vec<OsString>> {
+    let exe = std::env::current_exe().context("Cannot find the clipstack executable")?;
+    // After an upgrade replaced the binary, /proc/self/exe reads "<path> (deleted)"
+    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    };
+    let mut args = vec![
+        exe.into_os_string(),
+        "--storage-dir".into(),
+        std::path::absolute(storage_dir)?.into_os_string(),
+    ];
+    if let Some(config) = config {
+        args.push("--config".into());
+        args.push(std::path::absolute(config)?.into_os_string());
+    }
+    args.push("__watch-hook".into());
+    Ok(args)
 }
 
 /// `__watch-hook`: save the selection wl-paste passes on stdin.

@@ -494,7 +494,7 @@ Validation (failure means config error, exit 5 in Step 3):
 - `max_entry_bytes` in `1..=64 MiB`, and `max_total_bytes >= max_entry_bytes`.
 - At most 64 user patterns, compiled with `RegexSetBuilder::size_limit(1 << 20)`.
 - Error messages name the bad pattern and its index.
-- `poll_interval_ms` in `50..=5000`.
+- `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`.
 
 Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - `-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----` (matches anywhere in the content)
@@ -657,14 +657,14 @@ src/clipboard.rs       Clipboard struct with bin paths; list_types(); paste_text
 ```
 
 **Capture with watch mode:**
-- The daemon spawns `wl-paste --type text --watch <current_exe> --storage-dir <abs> [--config <path>] __watch-hook`. wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`.
+- The daemon spawns `wl-paste --no-newline --type text --watch <current_exe> --storage-dir <abs> [--config <abs>] __watch-hook` (`--no-newline` so a trailing newline in the copied text is stored as copied; `--config` only when one was given on the command line). wl-paste runs the hook once per new selection, with the content on stdin and `CLIPBOARD_STATE` in the environment. wl-clipboard 2.3.0 sets `sensitive` when the offer contains `x-kde-passwordManagerHint`.
 - The spawn (and every supervisor restart) happens from the main daemon thread (it lives as long as the daemon) with `pre_exec` setting `PR_SET_PDEATHSIG = SIGTERM`. That pre_exec block is the one `unsafe` block in the project and is documented. PDEATHSIG fires when the spawning thread exits, so it must be a long-lived thread.
 - Crate: `rustix = { version = "1", features = ["process"] }`, already in the dependency tree through tempfile. Verified API: `rustix::process::set_parent_process_death_signal(Some(rustix::signal::Signal::TERM))`.
 - The hook writes directly to SQLite. This is consistent with having no single writer. It inherits the daemon's environment, so `CLIPSTACK_MAX_ENTRIES` resolves the same way in both.
 
 **Hidden `__watch-hook` subcommand** (`capture::run_hook`):
 - Reads `CLIPBOARD_STATE`.
-- `nil` or `clear`: exit 0.
+- `nil` or `clear`: drain stdin, exit 0. An unknown state is drained and skipped the same way.
 - `sensitive`: drain stdin to a sink (so the source client doesn't get EPIPE), log `[watch] skipped sensitive`, exit 0.
 - `data` or unset:
   1. Read stdin up to `max_entry_bytes + 1`, then drain the rest.
@@ -683,13 +683,14 @@ pub struct Supervisor { mode: CaptureMode, restarts: VecDeque<Instant>, state: S
 impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 ```
 
-- `Auto`: if the first watch child exits within 2 s, switch to polling and log the reason (e.g. no data-control protocol).
+- `Auto`: if the first watch child exits within 2 s (or can't be spawned), switch to polling and log the reason (e.g. no data-control protocol). `Watch` gives up at once in that case.
 - A later exit restarts with backoff (1 s, 2 s, 4 s ... max 30 s). After 5 restarts in 60 s, `Auto` falls back to polling and `Watch` gives up with an error exit.
 - `Poll` never spawns.
 
 **Poller:**
 - Every `poll_interval_ms`, `paste_text()`. When the content hash changes, `list_types()` and `ingest(Source::Poll, &types)`.
 - If the types include the password hint, record the hash anyway so the same secret isn't re-read on every tick.
+- Capture logs (`[watch]`, `[poll]`) give the entry id, byte size or skip reason, never a content preview.
 
 **Periodic expire:** the daemon tick calls `storage.expire()` every 10 minutes, so secrets age out even when nothing new is copied.
 
@@ -796,6 +797,7 @@ WantedBy=graphical-session.target
 | 2-2 | Make Clipboard configurable and add list_types/paste_text | `clipboard::tests::list_types_parses_lines` (fake bins), `paste_text_no_selection_is_empty`, `copy_writes_content` |
 | 2-3 | Resolve a private runtime dir with /tmp fallback | `daemon::tests::runtime_dir_prefers_xdg`, `fallback_dir_created_0700`, `rejects_fallback_with_wrong_mode_or_symlink` (ownership by another uid can't be simulated without root; the check is `symlink_metadata().uid() == getuid()` and is reviewed, not tested) |
 | 2-4 | Add hidden watch hook that ingests stdin | `watch_capture::hook_ingests_stdin`, `hook_skips_sensitive_state_and_drains_stdin`, `hook_skips_when_types_include_password_hint`, `hook_rejects_non_utf8`, `hook_ignores_nil_state`, `hook_caps_read_at_max_entry_bytes` |
+| 2-4b | Add `[capture]` and `[socket]` config sections with range checks | `config::tests::capture_and_socket_defaults`, `parses_capture_and_socket_sections`, `rejects_poll_interval_and_timeout_out_of_range` |
 | 2-5 | Add capture supervisor state machine | `capture::tests::auto_falls_back_to_poll_on_fast_exit`, `restarts_with_backoff_after_late_exit`, `auto_polls_after_5_restarts_in_60s`, `watch_mode_gives_up_instead_of_polling`, `poll_mode_never_spawns_watch` |
 | 2-6 | Run wl-paste --watch from the daemon with polling fallback | `watch_capture::daemon_watch_captures_copy`, `daemon_falls_back_to_poll_when_watch_unsupported`, `poll_skips_password_hint_types`, `poll_passes_mime_types_to_ingest` (assert `mime` column) |
 | 2-7 | Expire old entries periodically in the daemon | `daemon::tests::tick_runs_expire_every_10_minutes` (injected clock) |

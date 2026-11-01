@@ -1,15 +1,18 @@
-//! Clipboard capture: the `__watch-hook` that `wl-paste --watch` runs once
-//! per new selection.
-
-// Removed in commit 2-6, which runs the supervisor from the daemon
-#![cfg_attr(not(test), expect(dead_code, reason = "Supervisor has no caller until commit 2-6"))]
+//! Clipboard capture. The daemon runs `wl-paste --watch <clipstack>
+//! __watch-hook`, so wl-paste starts the hook once per new selection; the
+//! `Supervisor` restarts the watcher or falls back to the `Poller`.
 
 use crate::clipboard::Clipboard;
 use crate::storage::{IngestOutcome, Source, Storage};
+use crate::util;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::VecDeque;
-use std::io::{self, Read};
+use std::ffi::OsString;
+use std::io::{self, BufRead, BufReader, Read};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// `[capture] mode`. `auto` watches and falls back to polling when the
@@ -247,6 +250,204 @@ fn describe_exit(success: bool, stderr_tail: &str) -> String {
     }
 }
 
+/// Lines of the watcher's stderr kept for the fallback reason.
+const STDERR_TAIL_LINES: usize = 5;
+
+/// A running `wl-paste --watch` child. Its stderr (which the hooks share) is
+/// forwarded to ours line by line, and the last lines are kept so an early
+/// exit can say why. Dropping it kills and reaps the child.
+pub struct WatchChild {
+    child: Child,
+    tail: Arc<Mutex<VecDeque<String>>>,
+    forwarder: Option<JoinHandle<()>>,
+}
+
+impl WatchChild {
+    /// `<paste_bin> --no-newline --type text --watch <hook...>`.
+    pub fn spawn(clipboard: &Clipboard, hook: &[OsString]) -> io::Result<WatchChild> {
+        let mut cmd = Command::new(&clipboard.paste_bin);
+        cmd.args(["--no-newline", "--type", "text", "--watch"])
+            .args(hook)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let forwarder = child.stderr.take().map(|stderr| {
+            let tail = Arc::clone(&tail);
+            std::thread::spawn(move || forward_stderr(stderr, &tail))
+        });
+        Ok(WatchChild { child, tail, forwarder })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// `Some((success, stderr_tail))` once the child has exited.
+    pub fn try_exit(&mut self) -> io::Result<Option<(bool, String)>> {
+        let Some(status) = self.child.try_wait()? else {
+            return Ok(None);
+        };
+        // Give the forwarder a moment to read the last lines
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while self.forwarder.as_ref().is_some_and(|f| !f.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let tail = self.tail.lock().map(|t| Vec::from(t.clone()).join("\n")).unwrap_or_default();
+        Ok(Some((status.success(), tail)))
+    }
+}
+
+impl Drop for WatchChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Copy the watcher's stderr to ours, keeping the last few lines.
+fn forward_stderr(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+        let text = String::from_utf8_lossy(&line).trim_end().to_string();
+        eprintln!("{text}");
+        if let Ok(mut tail) = tail.lock() {
+            if tail.len() == STDERR_TAIL_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(text);
+        }
+        line.clear();
+    }
+}
+
+/// Polling capture: read the clipboard every `interval` and save it when it
+/// changed.
+pub struct Poller {
+    interval: Duration,
+    last_poll: Option<Instant>,
+    last_hash: Option<Vec<u8>>,
+}
+
+impl Poller {
+    pub fn new(interval: Duration) -> Self {
+        Self { interval, last_poll: None, last_hash: None }
+    }
+
+    /// Read the clipboard if a poll is due at `now`.
+    pub fn poll_if_due(&mut self, storage: &Storage, clipboard: &Clipboard, now: Instant) {
+        if self.last_poll.is_some_and(|t| now.saturating_duration_since(t) < self.interval) {
+            return;
+        }
+        self.last_poll = Some(now);
+        // No selection, or none as text, reads as ""; errors are retried next tick
+        if let Ok(content) = clipboard.paste_text() {
+            self.observe(storage, &content, || clipboard.list_types().unwrap_or_default());
+        }
+    }
+
+    /// Save `content` if it differs from the last poll. The hash is recorded
+    /// even when ingest skips it, so a secret isn't re-read on every tick.
+    pub fn observe(&mut self, storage: &Storage, content: &str, types: impl FnOnce() -> Vec<String>) {
+        if content.is_empty() {
+            return;
+        }
+        let hash = util::compute_hash(content);
+        if self.last_hash.as_ref() == Some(&hash) {
+            return;
+        }
+        self.last_hash = Some(hash);
+        match storage.ingest(content, Source::Poll, &types()) {
+            Ok(outcome) => log_outcome("poll", storage, &outcome),
+            Err(e) => eprintln!("[poll] error saving entry: {e:#}"),
+        }
+    }
+}
+
+/// The daemon's capture: supervisor, watch child and poller together.
+pub struct Capture {
+    supervisor: Supervisor,
+    clipboard: Clipboard,
+    hook: Vec<OsString>,
+    child: Option<WatchChild>,
+    poller: Poller,
+    polling: bool,
+}
+
+impl Capture {
+    /// `hook` is the command wl-paste runs per selection.
+    pub fn new(mode: CaptureMode, poll_interval: Duration, clipboard: Clipboard, hook: Vec<OsString>) -> Self {
+        Self {
+            supervisor: Supervisor::new(mode),
+            clipboard,
+            hook,
+            child: None,
+            poller: Poller::new(poll_interval),
+            polling: false,
+        }
+    }
+
+    /// One daemon tick: reap a dead watcher, (re)spawn it, or poll. Fails
+    /// only when `watch` mode gives up.
+    pub fn step(&mut self, storage: &Storage, now: Instant) -> Result<()> {
+        if let Some(child) = &mut self.child
+            && let Some((success, stderr_tail)) = child.try_exit()?
+        {
+            self.child = None;
+            let action = self.supervisor.on(Event::Exited { at: now, success, stderr_tail });
+            self.apply(action, now)?;
+        }
+        let action = self.supervisor.on(Event::Tick(now));
+        self.apply(action, now)?;
+        if self.polling {
+            self.poller.poll_if_due(storage, &self.clipboard, now);
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, action: Action, now: Instant) -> Result<()> {
+        match action {
+            Action::Wait => {}
+            Action::SpawnWatch => match WatchChild::spawn(&self.clipboard, &self.hook) {
+                Ok(child) => {
+                    eprintln!("[capture] watching the clipboard (wl-paste pid {})", child.pid());
+                    self.child = Some(child);
+                    self.supervisor.on(Event::Spawned(now));
+                }
+                Err(e) => {
+                    let stderr_tail = format!("cannot run {}: {e}", self.clipboard.paste_bin.display());
+                    let action = self.supervisor.on(Event::Exited { at: now, success: false, stderr_tail });
+                    self.apply(action, now)?;
+                }
+            },
+            Action::StartPolling { reason } => {
+                eprintln!("[capture] polling every {} ms: {reason}", self.poller.interval.as_millis());
+                self.polling = true;
+            }
+            Action::GiveUp(reason) => anyhow::bail!("clipboard capture failed: {reason}"),
+        }
+        Ok(())
+    }
+
+    /// Whether the poller is active (the daemon then ticks at its interval).
+    pub fn is_polling(&self) -> bool {
+        self.polling
+    }
+
+    /// "watch", "poll" or "none", for `PING`.
+    #[expect(dead_code, reason = "reported by socket PING")]
+    pub fn capturing(&self) -> &'static str {
+        self.supervisor.capturing()
+    }
+
+    /// Kill and reap the watch child.
+    pub fn stop(&mut self) {
+        self.child = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +467,26 @@ mod tests {
         assert_eq!(sup.on(Event::Tick(t0)), Action::Wait, "only one spawn at a time");
         assert_eq!(sup.on(Event::Spawned(t0)), Action::Wait);
         sup
+    }
+
+    #[test]
+    fn poller_saves_new_content_once_with_poll_source() {
+        let (storage, _dir) = crate::storage::test_storage();
+        let mut poller = Poller::new(Duration::from_millis(250));
+        let mut type_reads = 0;
+        for content in ["copied text", "copied text", ""] {
+            poller.observe(&storage, content, || {
+                type_reads += 1;
+                vec!["text/html".to_string()]
+            });
+        }
+        assert_eq!(type_reads, 1, "types are read only for new content");
+
+        let entries = storage.list(crate::storage::ListOrder::Recency, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, Source::Poll);
+        assert_eq!(entries[0].mime, "text/html");
+        assert_eq!(storage.load_content(entries[0].id).unwrap(), "copied text");
     }
 
     #[test]
