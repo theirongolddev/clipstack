@@ -558,7 +558,7 @@ max_total_bytes = 268435456  # 256 MiB
 ignore_patterns = []
 
 # Also skip private keys anywhere in a copy, and copies that are nothing but a GitHub,
-# AWS access key, Slack or sk- style API token.
+# AWS access key, Slack, Stripe or sk- style API token (full list below).
 builtin_secret_patterns = true
 
 [capture]
@@ -579,6 +579,18 @@ allow_pull = false
 # Per-read timeout for a socket client (100 to 60000); a whole request gets twice this.
 timeout_ms = 5000
 ```
+
+**Built-in secret patterns** (Rust regex syntax). The private-key header is skipped wherever it appears in a copy. Every other pattern must match the whole copy, apart from surrounding whitespace: a copy that is nothing but a token is skipped, while prose or a script that contains one (for example a shell script with `export GITHUB_TOKEN=ghp_...` in it) is still saved. Use `ignore_patterns` if you want those skipped too.
+
+| Secret | Pattern | Matches |
+|--------|---------|---------|
+| Private key (PEM, OpenSSH, PGP) | `-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----` | anywhere |
+| GitHub token | `\A\s*gh[pousr]_[A-Za-z0-9]{36,255}\s*\z` | whole copy |
+| GitHub fine-grained token | `\A\s*github_pat_[A-Za-z0-9_]{80,}\s*\z` | whole copy |
+| AWS access key ID (long-term and temporary) | `\A\s*(AKIA\|ASIA)[0-9A-Z]{16}\s*\z` | whole copy |
+| Slack token | `\A\s*xox[abprs]-[A-Za-z0-9-]{10,}\s*\z` | whole copy |
+| `sk-` style API key (OpenAI and others) | `\A\s*sk-[A-Za-z0-9_-]{20,}\s*\z` | whole copy |
+| Stripe secret key | `\A\s*sk_(live\|test)_[A-Za-z0-9]{20,}\s*\z` | whole copy |
 
 When a `clipstack copy` isn't saved because of these settings, the text is still copied to the clipboard and ClipStack says why (`Copied N bytes (not saved to history: matches ignore_patterns[0])`); the reason never includes the copied text. The entry limit is not in this file: it comes from `--max-entries`, `CLIPSTACK_MAX_ENTRIES` or the saved value.
 

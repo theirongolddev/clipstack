@@ -110,15 +110,17 @@ pub const MAX_USER_PATTERNS: usize = 64;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Skipped when `builtin_secret_patterns = true`. The private-key header
-/// matches anywhere; the token formats must be the whole (trimmed) content,
-/// so prose that merely mentions a token is still saved.
+/// (PEM, OpenSSH and PGP) matches anywhere; the token formats must be the
+/// whole (trimmed) content, so prose or a script that merely contains a
+/// token is still saved. README lists these under "Configuration file".
 pub const BUILTIN_SECRET_PATTERNS: &[&str] = &[
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----",
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
     r"\A\s*gh[pousr]_[A-Za-z0-9]{36,255}\s*\z",
     r"\A\s*github_pat_[A-Za-z0-9_]{80,}\s*\z",
-    r"\A\s*AKIA[0-9A-Z]{16}\s*\z",
+    r"\A\s*(AKIA|ASIA)[0-9A-Z]{16}\s*\z",
     r"\A\s*xox[abprs]-[A-Za-z0-9-]{10,}\s*\z",
     r"\A\s*sk-[A-Za-z0-9_-]{20,}\s*\z",
+    r"\A\s*sk_(live|test)_[A-Za-z0-9]{20,}\s*\z",
 ];
 
 impl Config {
@@ -415,6 +417,10 @@ mod tests {
             format!("AKIA{}", "Q7ZX".repeat(4)),
             format!("xoxb-{}", "1234-abcd-".repeat(2)),
             format!("sk-{}", "Ab9_-".repeat(5)),
+            format!("-----BEGIN PGP {} KEY BLOCK-----\nlQOYBF\n", "PRIVATE"),
+            format!("sk_{}_{}", "live", "4eC39HqLyjWDarjtT1zdp7dc"),
+            format!(" sk_{}_{}\n", "test", "Ab12".repeat(5)),
+            format!("ASIA{}", "Q7ZX".repeat(4)),
         ] {
             let index = policy.ignored_by(&secret);
             assert!(index.is_some(), "should skip {secret:?}");
@@ -431,6 +437,12 @@ mod tests {
             format!("export AWS_KEY=AKIA{}", "Q7ZX".repeat(4)),
             "sk-short".to_string(),
             "the BEGIN PRIVATE KEY header".to_string(),
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQINBF\n".to_string(),
+            format!("stripe key sk_{}_{} in prose", "live", "Ab12".repeat(6)),
+            format!("sk_{}_{}", "live", "tooShort12"),
+            format!("ASIA{} is a session key", "Q7ZX".repeat(4)),
+            // A token inside a longer script is saved; only a bare token is skipped
+            format!("#!/bin/sh\nexport GITHUB_TOKEN={}\nexec gh pr list\n", github_token()),
         ] {
             assert_eq!(policy.ignored_by(&prose), None, "should keep {prose:?}");
         }

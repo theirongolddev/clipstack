@@ -499,13 +499,14 @@ Validation (failure means config error, exit 5 in Step 3):
 - `poll_interval_ms` in `50..=5000`, `[socket] timeout_ms` in `100..=60000`.
 
 Built-in secret patterns, active when `builtin_secret_patterns = true`:
-- `-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----` (matches anywhere in the content)
-- The rest must match the whole content, trimmed, so prose that merely mentions a token is still saved:
+- `-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----` (matches anywhere in the content; ` BLOCK` covers PGP private key blocks)
+- The rest must match the whole content, trimmed, so prose or a script that merely contains a token is still saved:
   - `\A\s*gh[pousr]_[A-Za-z0-9]{36,255}\s*\z`
   - `\A\s*github_pat_[A-Za-z0-9_]{80,}\s*\z`
-  - `\A\s*AKIA[0-9A-Z]{16}\s*\z`
+  - `\A\s*(AKIA|ASIA)[0-9A-Z]{16}\s*\z` (long-term and temporary AWS access key IDs)
   - `\A\s*xox[abprs]-[A-Za-z0-9-]{10,}\s*\z`
   - `\A\s*sk-[A-Za-z0-9_-]{20,}\s*\z`
+  - `\A\s*sk_(live|test)_[A-Za-z0-9]{20,}\s*\z` (Stripe secret keys)
 
 **`max_entries` stays in the database** (`settings.max_entries`), not in config. Resolution order is unchanged: CLI > `CLIPSTACK_MAX_ENTRIES` > stored > 100. `Some(n)` persists the value and prunes immediately. `limit_is_saved()` is true when the settings row exists. Status labels stay `cli`/`env`/`saved`/`default`. See Q7.
 
