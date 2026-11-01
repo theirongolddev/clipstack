@@ -95,20 +95,12 @@ fn main() -> Result<()> {
         check_dependencies()?;
     }
 
-    // Determine max_entries: CLI > env > default (100)
-    let max_entries = cli
-        .max_entries
-        .map(|n| n as usize)
-        .or_else(|| {
-            std::env::var("CLIPSTACK_MAX_ENTRIES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(100)
-        .clamp(1, 10000);
+    // Determine max_entries: CLI > env > limit stored in index (> default)
+    let env_limit = std::env::var("CLIPSTACK_MAX_ENTRIES").ok();
+    let (max_entries, limit_source) = resolve_max_entries(cli.max_entries, env_limit.as_deref());
 
     let storage_dir = cli.storage_dir.unwrap_or_else(storage::Storage::default_dir);
-    let storage = storage::Storage::new(storage_dir, max_entries)?;
+    let storage = storage::Storage::open(storage_dir, max_entries)?;
 
     match cli.command {
         None | Some(Commands::Pick) => {
@@ -200,16 +192,14 @@ fn main() -> Result<()> {
             let pinned_count = index.entries.iter().filter(|e| e.pinned).count();
             let unpinned_count = index.entries.len() - pinned_count;
 
-            // Determine source of max_entries setting
-            let source = if std::env::var("CLIPSTACK_MAX_ENTRIES").is_ok() {
-                " (env)"
-            } else {
-                ""
-            };
-
             println!("Entries:     {}", index.entries.len());
             println!("  Pinned:    {} (protected)", pinned_count);
-            println!("  Regular:   {}/{}{}", unpinned_count, storage.max_entries(), source);
+            println!(
+                "  Regular:   {}/{} ({})",
+                unpinned_count,
+                storage.max_entries(),
+                limit_source.label()
+            );
             println!("Total size:  {}", util::format_size(total_size));
 
             if let Some(oldest) = index.entries.last() {
@@ -221,7 +211,7 @@ fn main() -> Result<()> {
         }
 
         Some(Commands::Status) => {
-            print_status(&storage)?;
+            print_status(&storage, limit_source)?;
         }
 
         Some(Commands::Recover) => {
@@ -246,6 +236,37 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Where the effective max_entries limit came from
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LimitSource {
+    Cli,
+    Env,
+    /// Not configured this run: reuse the limit saved in the index (or default)
+    Stored,
+}
+
+impl LimitSource {
+    fn label(self) -> &'static str {
+        match self {
+            LimitSource::Cli => "--max-entries",
+            LimitSource::Env => "CLIPSTACK_MAX_ENTRIES",
+            LimitSource::Stored => "saved",
+        }
+    }
+}
+
+/// Resolve the explicit entry limit: CLI flag > env var > none (use stored).
+/// Invalid env values are ignored rather than silently resetting the limit.
+fn resolve_max_entries(cli: Option<u32>, env: Option<&str>) -> (Option<usize>, LimitSource) {
+    if let Some(n) = cli {
+        return (Some((n as usize).clamp(1, 10000)), LimitSource::Cli);
+    }
+    if let Some(n) = env.and_then(|s| s.trim().parse::<usize>().ok()) {
+        return (Some(n.clamp(1, 10000)), LimitSource::Env);
+    }
+    (None, LimitSource::Stored)
 }
 
 /// Check if required dependencies (wl-clipboard) are installed
@@ -273,7 +294,7 @@ fn check_dependencies() -> Result<()> {
 }
 
 /// Print daemon and system status
-fn print_status(storage: &storage::Storage) -> Result<()> {
+fn print_status(storage: &storage::Storage, limit_source: LimitSource) -> Result<()> {
     // Check daemon status
     let daemon_running = daemon::Daemon::is_running();
 
@@ -303,13 +324,11 @@ fn print_status(storage: &storage::Storage) -> Result<()> {
 
     // Configuration info
     println!("Config:");
-    let max_entries = storage.max_entries();
-    let source = if std::env::var("CLIPSTACK_MAX_ENTRIES").is_ok() {
-        "env"
-    } else {
-        "default"
-    };
-    println!("  Max entries: {} ({})", max_entries, source);
+    println!(
+        "  Max entries: {} ({})",
+        storage.max_entries(),
+        limit_source.label()
+    );
 
     println!();
 
@@ -413,4 +432,36 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         running.store(false, std::sync::atomic::Ordering::SeqCst);
     })
     .expect("Error setting Ctrl-C handler");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_limit_prefers_cli_over_env() {
+        assert_eq!(resolve_max_entries(Some(500), Some("42")), (Some(500), LimitSource::Cli));
+    }
+
+    #[test]
+    fn test_resolve_limit_uses_env_when_no_cli() {
+        assert_eq!(resolve_max_entries(None, Some("42")), (Some(42), LimitSource::Env));
+    }
+
+    #[test]
+    fn test_resolve_limit_clamps_env() {
+        assert_eq!(resolve_max_entries(None, Some("0")), (Some(1), LimitSource::Env));
+        assert_eq!(resolve_max_entries(None, Some("99999")), (Some(10000), LimitSource::Env));
+    }
+
+    #[test]
+    fn test_resolve_limit_ignores_invalid_env() {
+        // Unparseable env must not override the stored limit
+        assert_eq!(resolve_max_entries(None, Some("lots")), (None, LimitSource::Stored));
+    }
+
+    #[test]
+    fn test_resolve_limit_none_means_stored() {
+        assert_eq!(resolve_max_entries(None, None), (None, LimitSource::Stored));
+    }
 }

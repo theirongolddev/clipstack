@@ -64,6 +64,29 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Open storage, resolving the entry limit.
+    ///
+    /// `Some(n)` is an explicit user choice (CLI flag / env var): it is persisted
+    /// to the index and prunes immediately if lower than the current history.
+    /// `None` reuses the limit stored in the index (or the default for a fresh
+    /// store), so unconfigured invocations never prune history behind the
+    /// user's back.
+    pub fn open(base_dir: PathBuf, max_entries: Option<usize>) -> Result<Self> {
+        let limit = match max_entries {
+            Some(n) => n,
+            None => Self::stored_max_entries(&base_dir).unwrap_or(DEFAULT_MAX_ENTRIES),
+        };
+        Self::new(base_dir, limit)
+    }
+
+    /// Read the persisted limit from an existing, valid index
+    fn stored_max_entries(base_dir: &Path) -> Option<usize> {
+        let data = fs::read_to_string(base_dir.join("index.json")).ok()?;
+        serde_json::from_str::<ClipIndex>(&data)
+            .ok()
+            .map(|index| index.max_entries)
+    }
+
     /// Convenience constructor with default max_entries
     #[allow(dead_code)]
     pub fn with_defaults(base_dir: PathBuf) -> Result<Self> {
@@ -883,6 +906,47 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(dir.path().to_path_buf(), 42).unwrap();
         assert_eq!(storage.max_entries(), 42);
+    }
+
+    #[test]
+    fn test_open_without_limit_uses_stored_limit_and_does_not_prune() {
+        let dir = TempDir::new().unwrap();
+
+        // User configured a higher limit once and filled history past the default
+        let storage = Storage::open(dir.path().to_path_buf(), Some(500)).unwrap();
+        for i in 0..150 {
+            storage.save_entry(&format!("entry {}", i)).unwrap();
+        }
+
+        // A later invocation with no flag/env (e.g. auto-started daemon, `list`)
+        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
+        assert_eq!(storage.max_entries(), 500, "should reuse stored limit");
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries.len(), 150, "must not prune to the default");
+        assert_eq!(index.max_entries, 500);
+    }
+
+    #[test]
+    fn test_open_without_limit_on_fresh_dir_uses_default() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
+        assert_eq!(storage.max_entries(), DEFAULT_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn test_open_with_explicit_limit_persists_and_prunes() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
+        for i in 0..20 {
+            storage.save_entry(&format!("entry {}", i)).unwrap();
+        }
+
+        let storage = Storage::open(dir.path().to_path_buf(), Some(5)).unwrap();
+        assert_eq!(storage.load_index().unwrap().entries.len(), 5);
+
+        // Limit is remembered by the next unconfigured invocation
+        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
+        assert_eq!(storage.max_entries(), 5);
     }
 
     #[test]

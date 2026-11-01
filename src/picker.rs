@@ -1111,15 +1111,25 @@ impl Picker {
     }
 }
 
+/// Arguments for auto-spawning the daemon against the picker's storage.
+/// The limit is deliberately omitted so the daemon reuses the stored one.
+fn daemon_spawn_args(storage_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "--storage-dir".into(),
+        storage_dir.as_os_str().to_owned(),
+        "daemon".into(),
+    ]
+}
+
 /// Ensure daemon is running, silently spawning if needed
-fn ensure_daemon_running() {
+fn ensure_daemon_running(storage_dir: &std::path::Path) {
     if Daemon::is_running() {
         return;
     }
 
     // Silently spawn daemon
     let _ = Command::new("clipstack")
-        .arg("daemon")
+        .args(daemon_spawn_args(storage_dir))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
@@ -1131,7 +1141,7 @@ fn ensure_daemon_running() {
 /// Run the picker and paste the selected content to clipboard
 pub fn pick_and_paste(storage: Storage) -> Result<bool> {
     // Ensure daemon is running before showing picker
-    ensure_daemon_running();
+    ensure_daemon_running(storage.base_dir());
 
     let mut picker = Picker::new(storage)?;
 
@@ -1166,6 +1176,16 @@ mod tests {
             storage.save_entry(content).unwrap();
         }
         (temp, storage)
+    }
+
+    // ======== Daemon auto-start Tests ========
+
+    #[test]
+    fn test_daemon_spawn_args_use_picker_storage_dir() {
+        let args = daemon_spawn_args(std::path::Path::new("/custom/clips"));
+        let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        // No --max-entries: the daemon reuses the limit stored in the index
+        assert_eq!(args, vec!["--storage-dir", "/custom/clips", "daemon"]);
     }
 
     // ======== FilteredEntry Type Tests ========
