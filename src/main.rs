@@ -1,5 +1,6 @@
 mod clipboard;
 mod daemon;
+mod perms;
 mod picker;
 mod storage;
 mod util;
