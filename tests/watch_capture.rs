@@ -97,21 +97,6 @@ fn fake_clipboard_roundtrip() {
 
 const TEXT_TYPES: &[&str] = &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 
-/// The whole history, oldest first, via `clipstack export`.
-fn export(env: &TestEnv) -> Vec<serde_json::Value> {
-    let mut cmd = env.cmd();
-    cmd.arg("export");
-    let out = output(cmd);
-    assert!(out.status.success(), "export failed: {out:?}");
-    stdout(&out).lines().map(|l| serde_json::from_str(l).expect("export line is JSON")).collect()
-}
-
-fn write_config(env: &TestEnv, toml: &str) {
-    let dir = env.config_home.join("clipstack");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.toml"), toml).unwrap();
-}
-
 /// What `clipstack __watch-hook` did with `input` under `CLIPBOARD_STATE=state`.
 struct Hook {
     status: std::process::ExitStatus,
@@ -146,7 +131,7 @@ fn hook_ingests_stdin() {
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.wrote_all);
 
-    let entries = export(&env);
+    let entries = env.export();
     assert_eq!(entries.len(), 1, "{entries:?}");
     assert_eq!(entries[0]["content"], "hello from watch");
     assert_eq!(entries[0]["source"], "watch");
@@ -156,7 +141,7 @@ fn hook_ingests_stdin() {
     // No CLIPBOARD_STATE (older wl-paste) is treated as data
     let hook = run_hook(&env, None, b"second copy");
     assert!(hook.status.success(), "{}", hook.stderr);
-    assert_eq!(export(&env).len(), 2);
+    assert_eq!(env.export().len(), 2);
 }
 
 #[test]
@@ -167,7 +152,7 @@ fn hook_skips_sensitive_state_and_drains_stdin() {
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.wrote_all, "the hook must read all of stdin so the source sees no EPIPE");
     assert!(hook.stderr.contains("[watch] skipped sensitive"), "{}", hook.stderr);
-    assert!(export(&env).is_empty());
+    assert!(env.export().is_empty());
 }
 
 #[test]
@@ -177,7 +162,7 @@ fn hook_skips_when_types_include_password_hint() {
     let hook = run_hook(&env, Some("data"), b"hunter2");
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.stderr.contains("[watch] skipped: marked sensitive"), "{}", hook.stderr);
-    assert!(export(&env).is_empty());
+    assert!(env.export().is_empty());
 }
 
 #[test]
@@ -186,7 +171,7 @@ fn hook_rejects_non_utf8() {
     let hook = run_hook(&env, Some("data"), b"\xff\xfe binary");
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.stderr.contains("not UTF-8"), "{}", hook.stderr);
-    assert!(export(&env).is_empty());
+    assert!(env.export().is_empty());
 }
 
 #[test]
@@ -200,52 +185,32 @@ fn hook_ignores_nil_state() {
     let hook = run_hook(&env, Some("something-new"), b"maybe secret");
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.wrote_all);
-    assert!(export(&env).is_empty());
+    assert!(env.export().is_empty());
 }
 
 #[test]
 fn hook_caps_read_at_max_entry_bytes() {
     let env = TestEnv::new();
-    write_config(&env, "[storage]\nmax_entry_bytes = 1024\n");
+    env.write_config("[storage]\nmax_entry_bytes = 1024\n");
     env.set_clipboard("", TEXT_TYPES);
     let hook = run_hook(&env, Some("data"), &vec![b'a'; 4096]);
     assert!(hook.status.success(), "{}", hook.stderr);
     assert!(hook.wrote_all, "the rest of stdin is drained, not left unread");
     assert!(hook.stderr.contains("too large (4096 bytes"), "{}", hook.stderr);
-    assert!(export(&env).is_empty());
+    assert!(env.export().is_empty());
 
     // Exactly at the cap is saved
     let hook = run_hook(&env, Some("data"), &vec![b'b'; 1024]);
     assert!(hook.status.success(), "{}", hook.stderr);
-    assert_eq!(export(&env).len(), 1);
+    assert_eq!(env.export().len(), 1);
 }
 
 const HINT: &str = "x-kde-passwordManagerHint";
 
-/// Start `clipstack daemon` in `env`; returns its PID.
-fn start_daemon(env: &mut TestEnv) -> u32 {
-    let mut cmd = env.cmd();
-    cmd.arg("daemon");
-    let pid = env.spawn(cmd);
-    assert!(env.wait_for_lock_pid(pid, Duration::from_secs(5)), "daemon did not take the lock");
-    pid
-}
-
-/// Wait until the history holds `n` entries; returns them.
-fn wait_for_entries(env: &TestEnv, n: usize) -> Vec<serde_json::Value> {
-    let mut entries = Vec::new();
-    let done = wait_until(Duration::from_secs(5), || {
-        entries = export(env);
-        entries.len() >= n
-    });
-    assert!(done, "expected {n} entries, have {entries:?}");
-    entries
-}
-
 #[test]
 fn daemon_watch_captures_copy() {
     let mut env = TestEnv::new();
-    start_daemon(&mut env);
+    env.start_daemon();
     env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon should run wl-paste --watch");
 
     let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
@@ -256,7 +221,7 @@ fn daemon_watch_captures_copy() {
 
     env.set_clipboard("copied in a browser", TEXT_TYPES);
     env.watch_offer("data", b"copied in a browser");
-    let entries = wait_for_entries(&env, 1);
+    let entries = env.wait_for_entries(1);
     assert_eq!(entries[0]["content"], "copied in a browser");
     assert_eq!(entries[0]["source"], "watch");
 
@@ -265,7 +230,7 @@ fn daemon_watch_captures_copy() {
     env.watch_offer("sensitive", b"hunter2");
     env.set_clipboard("after the secret", TEXT_TYPES);
     env.watch_offer("data", b"after the secret");
-    let entries = wait_for_entries(&env, 2);
+    let entries = env.wait_for_entries(2);
     let contents: Vec<_> = entries.iter().map(|e| e["content"].as_str().unwrap()).collect();
     assert_eq!(contents, ["copied in a browser", "after the secret"]);
 }
@@ -273,14 +238,14 @@ fn daemon_watch_captures_copy() {
 #[test]
 fn daemon_falls_back_to_poll_when_watch_unsupported() {
     let mut env = TestEnv::new();
-    write_config(&env, "[capture]\npoll_interval_ms = 50\n");
+    env.write_config("[capture]\npoll_interval_ms = 50\n");
     let mut cmd = env.cmd();
     cmd.arg("daemon").env("FAKE_WATCH_UNSUPPORTED", "1");
     let pid = env.spawn(cmd);
     assert!(env.wait_for_lock_pid(pid, Duration::from_secs(5)));
 
     env.set_clipboard("polled text", TEXT_TYPES);
-    let entries = wait_for_entries(&env, 1);
+    let entries = env.wait_for_entries(1);
     assert_eq!(entries[0]["content"], "polled text");
     assert_eq!(entries[0]["source"], "poll");
 
@@ -296,8 +261,8 @@ fn daemon_falls_back_to_poll_when_watch_unsupported() {
 
 /// A daemon in poll mode, polling every 50 ms.
 fn start_polling_daemon(env: &mut TestEnv) -> u32 {
-    write_config(env, "[capture]\nmode = \"poll\"\npoll_interval_ms = 50\n");
-    start_daemon(env)
+    env.write_config("[capture]\nmode = \"poll\"\npoll_interval_ms = 50\n");
+    env.start_daemon()
 }
 
 /// Wait until the daemon has polled the fake clipboard `n` more times.
@@ -318,14 +283,14 @@ fn poll_skips_password_hint_types() {
     start_polling_daemon(&mut env);
     env.set_clipboard("hunter2", &["text/plain;charset=utf-8", HINT]);
     wait_for_polls(&env, 3);
-    assert!(export(&env).is_empty(), "a password-manager secret was saved");
+    assert!(env.export().is_empty(), "a password-manager secret was saved");
 
     // The secret was read once, not on every poll
     let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
     assert_eq!(calls.lines().filter(|l| *l == "--list-types").count(), 1, "{calls}");
 
     env.set_clipboard("ordinary", TEXT_TYPES);
-    assert_eq!(wait_for_entries(&env, 1)[0]["content"], "ordinary");
+    assert_eq!(env.wait_for_entries(1)[0]["content"], "ordinary");
 }
 
 #[test]
@@ -333,7 +298,7 @@ fn poll_passes_mime_types_to_ingest() {
     let mut env = TestEnv::new();
     start_polling_daemon(&mut env);
     env.set_clipboard("<b>bold</b>", &["image/png", "text/html", "text/plain;charset=utf-8"]);
-    let entries = wait_for_entries(&env, 1);
+    let entries = env.wait_for_entries(1);
     assert_eq!(entries[0]["mime"], "text/html");
     assert_eq!(entries[0]["source"], "poll");
 }

@@ -83,6 +83,47 @@ impl TestEnv {
         self.runtime_dir.join("clipstack.lock")
     }
 
+    pub fn socket_path(&self) -> PathBuf {
+        self.runtime_dir.join("clipstack.sock")
+    }
+
+    /// Write `$XDG_CONFIG_HOME/clipstack/config.toml`.
+    pub fn write_config(&self, toml: &str) {
+        let dir = self.config_home.join("clipstack");
+        std::fs::create_dir_all(&dir).expect("create config dir");
+        std::fs::write(dir.join("config.toml"), toml).expect("write config");
+    }
+
+    /// `clipstack export` parsed: one JSON value per entry.
+    pub fn export(&self) -> Vec<serde_json::Value> {
+        let out = self.cmd().arg("export").output().expect("run export");
+        assert!(out.status.success(), "export failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("export line is JSON"))
+            .collect()
+    }
+
+    /// Wait until the history holds `n` entries; returns them.
+    pub fn wait_for_entries(&self, n: usize) -> Vec<serde_json::Value> {
+        let mut entries = Vec::new();
+        let done = wait_until(Duration::from_secs(5), || {
+            entries = self.export();
+            entries.len() >= n
+        });
+        assert!(done, "expected {n} entries, have {entries:?}");
+        entries
+    }
+
+    /// Spawn `clipstack daemon` and wait until it holds the lock.
+    pub fn start_daemon(&mut self) -> u32 {
+        let mut cmd = self.cmd();
+        cmd.arg("daemon");
+        let pid = self.spawn(cmd);
+        assert!(self.wait_for_lock_pid(pid, Duration::from_secs(5)), "daemon did not take the lock");
+        pid
+    }
+
     /// `clipstack --storage-dir <temp>` with the isolated environment.
     pub fn cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clipstack"));

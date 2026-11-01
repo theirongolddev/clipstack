@@ -98,6 +98,7 @@ impl Response {
     }
 
     /// The first value for `key` in an `OK` response.
+    #[cfg_attr(not(test), expect(dead_code, reason = "client side, first used by `status`"))]
     pub fn meta(&self, key: &str) -> Option<&str> {
         match self {
             Response::Ok { meta, .. } => meta.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()),
@@ -219,6 +220,7 @@ pub fn read_request(r: &mut impl BufRead, max_body: usize) -> Result<Request, Pr
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "client side, first used by `status`"))]
 pub fn write_request(w: &mut impl Write, req: &Request) -> io::Result<()> {
     match req {
         Request::Push(body) => {
@@ -253,6 +255,7 @@ pub fn write_response(w: &mut impl Write, resp: &Response) -> io::Result<()> {
 }
 
 /// Read one response; an `OK` body longer than `max_body` is an error.
+#[cfg_attr(not(test), expect(dead_code, reason = "client side, first used by `status`"))]
 pub fn read_response(r: &mut impl BufRead, max_body: usize) -> Result<Response, ProtoError> {
     let header = read_header(r)?;
     if let Some(rest) = header.strip_prefix("ERR ") {

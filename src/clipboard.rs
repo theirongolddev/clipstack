@@ -17,6 +17,11 @@ Troubleshooting:
 /// on secrets. Content offered with it is never saved.
 pub const PASSWORD_HINT_MIME: &str = "x-kde-passwordManagerHint";
 
+/// Whether an offer's types mark it as a password manager's secret.
+pub fn is_sensitive_offer(types: &[String]) -> bool {
+    types.iter().any(|t| t == PASSWORD_HINT_MIME)
+}
+
 /// How long `list_types` waits for wl-paste.
 const LIST_TYPES_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long `paste_text` waits for wl-paste (the source client sends the data).

@@ -2,7 +2,6 @@
 
 use super::query::{ENTRY_COLUMNS, entry_from_row};
 use super::{ClipEntry, Source, Storage};
-use crate::clipboard::PASSWORD_HINT_MIME;
 use crate::util;
 use anyhow::Result;
 use regex::RegexSet;
@@ -124,6 +123,19 @@ pub enum SkipReason {
     TooLarge { size: usize, limit: usize },
 }
 
+impl SkipReason {
+    /// Short machine-readable reason, as in the socket's `reason=`:
+    /// `empty`, `sensitive`, `ignored` or `too_large`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SkipReason::Empty => "empty",
+            SkipReason::Sensitive => "sensitive",
+            SkipReason::IgnoredPattern { .. } => "ignored",
+            SkipReason::TooLarge { .. } => "too_large",
+        }
+    }
+}
+
 /// Why `content` must not be saved, or `None`. Pure; checks run in order:
 /// empty, password-manager hint, size, ignore patterns (only on content
 /// within the size cap, so regex work is bounded).
@@ -131,7 +143,7 @@ pub fn classify(content: &str, mime_types: &[String], policy: &IngestPolicy) -> 
     if content.is_empty() {
         return Some(SkipReason::Empty);
     }
-    if mime_types.iter().any(|t| t == PASSWORD_HINT_MIME) {
+    if crate::clipboard::is_sensitive_offer(mime_types) {
         return Some(SkipReason::Sensitive);
     }
     if content.len() > policy.max_entry_bytes {
@@ -332,6 +344,7 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::PASSWORD_HINT_MIME;
     use crate::storage::test_storage;
 
     fn inserted(outcome: IngestOutcome) -> ClipEntry {

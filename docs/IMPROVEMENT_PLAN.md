@@ -697,7 +697,7 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 **Socket server:**
 - After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.
 - If the runtime dir is missing or not owned by us, the socket is disabled with a warning and capture continues.
-- Accept loop on its own thread: listener is non-blocking, checks `running` every 100 ms, and handles connections one at a time on that thread. There is no per-connection thread: the only client is the user's `ssh` forward, and the timeouts below bound how long a stuck client can hold the loop.
+- Accept loop on its own thread: listener is non-blocking and waited on with `poll(2)` (rustix `event` feature) for at most 100 ms, so it checks `running` every 100 ms without adding accept latency, and handles connections one at a time on that thread. There is no per-connection thread: the only client is the user's `ssh` forward, and the timeouts below bound how long a stuck client can hold the loop.
 - Per connection:
   - `set_read_timeout` / `set_write_timeout(timeout_ms)` plus an overall deadline of `2 × timeout_ms`.
   - Reject headers over 256 bytes or that aren't ASCII.

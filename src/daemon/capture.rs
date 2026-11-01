@@ -229,6 +229,7 @@ impl Supervisor {
     /// How the daemon currently captures, for `PING`: "watch", "poll" or "none".
     pub fn capturing(&self) -> &'static str {
         match self.state {
+            _ if self.mode == CaptureMode::Poll => "poll",
             SupState::Polling => "poll",
             SupState::GaveUp => "none",
             _ => "watch",
@@ -437,7 +438,6 @@ impl Capture {
     }
 
     /// "watch", "poll" or "none", for `PING`.
-    #[expect(dead_code, reason = "reported by socket PING")]
     pub fn capturing(&self) -> &'static str {
         self.supervisor.capturing()
     }
@@ -600,6 +600,7 @@ mod tests {
     fn poll_mode_never_spawns_watch() {
         let t0 = Instant::now();
         let mut sup = Supervisor::new(CaptureMode::Poll);
+        assert_eq!(sup.capturing(), "poll", "before the first tick too");
         assert!(matches!(sup.on(Event::Tick(t0)), Action::StartPolling { .. }));
         assert_eq!(sup.capturing(), "poll");
         for n in 1..100 {

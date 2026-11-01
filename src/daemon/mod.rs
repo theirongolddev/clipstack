@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod socket;
 
 use crate::clipboard::Clipboard;
 use crate::config::{CaptureConfig, SocketConfig};
@@ -21,12 +22,12 @@ const EXPIRE_INTERVAL: Duration = Duration::from_secs(60);
 /// The main loop's tick (watcher checks, `running` checks); polling ticks
 /// at its own interval when that is shorter.
 const TICK: Duration = Duration::from_millis(100);
+const SOCKET_NAME: &str = "clipstack.sock";
 
 /// What the daemon runs with, from the config file and `main`.
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
     pub capture: CaptureConfig,
-    #[expect(dead_code, reason = "read by the socket server")]
     pub socket: SocketConfig,
     pub clipboard: Clipboard,
     /// The command `wl-paste --watch` runs per selection:
@@ -46,8 +47,10 @@ impl Default for DaemonOptions {
 }
 
 pub struct Daemon {
-    storage: Storage,
+    storage: Arc<Storage>,
     options: DaemonOptions,
+    /// Next to the lock: `<runtime dir>/clipstack.sock`
+    socket_path: PathBuf,
     running: Arc<AtomicBool>,
     _lock_file: File, // Keep lock file open to maintain lock
 }
@@ -93,8 +96,9 @@ impl Daemon {
         lock_file.sync_all()?;
 
         Ok(Self {
-            storage,
+            storage: Arc::new(storage),
             options,
+            socket_path: lock_path.with_file_name(SOCKET_NAME),
             running: Arc::new(AtomicBool::new(false)),
             _lock_file: lock_file,
         })
@@ -114,6 +118,8 @@ impl Daemon {
             self.options.hook.clone(),
         );
         let mut expire = ExpireTimer::new(Instant::now());
+        let status: socket::CaptureStatus = Arc::new(std::sync::Mutex::new(capture.capturing()));
+        let server = self.start_socket(&status);
 
         let result = loop {
             if !self.running.load(Ordering::SeqCst) {
@@ -123,14 +129,41 @@ impl Daemon {
             if let Err(e) = capture.step(&self.storage, now) {
                 break Err(e);
             }
+            *status.lock().unwrap_or_else(|p| p.into_inner()) = capture.capturing();
             expire.tick(&self.storage, now);
             let tick = if capture.is_polling() { TICK.min(poll_interval) } else { TICK };
             std::thread::sleep(tick);
         };
 
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(server) = server {
+            server.join();
+        }
         capture.stop();
         eprintln!("clipstack daemon stopped");
         result
+    }
+
+    /// Serve the socket unless `[socket] enabled = false`. Failing to bind
+    /// disables it with a warning; capture carries on.
+    fn start_socket(&self, status: &socket::CaptureStatus) -> Option<socket::SocketServer> {
+        if !self.options.socket.enabled {
+            eprintln!("[socket] disabled by config");
+            return None;
+        }
+        let handler = socket::Handler {
+            storage: Arc::clone(&self.storage),
+            clipboard: self.options.clipboard.clone(),
+            config: self.options.socket.clone(),
+            capture: Arc::clone(status),
+        };
+        match socket::SocketServer::start(&self.socket_path, handler, Arc::clone(&self.running)) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                eprintln!("[socket] disabled: {e:#}");
+                None
+            }
+        }
     }
 
     /// Stop the daemon
@@ -294,6 +327,12 @@ mod tests {
         assert!(lock_is_held(&lock), "checking doesn't steal or release it");
 
         drop(daemon);
+        // Another test thread forking a child at this moment briefly shares the
+        // lock fd until its exec closes it (O_CLOEXEC), so allow a moment.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while lock_is_held(&lock) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(!lock_is_held(&lock));
         let _again = test_daemon(&dir).expect("lock is free after the daemon exits");
     }
