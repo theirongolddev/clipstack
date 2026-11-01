@@ -85,11 +85,30 @@ impl TestEnv {
 
     /// `clipstack --storage-dir <temp>` with the isolated environment.
     pub fn cmd(&self) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clipstack"));
+        self.isolate(&mut cmd);
+        cmd.arg("--storage-dir").arg(&self.storage_dir);
+        cmd
+    }
+
+    /// One of the `tests/fakes` programs (e.g. "wl-paste") with the isolated
+    /// environment, for testing the fakes themselves.
+    pub fn fake_cmd(&self, name: &str) -> Command {
+        let fake = match name {
+            "wl-paste" => "wl-paste",
+            "wl-copy" => "wl-copy",
+            other => unreachable!("no fake named {other:?}"),
+        };
+        let mut cmd = Command::new(Self::fakes_dir().join(fake));
+        self.isolate(&mut cmd);
+        cmd
+    }
+
+    /// Temp XDG dirs and HOME, fakes first on PATH, no Wayland, null stdin.
+    fn isolate(&self, cmd: &mut Command) {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![Self::fakes_dir()];
         paths.extend(std::env::split_paths(&path));
-
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clipstack"));
         cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir)
             .env("XDG_DATA_HOME", &self.data_home)
             .env("XDG_CONFIG_HOME", &self.config_home)
@@ -99,10 +118,65 @@ impl TestEnv {
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("WAYLAND_SOCKET")
             .env_remove("CLIPSTACK_MAX_ENTRIES")
-            .arg("--storage-dir")
-            .arg(&self.storage_dir)
+            .env_remove("CLIPBOARD_STATE")
+            .env_remove("FAKE_WATCH_UNSUPPORTED")
             .stdin(Stdio::null());
-        cmd
+    }
+
+    /// Put `content` on the fake clipboard, offered as `types`.
+    pub fn set_clipboard(&self, content: &str, types: &[&str]) {
+        std::fs::write(self.fake_clip_dir.join("content"), content).expect("write fake content");
+        let mut list = types.join("\n");
+        list.push('\n');
+        std::fs::write(self.fake_clip_dir.join("types"), list).expect("write fake types");
+    }
+
+    /// What the fake wl-copy last stored, if anything.
+    pub fn clipboard_content(&self) -> Option<String> {
+        std::fs::read_to_string(self.fake_clip_dir.join("content")).ok()
+    }
+
+    /// PID of the running fake `wl-paste --watch`, from `$FAKE_CLIP_DIR/watch.pid`.
+    pub fn watch_pid(&self) -> Option<u32> {
+        std::fs::read_to_string(self.fake_clip_dir.join("watch.pid")).ok()?.trim().parse().ok()
+    }
+
+    /// Wait for a fake `wl-paste --watch` to start and return its PID.
+    pub fn wait_for_watch_pid(&self, timeout: Duration) -> Option<u32> {
+        let mut pid = None;
+        wait_until(timeout, || {
+            pid = self.watch_pid();
+            pid.is_some()
+        });
+        pid
+    }
+
+    /// Write `content` to a file and tell the fake watcher a new selection
+    /// with `state` ("data" or "sensitive") holds it.
+    pub fn watch_offer(&self, state: &str, content: &[u8]) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let file = self.fake_clip_dir.join(format!("offer-{n}"));
+        std::fs::write(&file, content).expect("write offer");
+        self.watch_event(&format!("{state} {}", file.display()));
+    }
+
+    /// Send one event line to the fake watcher's FIFO. Opening a FIFO blocks
+    /// until the watcher reads it, so this gives up (panics) after 5 s.
+    pub fn watch_event(&self, line: &str) {
+        let fifo = self.fake_clip_dir.join("events");
+        assert!(
+            wait_until(Duration::from_secs(5), || fifo.exists()),
+            "fake wl-paste --watch never created {fifo:?}"
+        );
+        let line = format!("{line}\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(std::fs::write(&fifo, line));
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("fake wl-paste --watch is not reading its events FIFO")
+            .expect("write watch event");
     }
 
     /// Spawn a child with piped stdout/stderr. Returns its PID; the child is
@@ -177,6 +251,29 @@ impl Drop for TestEnv {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // ...and a fake watcher one of our daemons started, recognised by
+        // the storage dir in its command line so a reused PID is never hit
+        if let Some(pid) = self.watch_pid() {
+            let ours = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
+                let needle = self.storage_dir.as_os_str().as_encoded_bytes();
+                cmdline.windows(needle.len()).any(|w| w == needle)
+            });
+            if ours {
+                let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+            }
+        }
+    }
+}
+
+/// Whether a process with this PID exists and is not a zombie.
+pub fn process_alive(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // "pid (comm) S ..." — the state follows the last ')'
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z" && state != "X"),
+        Err(_) => false,
     }
 }
 

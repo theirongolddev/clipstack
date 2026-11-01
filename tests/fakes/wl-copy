@@ -1,17 +1,39 @@
 #!/bin/sh
 # Fake wl-copy for tests (first on PATH via TestEnv / isolate_env).
 # It never execs the real wl-copy, so a test cannot write the real clipboard.
-# Stdin is stored in $FAKE_CLIP_DIR/content; calls are logged to
-# $FAKE_CLIP_DIR/wl-copy.calls. Step 2 extends this with clipboard state.
+# The text (arguments, else stdin) goes to $FAKE_CLIP_DIR/content and the
+# offered mime types to $FAKE_CLIP_DIR/types; --sensitive adds the
+# password-manager hint like wl-copy 2.3. Calls are logged to
+# $FAKE_CLIP_DIR/wl-copy.calls. See the fake wl-paste for the state layout.
 
 if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
     echo "fake wl-copy: FAKE_CLIP_DIR is not set to a directory" >&2
     exit 1
 fi
-printf '%s\n' "$*" >> "$FAKE_CLIP_DIR/wl-copy.calls"
+dir=$FAKE_CLIP_DIR
+printf '%s\n' "$*" >> "$dir/wl-copy.calls"
 
-if [ "$#" -ne 0 ]; then
-    echo "fake wl-copy: unsupported arguments: $*" >&2
-    exit 2
+sensitive=0
+if [ "${1:-}" = --sensitive ]; then
+    sensitive=1
+    shift
 fi
-cat > "$FAKE_CLIP_DIR/content"
+case "${1:-}" in
+    -*)
+        echo "fake wl-copy: unsupported arguments: $*" >&2
+        exit 2
+        ;;
+esac
+
+# Write to temp files and rename, so a reader never sees half a selection
+if [ "$#" -gt 0 ]; then
+    printf '%s' "$*" > "$dir/content.tmp"
+else
+    cat > "$dir/content.tmp"
+fi
+{
+    printf 'text/plain;charset=utf-8\ntext/plain\nUTF8_STRING\nTEXT\nSTRING\n'
+    [ "$sensitive" -eq 0 ] || printf 'x-kde-passwordManagerHint\n'
+} > "$dir/types.tmp"
+mv "$dir/types.tmp" "$dir/types"
+mv "$dir/content.tmp" "$dir/content"

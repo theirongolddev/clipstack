@@ -2,25 +2,85 @@
 # Fake wl-paste for tests (first on PATH via TestEnv / isolate_env).
 # It never execs the real wl-paste, so a test cannot read the real clipboard.
 # Every invocation is logged to $FAKE_CLIP_DIR/wl-paste.calls, one line of
-# space-joined arguments per call. Step 2 extends this with clipboard state.
+# space-joined arguments per call.
+#
+# Clipboard state lives in $FAKE_CLIP_DIR:
+#   content    the selection (written by the fake wl-copy); missing = no selection
+#   types      offered mime types, one per line (written by wl-copy or a test)
+#   events     FIFO read by --watch, one event per line:
+#                data FILE | sensitive FILE   run CMD with FILE on stdin
+#                nil | clear                  run CMD with empty stdin
+#   watch.pid  PID of the running --watch fake
+#
+# Supported: --version, --list-types, [--no-newline] [--type text],
+# --type text --watch CMD...  FAKE_WATCH_UNSUPPORTED=1 makes --watch fail
+# like a compositor without the data-control protocol.
 
 if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
     echo "fake wl-paste: FAKE_CLIP_DIR is not set to a directory" >&2
     exit 1
 fi
-printf '%s\n' "$*" >> "$FAKE_CLIP_DIR/wl-paste.calls"
+dir=$FAKE_CLIP_DIR
+printf '%s\n' "$*" >> "$dir/wl-paste.calls"
 
-case "$*" in
+unsupported() {
+    echo "fake wl-paste: unsupported arguments: $*" >&2
+    exit 2
+}
+no_selection() {
+    echo "No selection" >&2
+    exit 1
+}
+
+case "${1:-}" in
     --version)
         echo "wl-clipboard 2.3.0 (fake)"
         exit 0
         ;;
-    --no-newline)
-        echo "No selection" >&2
-        exit 1
-        ;;
-    *)
-        echo "fake wl-paste: unsupported arguments: $*" >&2
-        exit 2
+    --list-types)
+        [ "$#" -eq 1 ] || unsupported "$@"
+        [ -f "$dir/types" ] || no_selection
+        cat "$dir/types"
+        exit 0
         ;;
 esac
+
+all="$*"
+no_newline=0
+watch=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-newline) no_newline=1; shift ;;
+        --type)
+            [ "${2:-}" = text ] || unsupported "$all"
+            shift 2
+            ;;
+        --watch) shift; watch=1; break ;;
+        *) unsupported "$all" ;;
+    esac
+done
+
+if [ "$watch" -eq 1 ]; then
+    [ "$#" -gt 0 ] || unsupported "$all"
+    if [ "${FAKE_WATCH_UNSUPPORTED:-}" = 1 ]; then
+        echo "Watch mode requires a compositor that supports the wlroots data-control protocol" >&2
+        exit 1
+    fi
+    fifo="$dir/events"
+    [ -p "$fifo" ] || mkfifo "$fifo" || exit 1
+    echo "$$" > "$dir/watch.pid.tmp" && mv "$dir/watch.pid.tmp" "$dir/watch.pid"
+    while :; do
+        # Opening the FIFO blocks until a test writes to it; EOF reopens it
+        while read -r state file; do
+            case "$state" in
+                data|sensitive) CLIPBOARD_STATE=$state "$@" < "$file" ;;
+                nil|clear) CLIPBOARD_STATE=$state "$@" < /dev/null ;;
+                *) echo "fake wl-paste: bad event: $state" >&2 ;;
+            esac
+        done < "$fifo"
+    done
+fi
+
+[ -f "$dir/content" ] || no_selection
+cat "$dir/content"
+[ "$no_newline" -eq 1 ] || echo
