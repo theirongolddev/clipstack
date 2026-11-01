@@ -211,6 +211,16 @@ fn main() -> Result<()> {
         Some(Commands::Clear) => {
             let cleared = storage.clear()?;
             println!("Clipboard history cleared ({cleared} entries)");
+            let (removed, left) = storage.remove_legacy_backups()?;
+            if removed > 0 {
+                println!("Removed {removed} legacy backup dirs");
+            }
+            for dir in left {
+                println!(
+                    "Kept {} (it holds something other than regular files; delete it yourself)",
+                    dir.display()
+                );
+            }
         }
 
         Some(Commands::Daemon) => {

@@ -107,7 +107,7 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack copy` | Copy stdin to clipboard |
 | `clipstack paste` | Paste clipboard contents to stdout |
 | `clipstack list [-c N]` | List last N entries (default: 10) |
-| `clipstack clear` | Clear clipboard history |
+| `clipstack clear` | Clear clipboard history, pinned entries included, and delete any `legacy-backup-*` directories |
 | `clipstack daemon` | Run the background daemon: clipboard capture and the `rcopy` socket |
 | `clipstack kill` | Stop the running daemon (it also stops its watcher and removes its socket) |
 | `clipstack stats` | Show storage statistics |
@@ -468,7 +468,7 @@ The first command of the new version imports the old store automatically:
 - It takes the old `index.lock`, so a still-running old daemon can't change the files mid-import, and imports every entry with its timestamp and pinned flag in one transaction. Identical contents are merged. The old version had no pin limit; if more than 25 entries were pinned, the 25 most recently used keep their pin and the rest are unpinned (the notice says how many). Each entry goes through the same filter as a new copy: empty entries, entries over `max_entry_bytes`, and entries matching your `ignore_patterns` or the built-in secret patterns are not imported (their files still go to the backup, below). Of the limits, only the entry limit applies during the import (the old version enforced it too); retention and the total-size cap apply from the next start.
 - Only after the transaction commits are `index.json`, the `.txt` files and any `.tmp` leftovers moved into `legacy-backup-<ms>/` (`0700`). `index.lock` stays where it is. Nothing is deleted.
 - It prints `Imported N entries from index.json; old files kept in .../legacy-backup-<ms>/ (delete after checking)` once, where N is the number of entries now in your history. If some entries were left out (over the entry limit, rejected by the filter, or not UTF-8 text), it says how many of each instead of "delete after checking", and that the backup is the only copy of those entries. If retention is on, it also says how many imported entries will expire at the next start.
-- `status` and `check` keep listing the backup until you delete it. The backup holds your old history as plain text files, so delete it once `clipstack list` looks right.
+- `status` and `check` keep listing the backup until you delete it. The backup holds your old history as plain text files, so delete it once `clipstack list` looks right. `clipstack clear` deletes it too (it prints `Removed N legacy backup dirs`): only the regular files inside each backup directory and then the directory are removed, and symlinks are never followed, so a backup directory holding anything else is emptied of its files, kept, and named in the output.
 
 **Downgrading:** an older version doesn't read `clipstack.db`. It starts with an empty history and writes a new `index.json`; the next command of this version imports that as well. A database written by a newer version than the one running is refused with an "upgrade clipstack" error.
 

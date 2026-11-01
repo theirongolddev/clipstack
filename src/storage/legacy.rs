@@ -341,6 +341,35 @@ pub(super) fn backup_dirs(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Delete the `backup_dirs` of `dir`: the regular files directly inside
+/// each, then the dir. Nothing else is deleted and no symlink is followed, so
+/// a dir holding anything but regular files is left in place (emptied of
+/// its regular files). Returns how many dirs were removed and the ones left.
+pub(super) fn remove_backup_dirs(dir: &Path) -> Result<(usize, Vec<PathBuf>)> {
+    let mut removed = 0;
+    let mut left = Vec::new();
+    for backup in backup_dirs(dir) {
+        let mut other = false;
+        for entry in fs::read_dir(&backup).with_context(|| format!("Failed to read {backup:?}"))? {
+            let entry = entry?;
+            // DirEntry::file_type doesn't follow symlinks
+            if entry.file_type()?.is_file() {
+                fs::remove_file(entry.path())
+                    .with_context(|| format!("Failed to delete {:?}", entry.path()))?;
+            } else {
+                other = true;
+            }
+        }
+        if other {
+            left.push(backup);
+        } else {
+            fs::remove_dir(&backup).with_context(|| format!("Failed to delete {backup:?}"))?;
+            removed += 1;
+        }
+    }
+    Ok((removed, left))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +759,35 @@ mod tests {
         assert_eq!(storage.nth(1).unwrap().unwrap().last_used, 9000, "merged by hash");
         assert_eq!(storage.legacy_backup_dirs().len(), 2);
         assert_eq!(root_files(dir.path()), ["index.lock"]);
+    }
+
+    #[test]
+    fn remove_backups_deletes_regular_files_and_never_follows_symlinks() {
+        let dir = TempDir::new().unwrap();
+        write_legacy(dir.path(), 100, &[entry("1000", 1000, "a")]);
+        let storage = open(&dir);
+        let imported = storage.legacy_backup_dirs()[0].clone();
+
+        // A backup dir holding a symlink to a file outside it
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("precious.txt");
+        fs::write(&target, "keep me").unwrap();
+        let odd = dir.path().join("legacy-backup-9");
+        fs::create_dir(&odd).unwrap();
+        fs::write(odd.join("2000.txt"), "b").unwrap();
+        std::os::unix::fs::symlink(&target, odd.join("link.txt")).unwrap();
+        // A symlink named like a backup dir is not one
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("legacy-backup-8")).unwrap();
+
+        let (removed, left) = storage.remove_legacy_backups().unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(left, std::slice::from_ref(&odd));
+        assert!(!imported.exists());
+        assert!(!odd.join("2000.txt").exists(), "regular files go even when the dir stays");
+        assert!(fs::symlink_metadata(odd.join("link.txt")).is_ok(), "symlink left alone");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(dir.path().join("legacy-backup-8").exists(), "symlinked dir untouched");
+        assert!(outside.path().join("precious.txt").exists());
     }
 
     #[test]

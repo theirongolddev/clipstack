@@ -321,6 +321,14 @@ impl Storage {
         legacy::backup_dirs(&self.base_dir)
     }
 
+    /// Delete the `legacy-backup-*` dirs (old history as plaintext files):
+    /// only regular files inside them, then the dirs; symlinks are never
+    /// followed. Returns how many dirs were removed and those left because
+    /// they hold something else.
+    pub fn remove_legacy_backups(&self) -> Result<(usize, Vec<PathBuf>)> {
+        legacy::remove_backup_dirs(&self.base_dir)
+    }
+
     /// Run SQLite's `integrity_check` and the FTS index's `integrity-check`
     /// (rank 1: compared against the entries). With `repair`, a damaged FTS
     /// index is rebuilt from the entries, then the WAL is checkpointed.

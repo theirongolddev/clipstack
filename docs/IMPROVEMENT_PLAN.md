@@ -178,6 +178,7 @@ impl Storage {
     pub fn check(&self, repair: bool) -> Result<CheckReport>;
     pub fn export_jsonl(&self, out: &mut dyn Write) -> Result<usize>;
     pub fn legacy_backup_dirs(&self) -> Vec<PathBuf>;
+    pub fn remove_legacy_backups(&self) -> Result<(usize, Vec<PathBuf>)>; // `clear`: (removed, left because not only regular files)
 }
 ```
 
@@ -557,7 +558,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 | `Cargo.toml` | Add `rusqlite`, `regex`, `toml`; set `rust-version = "1.89"` |
 | `src/storage.rs` | Moved to `src/storage/json.rs` in 1-1, deleted in 1-12b; replaced by `src/storage/{mod,schema,ingest,query,legacy}.rs` |
 | `src/config.rs` | New |
-| `src/main.rs` | Global `--config PATH`. Load config before storage. `list`/`stats`/`status` use `list()`/`counts()`. `copy` uses `ingest(Source::Copy)`, still copies to the clipboard when skipped, and reports why. `clear` returns a count. New `export` and `check`; `recover` becomes a hidden alias. `serve` uses `ingest(Source::Remote)`. `status` shows DB path, retention, caps, config path and legacy backups |
+| `src/main.rs` | Global `--config PATH`. Load config before storage. `list`/`stats`/`status` use `list()`/`counts()`. `copy` uses `ingest(Source::Copy)`, still copies to the clipboard when skipped, and reports why. `clear` returns a count and also removes the legacy backup dirs (`remove_legacy_backups`), printing how many. New `export` and `check`; `recover` becomes a hidden alias. `serve` uses `ingest(Source::Remote)`. `status` shows DB path, retention, caps, config path and legacy backups |
 | `src/daemon.rs` | `save_entry` → `ingest(Source::Poll, &[])` (mime types arrive in Step 2) |
 | `src/picker.rs` | `entries` from `list(ListOrder::PinnedFirst, None)`. `id: String` → `EntryId`. Phase-2 content search becomes `storage.search(query, 200)`, keeping `MatchLocation::Content` for hits whose preview didn't fuzzy-match. Remove `MAX_CONTENT_MATCHES`/`MAX_FILE_LOADS`. Undo uses `ingest(Source::Picker)` then `set_pinned`/`set_alias`. `entry.timestamp` → `entry.last_used` |
 | `src/util.rs` | `compute_hash` reused. `compute_hash_string` removed once unused |
@@ -1061,7 +1062,7 @@ Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 wer
 | Q2 | Retention default. The real store holds about 100 entries spanning about 10 months. | **Decided by the user: `retention_days = 0` (off) by default**; README recommends `30` or `90` under "Configuration file", and the one-time import notice adds `N entries are older than <retention> days and will expire at the next start` only when retention is enabled. | `max_entries` (100) already bounds the history, so retention is an opt-in privacy setting, not a size control. Any non-zero default deletes most of the user's history at the first `open` after import, and reads happen before the user has seen the notice |
 | Q3 | TCP `serve`: remove or keep opt-in? | **Remove (hidden stub, exit 2) and rewrite rcopy in the same commit (2-13).** | A token-protected TCP listener is more code than the socket it replaces; rewriting rcopy with the removal leaves no broken window |
 | Q4 | `allow_pull` default. | **`false`.** rpaste prints how to enable it. | Pull is an exfiltration path for anyone with the remote uid or root |
-| Q5 | Legacy backup dir lifetime (plaintext). | **Keep it; `status` warns while it exists; README says `rm -r` it after checking. No `--purge-legacy`.** | Deleting user data is the user's call; a one-line `rm -r` doesn't need a subcommand |
+| Q5 | Legacy backup dir lifetime (plaintext). | **Keep it; `status` warns while it exists; README says to delete it after checking. No `--purge-legacy`. Amended after review: `clear` also removes the `legacy-backup-*` dirs (regular files inside, then the dir; symlinks never followed) and prints how many.** | Deleting user data is the user's call, and `clear` is that call: a "cleared" history must not survive as plaintext files next to the database |
 | Q6 | Legacy import skips filters and caps. | **Reversed after review: the import applies the ingest policy** (`classify`: empty, oversize, ignore and built-in patterns) and reports a skipped count; of the caps only max_entries pruning applies at import. No "check reports matching entries". | Nothing is lost: every original, skipped or not, stays in the legacy backup dir. Importing secrets the user configured to never save would put them back into the live, searchable history |
 | Q7 | `max_entries` in the DB, other limits in config. | **Keep.** | Preserves CLI/env/saved semantics and labels; the watch hook inherits the daemon's env so both agree. Revisit after Step 3 |
 | Q8 | Step 0 additions beyond the skeleton. | **Approved: commits 0-7 (no `pkill`) and 0-8 (`current_exe()`).** | Both are isolation fixes needed before any suite is run against the new code |

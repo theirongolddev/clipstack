@@ -210,6 +210,27 @@ fn clear_reports_count() {
     assert!(stdout.contains("Clipboard history cleared (2 entries)"), "stdout: {stdout}");
 }
 
+#[test]
+fn clear_removes_legacy_backup_dirs() {
+    let env = TestEnv::new();
+    write_legacy(&env, &[(&format!("{}", now_ms()), now_ms(), false, "old plaintext")]);
+    let (stdout, _) = ok(&env, &["status"], None);
+    assert!(stdout.contains("legacy-backup-"), "sanity: backup exists: {stdout}");
+
+    let (stdout, _) = ok(&env, &["clear"], None);
+    assert!(stdout.contains("Clipboard history cleared (1 entries)"), "stdout: {stdout}");
+    assert!(stdout.contains("Removed 1 legacy backup dirs"), "stdout: {stdout}");
+    let left: Vec<_> = std::fs::read_dir(&env.storage_dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("legacy-backup-"))
+        .collect();
+    assert!(left.is_empty(), "left: {left:?}");
+
+    let (stdout, _) = ok(&env, &["clear"], None);
+    assert!(!stdout.contains("legacy backup"), "nothing to report: {stdout}");
+}
+
 /// The `content` field of each exported JSONL line.
 fn exported_contents(jsonl: &str) -> Vec<String> {
     jsonl
