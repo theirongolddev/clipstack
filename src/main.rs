@@ -2,6 +2,8 @@ mod clipboard;
 mod config;
 mod daemon;
 mod perms;
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the socket server from the next commit"))]
+mod protocol;
 mod picker;
 mod storage;
 mod util;
