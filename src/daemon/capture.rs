@@ -303,6 +303,8 @@ impl WatchChild {
         cmd.args(["--no-newline", "--watch"])
             .args(hook)
             .stdin(Stdio::null())
+            // /dev/null: without --type, wl-paste infers a type from the name of
+            // the file its stdout is, and "null" names none
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let daemon = rustix::process::getpid();
