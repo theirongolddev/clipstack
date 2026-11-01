@@ -280,8 +280,15 @@ function validateAlias(input, entries, entryId) {
 
 // ------------------------------------------------------------------ preview
 
-function previewLines(text, max) {
+// Lines of an entry; the empty line after a final newline is not counted.
+function splitLines(text) {
   var all = String(text || "").split(/\r?\n/);
+  if (all.length > 1 && all[all.length - 1] === "") all.pop();
+  return all;
+}
+
+function previewLines(text, max) {
+  var all = splitLines(text);
   return { lines: all.slice(0, max), total: all.length, truncated: all.length > max };
 }
 
@@ -306,14 +313,41 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
-var CODE_WORDS = /^(\$ |#!|sudo|ssh|scp|rsync|docker|podman|kubectl|git|cargo|rustup|npm|npx|pnpm|yarn|node|python3?|pip|uv|make|cd|ls|cat|grep|rg|curl|wget|rm|cp|mv|mkdir|chmod|chown|echo|export|systemctl|journalctl|pacman|yay|paru|omarchy|clipstack|FROM|RUN|COPY|ENV|WORKDIR|CMD|SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|WITH|fn|let|const|var|def|import|use|pub|class|function|struct|impl|package)\b/;
+var SHELL_WORDS = ["sudo", "ssh", "scp", "rsync", "docker", "podman", "kubectl", "git", "cargo", "rustup",
+  "npm", "npx", "pnpm", "yarn", "node", "python", "python3", "pip", "uv", "make", "cd", "ls", "cat",
+  "grep", "rg", "curl", "wget", "rm", "cp", "mv", "mkdir", "chmod", "chown", "echo", "export",
+  "systemctl", "journalctl", "pacman", "yay", "paru", "omarchy", "clipstack"];
+var DOCKER_WORDS = ["FROM", "RUN", "COPY", "ADD", "ENV", "ARG", "WORKDIR", "CMD", "ENTRYPOINT", "EXPOSE",
+  "LABEL", "USER", "VOLUME"];
+var SQL_WORDS = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "WITH"];
+var SOURCE_WORDS = ["fn", "let", "const", "var", "def", "import", "use", "pub", "class", "function",
+  "struct", "impl", "package", "#!"];
+// Upper-case words tinted anywhere in a code line
+var KEYWORDS = DOCKER_WORDS.concat(SQL_WORDS, ["AS", "INTO", "VALUES", "SET", "WHERE", "AND", "OR",
+  "NOT", "NULL", "ORDER", "GROUP", "BY", "LIMIT", "JOIN", "ON", "DESC", "ASC", "TABLE", "IN", "IS"]);
 var CODE_MARKS = /[{};]\s*$|[{}]|=|\$\(|\$\{|~\/|&&|\|\||\s\|\s|->|=>|::|\w\(\)|\s--?[a-zA-Z]/;
+
+function firstWord(text) {
+  var line = String(text || "").split("\n")[0].trim();
+  if (line.indexOf("$ ") === 0) return "$";
+  return line.split(/\s+/)[0];
+}
+
+// "shell", "docker", "sql", "code" or "" from the first word of the text.
+function codeFamily(text) {
+  var w = firstWord(text);
+  if (w === "$" || SHELL_WORDS.indexOf(w) >= 0) return "shell";
+  if (DOCKER_WORDS.indexOf(w) >= 0) return "docker";
+  if (SQL_WORDS.indexOf(w) >= 0) return "sql";
+  if (SOURCE_WORDS.indexOf(w) >= 0 || w.indexOf("#!") === 0) return "code";
+  return "";
+}
 
 // Rows and previews show code in JetBrains Mono, prose in Noto Sans.
 function looksLikeCode(text) {
   var line = String(text || "").split("\n")[0].trim();
   if (line === "") return false;
-  return CODE_WORDS.test(line) || CODE_MARKS.test(line);
+  return codeFamily(line) !== "" || CODE_MARKS.test(line);
 }
 
 function isLink(text) {
@@ -327,15 +361,83 @@ function isLink(text) {
 function kindLabel(entry, content) {
   if (entry.kind === "image") return "Image";
   if (isLink(content)) return "Link";
-  if (looksLikeCode(content)) return "Code";
-  return "Text";
+  switch (codeFamily(content)) {
+    case "shell": return "Shell command";
+    case "docker": return "Dockerfile";
+    case "sql": return "SQL";
+  }
+  return looksLikeCode(content) ? "Code" : "Text";
+}
+
+// Calls fn(match, offset) for every match of the global regex `re`.
+function eachMatch(text, re, fn) {
+  text.replace(re, function (match) {
+    fn(match, arguments[arguments.length - 2]);
+    return match;
+  });
+}
+
+// Per-character tint of one code line: 0 plain, 1 keyword, 2 literal.
+function tintClasses(line) {
+  var cls = [];
+  for (var i = 0; i < line.length; i++) cls.push(0);
+  var paint = function (from, to, c) {
+    for (var k = from; k < to; k++) cls[k] = c;
+  };
+  eachMatch(line, /"[^"]*"|'[^']*'/g, function (s, at) { paint(at, at + s.length, 2); });
+  var first = true;
+  eachMatch(line, /\S+/g, function (w, at) {
+    var isFirst = first;
+    first = false;
+    if (cls[at] === 2) return;
+    var bare = w.replace(/[^A-Za-z0-9_#!.-]+$/, "");
+    if (isFirst && (SHELL_WORDS.indexOf(bare) >= 0 || SOURCE_WORDS.indexOf(bare) >= 0)) {
+      paint(at, at + bare.length, 1);
+    } else if (KEYWORDS.indexOf(bare) >= 0) {
+      paint(at, at + bare.length, 1);
+    } else if (/^--?[A-Za-z]/.test(w)) {
+      paint(at, at + w.length, 2);
+    } else {
+      var kv = w.match(/^[A-Z_][A-Z0-9_]*=/);
+      if (kv && w.length > kv[0].length) paint(at + kv[0].length, at + w.length, 2);
+    }
+  });
+  return cls;
+}
+
+// One preview line as rich text: escaped, lightly tinted when `tint` (the
+// entry looks like code), query hits marked on top. `style` holds the
+// colours: { keyword, literal, mark, markText }.
+function codeHtml(line, query, tint, style) {
+  line = String(line || "");
+  var cls = tint ? tintClasses(line) : [];
+  var marks = [];
+  var spans = highlightSpans(line, query);
+  for (var s = 0; s < spans.length; s++) {
+    for (var c = 0; c < spans[s].text.length; c++) marks.push(spans[s].match);
+  }
+  var out = "";
+  var i = 0;
+  while (i < line.length) {
+    var t = cls[i] || 0;
+    var mk = marks[i] === true;
+    var j = i + 1;
+    while (j < line.length && (cls[j] || 0) === t && (marks[j] === true) === mk) j++;
+    var text = escapeHtml(line.slice(i, j));
+    if (mk) out += "<span style=\"background-color:" + style.mark + ";color:" + style.markText + "\">" + text + "</span>";
+    else if (t === 1) out += "<span style=\"color:" + style.keyword + "\">" + text + "</span>";
+    else if (t === 2) out += "<span style=\"color:" + style.literal + "\">" + text + "</span>";
+    else out += text;
+    i = j;
+  }
+  return out;
 }
 
 function metaItems(entry, content, now) {
   if (entry.kind === "image") {
     return ["PNG", entry.width + "×" + entry.height, formatSize(entry.size), longAge(entry.lastUsed, now)];
   }
-  var lines = String(content || "").split("\n").length;
+  var lines = splitLines(content).length;
   return [formatSize(entry.size), lines + (lines === 1 ? " line" : " lines"), longAge(entry.lastUsed, now)];
 }
 

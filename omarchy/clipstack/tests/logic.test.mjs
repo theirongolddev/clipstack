@@ -277,6 +277,11 @@ test("previewLines caps at the limit and counts the total", () => {
   assert.deepEqual(j(L.previewLines("", 2000)), { lines: [""], total: 1, truncated: false });
 });
 
+test("previewLines ignores the empty line after a final newline", () => {
+  assert.deepEqual(j(L.previewLines("a\nb\n", 10)), { lines: ["a", "b"], total: 2, truncated: false });
+  assert.deepEqual(j(L.previewLines("\n", 10)).lines, [""]);
+});
+
 test("previewLines treats CRLF as one break", () => {
   assert.deepEqual(j(L.previewLines("a\r\nb", 10)).lines, ["a", "b"]);
 });
@@ -296,10 +301,14 @@ test("formatSize matches the design", () => {
   assert.equal(L.formatSize(3 * 1024 * 1024 + 300 * 1024), "3.3 MB");
 });
 
-test("kindLabel names images, links, code and text", () => {
+test("kindLabel names images, links, shell, Dockerfile, SQL, code and text", () => {
   assert.equal(L.kindLabel({ kind: "image" }, ""), "Image");
   assert.equal(L.kindLabel({ kind: "text" }, "https://docs.docker.com/compose"), "Link");
-  assert.equal(L.kindLabel({ kind: "text" }, "docker compose up -d --build"), "Code");
+  assert.equal(L.kindLabel({ kind: "text" }, "docker compose up -d --build"), "Shell command");
+  assert.equal(L.kindLabel({ kind: "text" }, "$ ls -la"), "Shell command");
+  assert.equal(L.kindLabel({ kind: "text" }, "FROM rust:1.89 AS build\nRUN make"), "Dockerfile");
+  assert.equal(L.kindLabel({ kind: "text" }, "SELECT id FROM entries"), "SQL");
+  assert.equal(L.kindLabel({ kind: "text" }, "fn main() {\n}"), "Code");
   assert.equal(L.kindLabel({ kind: "text" }, "Best regards, Sam Rivera"), "Text");
 });
 
@@ -318,6 +327,11 @@ test("metaItems for text: size, lines and age", () => {
   const e = { kind: "text", size: 28, lastUsed: NOW - 2 * MIN };
   assert.deepEqual(j(L.metaItems(e, "one line", NOW)), ["28 B", "1 line", "copied 2 min ago"]);
   assert.deepEqual(j(L.metaItems(e, "a\nb\nc", NOW))[1], "3 lines");
+});
+
+test("metaItems does not count the line after a final newline", () => {
+  const e = { kind: "text", size: 4, lastUsed: NOW };
+  assert.equal(j(L.metaItems(e, "a\nb\n", NOW))[1], "2 lines");
 });
 
 test("metaItems for an image: format, dimensions, size and age", () => {
@@ -379,4 +393,41 @@ test("commandError takes the Error: line clipstack prints, not its causes", () =
                "cannot open the store");
   assert.equal(L.commandError("get", 2, "", "error: unexpected argument '--image-path' found\n\nUsage: x\n"),
                "unexpected argument '--image-path' found");
+});
+
+// ---------------------------------------------------------------- code tint
+
+const TINT = { keyword: "K", literal: "L", mark: "M", markText: "T" };
+// Render codeHtml with readable tags: <K>..</K> keyword, <L>..</L> literal,
+// [..] mark.
+function tinted(line, query, tint) {
+  return L.codeHtml(line, query, tint, TINT)
+    .replace(/<span style="color:K">(.*?)<\/span>/g, "<K>$1</K>")
+    .replace(/<span style="color:L">(.*?)<\/span>/g, "<L>$1</L>")
+    .replace(/<span style="background-color:M;color:T">(.*?)<\/span>/g, "[$1]");
+}
+
+test("codeHtml tints a leading command and its flags", () => {
+  assert.equal(tinted("docker compose up -d --build", "", true),
+               "<K>docker</K> compose up <L>-d</L> <L>--build</L>");
+});
+
+test("codeHtml tints Dockerfile and SQL keywords, quoted strings and KEY=value values", () => {
+  assert.equal(tinted("FROM rust:1.89 AS build", "", true), "<K>FROM</K> rust:1.89 <K>AS</K> build");
+  assert.equal(tinted("ENV CARGO_TERM_COLOR=always", "", true), "<K>ENV</K> CARGO_TERM_COLOR=<L>always</L>");
+  assert.equal(tinted('CMD ["api"]', "", true), "<K>CMD</K> [<L>&quot;api&quot;</L>]");
+});
+
+test("codeHtml without tint only escapes", () => {
+  assert.equal(tinted("a <b> -d", "", false), "a &lt;b&gt; -d");
+});
+
+test("codeHtml marks query hits on top of the tint", () => {
+  assert.equal(tinted("COPY Dockerfile ./", "dock", true), "<K>COPY</K> [Dock]erfile ./");
+});
+
+test("codeHtml keeps a word that is part keyword, part mark, in order", () => {
+  const html = L.codeHtml("docker up", "ock", true, TINT);
+  assert.equal(html.replace(/<[^>]+>/g, ""), "docker up");
+  assert.match(html, /background-color:M;color:T">ock</);
 });
