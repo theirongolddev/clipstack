@@ -3,8 +3,6 @@
 //! Clipboard history routinely contains secrets, so the storage dir is
 //! `0700` and every file in it is `0600`.
 
-#![allow(dead_code)] // wired into storage in the following commits
-
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};

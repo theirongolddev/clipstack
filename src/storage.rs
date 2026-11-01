@@ -62,6 +62,16 @@ impl Storage {
             // in-flight temp file and pruning can't race other writers
             let _lock = storage.lock_index()?;
 
+            // Stores written by older versions were 0755/0644
+            let report = perms::tighten_dir(&storage.base_dir)
+                .with_context(|| format!("Failed to tighten permissions: {:?}", storage.base_dir))?;
+            if report.files_changed > 0 {
+                eprintln!(
+                    "[storage] tightened permissions on {} files",
+                    report.files_changed
+                );
+            }
+
             // Clean up any orphaned temp files from interrupted operations
             storage.cleanup_temp_files()?;
 
@@ -1464,5 +1474,31 @@ mod tests {
         assert_eq!(mode_of(&storage.content_path(&entry.id)), 0o600);
         assert_eq!(mode_of(&storage.index_path()), 0o600);
         assert_eq!(mode_of(&storage.base_dir().join("index.lock")), 0o600);
+    }
+
+    #[test]
+    fn test_open_tightens_existing_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let chmod = |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("clipd");
+        {
+            let storage = Storage::with_defaults(base.clone()).unwrap();
+            storage.save_entry("old world-readable entry").unwrap();
+        }
+        // Simulate a store written by an older version
+        chmod(&base, 0o755);
+        for entry in fs::read_dir(&base).unwrap() {
+            chmod(&entry.unwrap().path(), 0o644);
+        }
+
+        let storage = Storage::open(base.clone(), None).unwrap();
+        assert_eq!(mode_of(&base), 0o700);
+        for entry in fs::read_dir(&base).unwrap() {
+            let path = entry.unwrap().path();
+            assert_eq!(mode_of(&path), 0o600, "{:?}", path);
+        }
+        assert_eq!(storage.load_index().unwrap().entries.len(), 1);
     }
 }
