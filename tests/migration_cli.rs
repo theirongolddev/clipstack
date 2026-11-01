@@ -130,6 +130,41 @@ fn import_notice_warns_before_retention_expires() {
 }
 
 #[test]
+fn import_notice_reports_kept_pruned_and_skipped_separately() {
+    let env = TestEnv::new();
+    write_config(&env, "[storage]\nignore_patterns = [\"^password:\"]\n");
+    let now = now_ms();
+    write_legacy(
+        &env,
+        &[
+            (&format!("{}", now - 1_000), now - 1_000, false, "newest"),
+            (&format!("{}", now - 2_000), now - 2_000, false, "second"),
+            (&format!("{}", now - 3_000), now - 3_000, false, "third, pruned"),
+            (&format!("{}", now - 4_000), now - 4_000, false, "password: hunter2"),
+        ],
+    );
+
+    let (_, stderr) = ok(&env, &["--max-entries", "2", "stats"], None);
+    assert!(stderr.contains("Imported 2 entries from index.json"), "stderr: {stderr}");
+    assert!(stderr.contains("1 older entries were over the max_entries limit (2)"), "stderr: {stderr}");
+    assert!(stderr.contains("1 entries were not imported"), "stderr: {stderr}");
+    assert!(stderr.contains("only copy"), "stderr: {stderr}");
+    assert!(!stderr.contains("delete after checking"), "the backup still matters: {stderr}");
+    assert!(!stderr.contains("hunter2"), "never echoes content: {stderr}");
+}
+
+#[test]
+fn import_notice_says_delete_after_checking_when_everything_was_kept() {
+    let env = TestEnv::new();
+    let now = now_ms();
+    write_legacy(&env, &[(&format!("{now}"), now, false, "only entry")]);
+    let (_, stderr) = ok(&env, &["stats"], None);
+    assert!(stderr.contains("Imported 1 entries from index.json"), "stderr: {stderr}");
+    assert!(stderr.contains("(delete after checking)"), "stderr: {stderr}");
+    assert!(!stderr.contains("only copy"), "stderr: {stderr}");
+}
+
+#[test]
 fn missing_explicit_config_is_an_error() {
     let env = TestEnv::new();
     let missing = env.root().join("nope.toml");

@@ -14,7 +14,7 @@ use crate::{perms, util};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -62,8 +62,12 @@ struct Item {
 /// Result of an import, for the one-time message.
 #[derive(Debug, Default)]
 pub(super) struct ImportReport {
-    /// Content files imported (merged by hash, so entries may be fewer)
-    pub imported: usize,
+    /// Distinct imported entries still in the history after max_entries pruning
+    pub kept: usize,
+    /// Distinct imported entries max_entries pruning removed again
+    pub pruned: usize,
+    /// The max_entries limit the import pruned to
+    pub limit: usize,
     /// Content files that are not UTF-8 text: moved to the backup, not imported
     pub not_text: usize,
     /// Content files the ingest policy rejects: moved to the backup, not imported
@@ -209,6 +213,7 @@ pub(super) fn import_with(
 
     let mut report = ImportReport::default();
     let mut to_move: Vec<PathBuf> = Vec::new();
+    let mut hashes: HashSet<Vec<u8>> = HashSet::new();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     {
         let mut upsert = tx.prepare(
@@ -234,8 +239,9 @@ pub(super) fn import_with(
                 report.skipped += 1;
                 continue;
             }
+            let hash = util::compute_hash(&content);
             upsert.execute(params![
-                util::compute_hash(&content),
+                &hash,
                 i64::try_from(content.len())?,
                 make_preview(&content),
                 item.created_at,
@@ -244,7 +250,7 @@ pub(super) fn import_with(
                 DEFAULT_MIME,
                 content,
             ])?;
-            report.imported += 1;
+            hashes.insert(hash);
         }
     }
 
@@ -259,9 +265,20 @@ pub(super) fn import_with(
         .unwrap_or(DEFAULT_MAX_ENTRIES)
         .clamp(1, ABSOLUTE_MAX_ENTRIES);
     prune_to_max_entries(&tx, limit)?;
-    if report.imported > 0 {
+    report.limit = limit;
+    {
+        let mut exists = tx.prepare("SELECT EXISTS (SELECT 1 FROM entries WHERE hash = ?1)")?;
+        for hash in &hashes {
+            if exists.query_row([hash], |r| r.get::<_, bool>(0))? {
+                report.kept += 1;
+            } else {
+                report.pruned += 1;
+            }
+        }
+    }
+    if report.kept > 0 {
         set_setting(&tx, "legacy_imported_at", &now_ms.to_string())?;
-        set_setting(&tx, "legacy_imported_count", &report.imported.to_string())?;
+        set_setting(&tx, "legacy_imported_count", &report.kept.to_string())?;
     }
     hook(Stage::BeforeCommit)?;
     tx.commit()?;
@@ -489,7 +506,7 @@ mod tests {
         let policy = config.ingest_policy().unwrap();
         let mut conn = connection(&dir);
         let report = import_with(&mut conn, dir.path(), None, &policy, 9_000, &|_| Ok(())).unwrap();
-        assert_eq!(report.imported, 1);
+        assert_eq!(report.kept, 1);
         assert_eq!(report.skipped, 4, "empty, built-in pattern, oversize, ignore pattern");
         let left: Vec<String> = conn
             .prepare("SELECT content FROM entries")
@@ -506,6 +523,31 @@ mod tests {
             ["1000.txt", "2000.txt", "3000.txt", "4000.txt", "5000.txt", "index.json"]
         );
         assert_eq!(root_files(dir.path()), ["index.lock"]);
+    }
+
+    #[test]
+    fn report_counts_kept_and_pruned_entries_after_dedupe() {
+        let dir = TempDir::new().unwrap();
+        write_legacy(
+            dir.path(),
+            2,
+            &[
+                entry("4000", 4000, "d"),
+                entry("3000", 3000, "c"),
+                entry("2500", 2500, "c"),
+                entry("2000", 2000, "b"),
+                entry("1000", 1000, "a"),
+            ],
+        );
+        let mut conn = connection(&dir);
+        let report =
+            import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 9_000, &|_| Ok(())).unwrap();
+        assert_eq!((report.kept, report.pruned, report.limit), (2, 2, 2), "{report:?}");
+        assert_eq!(entry_count(&conn), 2);
+        let count: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'legacy_imported_count'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, "2", "the entries actually kept");
     }
 
     #[test]
@@ -602,7 +644,7 @@ mod tests {
         assert!(dir.path().join("index.json").exists(), "but nothing moved");
 
         let report = import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 6_000, &|_| Ok(())).unwrap();
-        assert_eq!(report.imported, 2);
+        assert_eq!(report.kept, 2);
         assert_eq!(entry_count(&conn), 2, "no duplicates");
         let pinned: i64 = conn.query_row("SELECT sum(pinned) FROM entries", [], |r| r.get(0)).unwrap();
         assert_eq!(pinned, 1);

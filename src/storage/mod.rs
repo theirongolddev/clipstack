@@ -263,22 +263,33 @@ impl Storage {
         let Some(backup) = &report.backup_dir else {
             return Ok(());
         };
+        let left_out = report.pruned + report.skipped + report.not_text;
+        let advice = if left_out == 0 { " (delete after checking)" } else { "" };
         eprintln!(
-            "Imported {} entries from index.json; old files kept in {}/ (delete after checking)",
-            report.imported,
+            "Imported {} entries from index.json; old files kept in {}/{advice}",
+            report.kept,
             backup.display()
         );
+        if report.pruned > 0 {
+            eprintln!(
+                "{} older entries were over the max_entries limit ({}) and were not kept",
+                report.pruned, report.limit
+            );
+        }
         if report.skipped > 0 {
             eprintln!(
                 "{} entries were not imported because the storage policy rejects them \
-                 (empty, too large, or matching an ignore or secret pattern); they are in the backup dir",
+                 (empty, too large, or matching an ignore or secret pattern)",
                 report.skipped
             );
         }
         if report.not_text > 0 {
+            eprintln!("{} content files are not UTF-8 text and were not imported", report.not_text);
+        }
+        if left_out > 0 {
             eprintln!(
-                "{} content files are not UTF-8 text and were not imported; they are in the backup dir",
-                report.not_text
+                "The backup dir is the only copy of the {left_out} entries that were not imported or \
+                 not kept; keep it until you have saved what you need from it"
             );
         }
         if let Some(retention) = self.policy.retention() {
