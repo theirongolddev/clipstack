@@ -1,7 +1,7 @@
 # ClipStack Improvement Plan
 
-> Status: **IMPLEMENTED** (Steps 0-4, 2026-11-01; each step has an
-> "Implementation status" line). Steps 0-4 below were fully specified and the open
+> Status: **IMPLEMENTED** (Steps 0-4, 2026-11-01); **Step 5 in progress**. Each step has an
+> "Implementation status" line. Steps 0-4 below were fully specified and the open
 > questions are decided. The user chose the recommended answers for Q2
 > (retention off by default) and Q10 (`/` starts a search).
 >
@@ -88,6 +88,8 @@ is changed once and the foundations are built with later needs in mind.
 | 15 | Wrap preview to the actual pane width (not hard-coded 80) | Aesthetics | 4 |
 | 16 | Fixed-width compact time column (`5s`, `12m`, `3d`) | Aesthetics | 4 |
 | 17 | Visible-whitespace / line-number toggle in preview | Aesthetics | 4 |
+| 18 | Image history (FEATURE_PLAN Feature 14): PNG capture, preview, paste | Functionality | 5 |
+| 19 | Maccy-style omarchy-shell overlay; `pin`/`unpin`/`delete`/`edit` commands | Functionality | 5 |
 
 ## Key decisions
 
@@ -1074,6 +1076,119 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 - Paste timing and focus return depend on the compositor and window rules. 150 ms may need to be configurable.
 - Shift+Insert pastes PRIMARY instead of CLIPBOARD in some apps (xterm). `paste_keys` makes this configurable.
 - Key table: Q10 is decided by the user: `/` starts a search; bare letters are commands.
+
+### Step 5: Images, entry commands and the omarchy-shell overlay
+
+> **Implementation status:** in progress.
+
+Goal: a Maccy-style clipboard overlay inside omarchy-shell (Quickshell), backed by
+the `clipstack` CLI, with image history. Design: concept C "Reader" (list on the
+left, full preview on the right), approved on the design canvas
+(https://claude.ai/artifact/6ujZ8mxWRvaSXSLKuQH4B3, boards C1-C4). The terminal
+picker stays as the fallback for non-omarchy desktops and SSH.
+
+Flow (Maccy): Super+Ctrl+V opens the overlay with the search field focused; typing
+filters at once; Up/Down (and Ctrl+J/K) move; Enter pastes into the previous
+window; Shift+Enter copies only; Esc clears the search, a second Esc closes.
+Pinned entries are listed first. Image entries are ordinary rows with a small
+thumbnail; the preview shows the full image fitted to the pane.
+
+#### 5.1 Storage schema v2 (images)
+
+Migration v1 -> v2 (`PRAGMA user_version = 2`), additive:
+
+```sql
+ALTER TABLE entries ADD COLUMN kind   TEXT    NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'image'));
+ALTER TABLE entries ADD COLUMN image  BLOB;      -- PNG bytes; NULL for text
+ALTER TABLE entries ADD COLUMN width  INTEGER;   -- image only
+ALTER TABLE entries ADD COLUMN height INTEGER;   -- image only
+```
+
+- An image entry has `content = ''` (nothing indexed by FTS), `mime = 'image/png'`,
+  `preview = 'Image · WxH'`, `size` = PNG byte length.
+- Hash: `sha256(b"image\0" || bytes)`, so an image never collides with a text entry.
+  Re-copying the same image bumps it like text.
+- Only `image/png` is stored. Width and height come from the PNG IHDR chunk; bytes
+  without a valid PNG signature and IHDR are rejected (`SkipReason::NotPng`).
+- Caps: new `[storage] max_image_bytes` (default 8 MiB). `max_total_bytes` and
+  `max_entries` count image entries like text. Retention applies to them too.
+- `x-kde-passwordManagerHint` skips images as well. Text ignore patterns do not
+  apply to images.
+- `ClipEntry` gains `kind: Kind` (`Text | Image`, serialised lowercase),
+  `width: Option<u32>`, `height: Option<u32>`.
+- New API: `Storage::ingest_image(&self, png: &[u8], source, mime_types) -> Result<IngestOutcome>`
+  and `Storage::load_image(&self, id) -> Result<Vec<u8>>`. `load_content` on an image
+  entry is an error.
+- `export` writes image rows with `"kind":"image"` and the bytes as standard base64 in
+  `"image_base64"`. `check` verifies image rows (signature, dimensions, size match).
+- A store opened by an older binary (user_version 2 > 1) already fails cleanly with
+  the "newer schema" storage error (exit 4); no change needed.
+
+#### 5.2 Capture and clipboard
+
+- `Clipboard` gains `paste_bytes(mime) -> Result<Vec<u8>>` (`wl-paste --no-newline --type MIME`)
+  and `copy_bytes(&[u8], mime)` (`wl-copy --type MIME`).
+- Daemon (watch and poll): after `list_types()`, if no text type is offered
+  (`text/plain*`, `UTF8_STRING`, `STRING`, `TEXT`) and `image/png` is, fetch the PNG
+  and call `ingest_image`. Text keeps priority whenever both are offered.
+- `tests/fakes` wl-paste/wl-copy learn `--type image/png` with binary payloads.
+
+#### 5.3 CLI
+
+| Command | Behaviour |
+|---------|-----------|
+| `pin <REF>` | Pin; no-op if already pinned. Exit 1 if not found. |
+| `unpin <REF>` | Unpin; clears the alias (prints a note when one was removed). |
+| `delete <REF>` | Delete one entry; also removes its cached image file (below). |
+| `edit <REF>` | Open the text in `$VISUAL`/`$EDITOR` (same 0600 temp file as the picker's `e`); a changed result is saved and copied. Exit 1 for an image. |
+| `get <REF> --paste` | Implies `--copy`, then runs the detached `wtype` paste exactly like `pick --paste` (`[picker] paste_keys`). |
+| `get <REF>` on an image | Writes the PNG bytes to stdout, refusing a TTY (exit 2 with a hint). `--copy` uses `copy_bytes(.., "image/png")`. |
+| `get <REF> --image-path` | Image only: makes sure `<runtime>/clipstack-images/<id>.png` exists (dir 0700, file 0600, written atomically) and prints its path. Used by the overlay for thumbnails and the preview. |
+| `list --json`, `search --json` | Each object gains `kind`, `width`, `height` (null for text). |
+
+`clear` and retention also remove cached image files whose entry is gone (the
+runtime dir is tmpfs, so leftovers vanish at logout anyway).
+
+#### 5.4 Overlay plugin (`omarchy/clipstack/`)
+
+- Manifest: id `solsystemlabs.clipstack`, kind `overlay`, `keepLoaded: true`, entry
+  point `Overlay.qml`. Validated with `omarchy plugin validate`.
+- It never captures anything: all data comes from the CLI through
+  `Quickshell.Io.Process`. `clipstack list --json` on open; `clipstack search <q> --json`
+  debounced 60 ms; `clipstack get id:N` for the selected text entry (preview shows
+  at most the first 2000 lines); `get id:N --image-path` for images.
+- Actions: Enter `get id:N --paste` (overlay closes first); Shift+Enter
+  `get id:N --copy`; Ctrl+P `pin`/`unpin`; Ctrl+A inline alias prompt (`alias`,
+  validates `[a-z0-9_-]{1,32}` live); Ctrl+E `omarchy-launch-tui --app-id=org.omarchy.clipstack clipstack edit id:N`
+  (overlay closes); Ctrl+Backspace `delete`. Every action is also a button with its
+  shortcut shown; mouse click selects, double-click pastes.
+- Groups: PINNED, TODAY, YESTERDAY, EARLIER; while searching, one MATCHES group
+  with the query highlighted in each row. Footer: `N clips · P pinned`.
+- Look: the C palette (accent `#A9B4FF`), Noto Sans / JetBrains Mono, panel
+  1040x620 centred over a dimmed scrim. No `Commons.Color.menu` tokens.
+- Pure logic (grouping, relative age, highlight spans, key map, alias validation)
+  lives in `Logic.js` with node unit tests (`omarchy/clipstack/tests/*.test.mjs`,
+  run by `scripts/test-overlay.sh`); QML is checked with `qmllint`.
+- Install: `scripts/install-omarchy-plugin.sh` symlinks the folder into
+  `~/.config/omarchy/plugins/solsystemlabs.clipstack` and runs
+  `omarchy plugin enable`.
+
+#### 5.5 Desktop integration (on this machine, after 5.1-5.4 land)
+
+- Super+Ctrl+V: `omarchy-shell shell toggle solsystemlabs.clipstack '{}'`; the TUI
+  window rule stays for `clipstack edit`.
+- `omarchy plugin disable omarchy.clipboard`, so only ClipStack captures history.
+  Its old `~/.local/state/omarchy/clipboard-history.json` (mode 644) is the user's to
+  delete.
+
+#### 5.6 Tests and docs
+
+- TDD as in every step: migration v1->v2 on a populated v1 store, image ingest and
+  bump, NotPng/too-large/sensitive skips, total cap with images, export/check of
+  images, daemon image capture through the fakes, every new CLI command and its
+  exit codes, `--image-path` modes and atomic write.
+- README: images, the new commands, the overlay (install, keys), the omarchy
+  binding. FEATURE_PLAN: note image support as done.
 
 ---
 
