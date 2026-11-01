@@ -1205,12 +1205,15 @@ evicted by `max_entries` or `max_total_bytes`).
 > validate`, the install script against fake omarchy commands, headless interaction
 > checks of Store/CliCall; `--render` draws C1-C4 headless against
 > `tests/fake-clipstack` with omarchy's real Commons, once in the current theme
-> and once in flexoki-light, plus a live switch between them). The live shell
-> test (focus, paste into the previous window, edit launcher, a real
-> `omarchy theme set`) is still to do.
+> and once in flexoki-light, plus a live switch between them). Live: after
+> `omarchy-restart-shell` the overlay loads with the theme colours and the
+> right-aligned action bar, with the search field focused, and a real screenshot
+> copy arrives as an image row. Paste into the previous window, the edit
+> launcher and a real `omarchy theme set` are still to try.
 
 - Manifest: id `solsystemlabs.clipstack`, kind `overlay`, `keepLoaded: true`, entry
-  point `Overlay.qml`. Validated with `omarchy plugin validate`.
+  point `Overlay.qml`. Validated with `omarchy plugin validate`. omarchy-shell never
+  replaces a kept-loaded instance, so code changes need `omarchy-restart-shell`.
 - It never captures anything: all data comes from the CLI through
   `Quickshell.Io.Process`. `clipstack list --json` on open and after each action;
   `clipstack search <q> --json` debounced 60 ms (typing never re-runs the list); `clipstack get id:N` for the selected text entry (preview shows

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Installs the ClipStack overlay into omarchy-shell: links this repo's
 # omarchy/clipstack folder to ~/.config/omarchy/plugins/solsystemlabs.clipstack
-# and enables the plugin. Edits to the repo take effect on the next shell
-# reload. --uninstall disables the plugin and removes the link.
+# and enables the plugin. The plugin is keepLoaded, so edits to the repo
+# take effect only after omarchy-restart-shell. --uninstall disables the
+# plugin and removes the link.
 #
 # Never replaces anything at the plugin path that is not a symlink.
 set -euo pipefail

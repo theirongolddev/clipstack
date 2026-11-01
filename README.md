@@ -531,7 +531,7 @@ On [Omarchy](https://omarchy.org), ClipStack also comes as an omarchy-shell over
 
 The overlay never reads the clipboard or the history itself: every list, search, preview and action runs the `clipstack` CLI (`list --json`, `search --json`, `get`, `get --image-path`, `get --paste`, `get --copy`, `pin`, `unpin`, `alias`, `delete`, `edit`), so the daemon stays the only thing that captures copies. If a command fails, its error shows in the panel's footer. The terminal picker (`clipstack pick`) stays for other desktops and SSH sessions.
 
-Install it from a checkout (it links the folder, so `git pull` updates the plugin):
+Install it from a checkout (it links the folder, so `git pull` updates the plugin). The plugin stays loaded between opens, and omarchy-shell never swaps out a kept-loaded plugin, so run `omarchy-restart-shell` after updating it:
 
 ```bash
 scripts/install-omarchy-plugin.sh              # link to ~/.config/omarchy/plugins/solsystemlabs.clipstack and enable
