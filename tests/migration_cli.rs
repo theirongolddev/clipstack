@@ -174,3 +174,85 @@ fn clear_reports_count() {
     let (stdout, _) = ok(&env, &["clear"], None);
     assert!(stdout.contains("Clipboard history cleared (2 entries)"), "stdout: {stdout}");
 }
+
+/// The `content` field of each exported JSONL line.
+fn exported_contents(jsonl: &str) -> Vec<String> {
+    jsonl
+        .lines()
+        .map(|l| {
+            let row: serde_json::Value = serde_json::from_str(l).expect("one JSON object per line");
+            row["content"].as_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn export_jsonl_roundtrips_content() {
+    let env = TestEnv::new();
+    let contents = ["plain", "multi\nline\n", "quotes \" and \\ backslash", "unicode \u{e9}\u{1f600}"];
+    for c in contents {
+        ok(&env, &["copy"], Some(c));
+    }
+    let (stdout, _) = ok(&env, &["export"], None);
+    assert_eq!(exported_contents(&stdout), contents, "oldest first, byte-exact");
+}
+
+#[test]
+fn export_file_created_0600() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("secret-ish"));
+    let path = env.root().join("backup.jsonl");
+    let (stdout, stderr) = ok(&env, &["export", "-o", path.to_str().unwrap()], None);
+    assert!(stdout.is_empty(), "nothing on stdout with -o: {stdout}");
+    assert!(stderr.contains("Exported 1 entries"), "stderr: {stderr}");
+    assert_eq!(mode(&path), 0o600);
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(exported_contents(&written), ["secret-ish"]);
+}
+
+#[test]
+fn export_refuses_overwrite_without_force() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("fresh"));
+    let path = env.root().join("existing.jsonl");
+    std::fs::write(&path, "keep me").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let out = run(&env, &["export", "-o", path.to_str().unwrap()], None);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--force"), "stderr: {stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+
+    ok(&env, &["export", "-o", path.to_str().unwrap(), "--force"], None);
+    assert_eq!(exported_contents(&std::fs::read_to_string(&path).unwrap()), ["fresh"]);
+    assert_eq!(mode(&path), 0o600, "an overwritten file is tightened too");
+}
+
+
+#[test]
+fn export_to_closed_pipe_exits_quietly() {
+    let env = TestEnv::new();
+    // Bigger than a pipe buffer, so the write fails with EPIPE
+    let big = "x".repeat(256 * 1024);
+    ok(&env, &["copy"], Some(&big));
+
+    let mut child = env
+        .cmd()
+        .arg("export")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn clipstack");
+    drop(child.stdout.take()); // like `clipstack export | head -0`
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "status {:?}, stderr: {stderr}", out.status);
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+}

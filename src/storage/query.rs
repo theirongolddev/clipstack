@@ -4,6 +4,8 @@ use super::{ClipEntry, Counts, EntryId, ListOrder, Source, Storage};
 use rusqlite::types::Value;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, Row};
+use serde::Serialize;
+use std::io::Write;
 
 /// Columns for `entry_from_row`, in order.
 pub(crate) const ENTRY_COLUMNS: &str =
@@ -161,12 +163,66 @@ impl Storage {
             .optional()?
             .with_context(|| format!("No entry with id {id}"))
     }
+
+    /// Write every entry as one JSON object per line, oldest first (by
+    /// `last_used`), with its content. One statement, so one consistent
+    /// snapshot. Returns the number of entries written.
+    pub fn export_jsonl(&self, out: &mut dyn Write) -> Result<usize> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ENTRY_COLUMNS}, content FROM entries ORDER BY last_used ASC, id ASC"
+        ))?;
+        let mut rows = stmt.query([])?;
+        let mut written = 0;
+        while let Some(row) = rows.next()? {
+            let entry = entry_from_row(row)?;
+            let content: String = row.get(ENTRY_COLUMN_COUNT)?;
+            let line = ExportRow {
+                id: entry.id,
+                created_at: entry.created_at,
+                last_used: entry.last_used,
+                size: entry.size,
+                pinned: entry.pinned,
+                alias: entry.alias.as_deref(),
+                source: entry.source,
+                mime: &entry.mime,
+                content: &content,
+            };
+            serde_json::to_writer(&mut *out, &line)?;
+            out.write_all(b"\n")?;
+            written += 1;
+        }
+        out.flush()?;
+        Ok(written)
+    }
+}
+
+/// Number of columns in `ENTRY_COLUMNS`.
+const ENTRY_COLUMN_COUNT: usize = 9;
+
+/// One `export` line: the entry without its preview, plus the content.
+#[derive(Serialize)]
+struct ExportRow<'a> {
+    id: EntryId,
+    created_at: i64,
+    last_used: i64,
+    size: usize,
+    pinned: bool,
+    alias: Option<&'a str>,
+    source: Source,
+    mime: &'a str,
+    content: &'a str,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{ListOrder, test_storage};
+
+    #[test]
+    fn entry_column_count_matches_entry_columns() {
+        assert_eq!(ENTRY_COLUMNS.split(',').count(), ENTRY_COLUMN_COUNT);
+    }
 
     fn add(storage: &Storage, content: &str, at: i64) -> EntryId {
         match storage.ingest_at(content, Source::Copy, &[], at).unwrap() {
@@ -297,5 +353,51 @@ mod tests {
         });
         assert_eq!(ids(storage.search("number", 200).unwrap()), before);
         assert_eq!(before.len(), 19);
+    }
+
+    #[test]
+    fn export_jsonl_oldest_first_with_all_fields() {
+        let (storage, _dir) = test_storage();
+        let a = add(&storage, "line one\nline \"two\" \u{e9}", 1_000);
+        let b = add(&storage, "second", 2_000);
+        storage.ingest_at("line one\nline \"two\" \u{e9}", Source::Copy, &[], 3_000).unwrap();
+        storage.set_alias(b, Some("sig")).unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(storage.export_jsonl(&mut out).unwrap(), 2);
+        let text = String::from_utf8(out).unwrap();
+        let rows: Vec<serde_json::Value> =
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(text.ends_with('\n'));
+
+        // Oldest first by last_used: b (2000), then the re-copied a (3000)
+        assert_eq!(rows[0]["id"], b);
+        assert_eq!(rows[0]["alias"], "sig");
+        assert_eq!(rows[0]["pinned"], true);
+        assert_eq!(rows[1]["id"], a);
+        assert_eq!(rows[1]["content"], "line one\nline \"two\" \u{e9}");
+        assert_eq!(rows[1]["created_at"], 1_000);
+        assert_eq!(rows[1]["last_used"], 3_000);
+        assert_eq!(rows[1]["size"], "line one\nline \"two\" \u{e9}".len());
+        assert_eq!(rows[1]["alias"], serde_json::Value::Null);
+        assert_eq!(rows[1]["source"], "copy");
+        assert_eq!(rows[1]["mime"], "text/plain;charset=utf-8");
+        let keys: Vec<&str> = rows[1].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut expected = vec![
+            "id", "created_at", "last_used", "size", "pinned", "alias", "source", "mime", "content",
+        ];
+        expected.sort_unstable();
+        let mut keys = keys;
+        keys.sort_unstable();
+        assert_eq!(keys, expected, "exactly the documented fields, no preview");
+    }
+
+    #[test]
+    fn export_jsonl_empty_store_writes_nothing() {
+        let (storage, _dir) = test_storage();
+        let mut out = Vec::new();
+        assert_eq!(storage.export_jsonl(&mut out).unwrap(), 0);
+        assert!(out.is_empty());
     }
 }

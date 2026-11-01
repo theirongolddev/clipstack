@@ -6,12 +6,13 @@ mod picker;
 mod storage;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use storage::{IngestOutcome, ListOrder, Source};
 
@@ -72,6 +73,17 @@ enum Commands {
 
     /// Attempt to recover from corrupted storage
     Recover,
+
+    /// Write the whole history as JSON Lines, oldest first
+    Export {
+        /// Write to FILE (created 0600) instead of stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Overwrite FILE if it exists
+        #[arg(long, requires = "output")]
+        force: bool,
+    },
 
     /// Start a TCP server for remote clipboard (use with SSH reverse tunnel)
     Serve {
@@ -244,6 +256,26 @@ fn main() -> Result<()> {
             println!("Recovery complete. {} entries.", storage.counts()?.total);
         }
 
+        Some(Commands::Export { output, force }) => match output {
+            Some(path) => {
+                let mut file = BufWriter::new(create_export_file(&path, force)?);
+                let n = storage.export_jsonl(&mut file)?;
+                file.into_inner()
+                    .map_err(|e| e.into_error())?
+                    .sync_all()
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                eprintln!("Exported {n} entries to {}", path.display());
+            }
+            None => {
+                let mut out = BufWriter::new(io::stdout().lock());
+                if let Err(e) = storage.export_jsonl(&mut out)
+                    && !is_broken_pipe(&e)
+                {
+                    return Err(e);
+                }
+            }
+        },
+
         Some(Commands::Serve { port }) => {
             serve_clipboard(storage, port)?;
         }
@@ -403,6 +435,41 @@ fn print_status(
 }
 
 /// Generate shell completions
+/// Create the `export -o` file 0600. Without `force` an existing file is an
+/// error; with it the file is truncated and tightened to 0600 before any
+/// content is written.
+fn create_export_file(path: &Path, force: bool) -> Result<File> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut options = perms::private_file_options();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let file = options.open(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!("{} already exists; use --force to overwrite it", path.display())
+        } else {
+            anyhow::Error::new(e).context(format!("Failed to create {}", path.display()))
+        }
+    })?;
+    file.set_permissions(std::fs::Permissions::from_mode(perms::FILE_MODE))
+        .with_context(|| format!("Failed to chmod {}", path.display()))?;
+    Ok(file)
+}
+
+/// Whether an error came from writing to a closed pipe (`export | head`).
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let kind = cause
+            .downcast_ref::<io::Error>()
+            .map(io::Error::kind)
+            .or_else(|| cause.downcast_ref::<serde_json::Error>().and_then(|e| e.io_error_kind()));
+        kind == Some(io::ErrorKind::BrokenPipe)
+    })
+}
+
 fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
