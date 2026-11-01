@@ -24,7 +24,7 @@ Item {
   property bool loaded: false
   property real now: Date.now()
 
-  property var imagePaths: ({})    // entry id -> file URL ("" = failed), for the session
+  property var imagePaths: ({})    // entry id -> file URL (null = asked, "" = failed)
   property var contentCache: ({})  // entry id -> text
   property var contentOrder: []
   property string previewText: ""
@@ -56,6 +56,7 @@ Item {
     if (!root.statusWhileClosed) root.status = "";
     root.statusWhileClosed = false;
     root.pendingAction = "";
+    root.forgetFailedImages();
     // The last session may have closed on a search: show the history as
     // last listed until the fresh list arrives
     root.resetSelection = true;
@@ -128,6 +129,14 @@ Item {
     next[id] = null; // requested
     root.imagePaths = next;
     imageCall.run(Logic.imagePathArgv(root.bin, id), id);
+  }
+
+  // A failed --image-path (say, a locked database) is tried again on the
+  // next open instead of staying "unavailable" for the shell's lifetime
+  function forgetFailedImages() {
+    var next = {};
+    for (const id in root.imagePaths) if (root.imagePaths[id] !== "") next[id] = root.imagePaths[id];
+    root.imagePaths = next;
   }
 
   function imageUrl(id) {

@@ -124,6 +124,28 @@ ShellRoot {
           shellRoot.check("one delete per entry", deletes === 1, deletes + " deletes");
         });
       }],
+      [300, function () {
+        shellRoot.sh("printf get > \"$1/fail\"");
+      }],
+      [200, function () {
+        store.select(shellRoot.rowIndex(6));
+      }],
+      [800, function () {
+        shellRoot.check("a failed image path shows as unavailable", store.imagePaths[6] === "",
+          JSON.stringify(store.imagePaths[6]));
+        shellRoot.sh("rm \"$1/fail\"");
+      }],
+      [200, function () {
+        store.close();
+        store.open("{}");
+      }],
+      [800, function () {
+        store.select(shellRoot.rowIndex(6));
+      }],
+      [800, function () {
+        shellRoot.check("an image path that failed is tried again on the next open", store.imageUrl(6) !== "",
+          JSON.stringify(store.imagePaths[6]));
+      }],
     ];
     stepTimer.interval = 1;
     stepTimer.start();
