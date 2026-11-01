@@ -253,14 +253,10 @@ impl Storage {
     }
 
     pub fn save_entry(&self, content: &str) -> Result<ClipEntry> {
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        // Generate unique ID using timestamp + nanoseconds to prevent collisions
-        // within the same millisecond (e.g., rapid copies, concurrent daemon + picker)
-        let unique_suffix = std::time::SystemTime::now()
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() % 1000) // Last 3 digits of nanoseconds
-            .unwrap_or(0);
-        let id = format!("{}_{:03}", timestamp, unique_suffix);
+            .unwrap_or_default();
+        let (timestamp, id) = self.generate_id(now);
 
         let hash = util::compute_hash_string(content);
 
@@ -302,6 +298,24 @@ impl Storage {
 
         self.save_index(&index)?;
         Ok(entry)
+    }
+
+    /// Build a unique entry ID "{millis}_{nnn}" from a single clock reading.
+    ///
+    /// The suffix starts at the sub-millisecond microseconds and is bumped
+    /// past any ID whose content file already exists, so a same-millisecond
+    /// save can never overwrite another entry's content.
+    fn generate_id(&self, now: std::time::Duration) -> (i64, String) {
+        let timestamp = now.as_millis() as i64;
+        let start = now.subsec_micros() % 1000;
+        for offset in 0..1000 {
+            let id = format!("{}_{:03}", timestamp, (start + offset) % 1000);
+            if !self.content_path(&id).exists() {
+                return (timestamp, id);
+            }
+        }
+        // All 1000 suffixes taken within one millisecond: fall back to nanos
+        (timestamp, format!("{}_{}", timestamp, now.subsec_nanos()))
     }
 
     pub fn load_content(&self, id: &str) -> Result<String> {
@@ -599,6 +613,35 @@ mod tests {
         assert_eq!(index.entries[0].preview, "first"); // Now at front
         assert_eq!(index.entries[1].preview, "third");
         assert_eq!(index.entries[2].preview, "second");
+    }
+
+    #[test]
+    fn test_generate_id_derives_timestamp_from_same_clock_reading() {
+        let (storage, _dir) = test_storage();
+        let now = std::time::Duration::new(1_736_789_123, 456_789_000); // .456789s
+        let (timestamp, id) = storage.generate_id(now);
+        assert_eq!(timestamp, 1_736_789_123_456);
+        assert_eq!(id, "1736789123456_789");
+    }
+
+    #[test]
+    fn test_generate_id_skips_ids_already_on_disk() {
+        let (storage, _dir) = test_storage();
+        let now = std::time::Duration::new(1_736_789_123, 456_789_000);
+        fs::write(storage.content_path("1736789123456_789"), "existing").unwrap();
+        fs::write(storage.content_path("1736789123456_790"), "existing").unwrap();
+
+        let (_, id) = storage.generate_id(now);
+        assert_eq!(id, "1736789123456_791", "must never overwrite another entry's file");
+    }
+
+    #[test]
+    fn test_rapid_saves_have_unique_ids() {
+        let (storage, _dir) = test_storage();
+        let ids: HashSet<String> = (0..50)
+            .map(|i| storage.save_entry(&format!("rapid {}", i)).unwrap().id)
+            .collect();
+        assert_eq!(ids.len(), 50);
     }
 
     #[test]
