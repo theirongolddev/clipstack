@@ -400,4 +400,63 @@ mod tests {
         assert_eq!(storage.export_jsonl(&mut out).unwrap(), 0);
         assert!(out.is_empty());
     }
+
+    /// 500 KB of word-like text, different for each `seed`.
+    fn perf_content(seed: u64) -> String {
+        const WORDS: &[&str] =
+            &["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india"];
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        // The needle goes first: only the first 256 K characters are indexed
+        let mut out = format!("needle{seed}x ");
+        out.reserve(500 * 1024);
+        while out.len() < 500 * 1024 {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let word = WORDS[usize::try_from(state >> 60).unwrap() % WORDS.len()];
+            out.push_str(word);
+            out.push_str(&(state >> 48 & 0xff).to_string());
+            out.push(if state & 0x1f == 0 { '\n' } else { ' ' });
+        }
+        out
+    }
+
+    /// Step 1 performance targets (1.5 Test plan). Release build only:
+    /// `cargo test --release -- --ignored perf_`
+    #[test]
+    #[ignore = "performance: run with cargo test --release -- --ignored perf_"]
+    fn perf_100_entries_of_500kb() {
+        use std::time::{Duration, Instant};
+        let (storage, _dir) = test_storage();
+        for i in 0..100 {
+            storage.ingest_at(&perf_content(i), Source::Copy, &[], i64::try_from(i).unwrap()).unwrap();
+        }
+
+        let started = Instant::now();
+        let entries = storage.list(ListOrder::PinnedFirst, None).unwrap();
+        let list_time = started.elapsed();
+        assert_eq!(entries.len(), 100);
+
+        let started = Instant::now();
+        let content = storage.load_content(entries[50].id).unwrap();
+        let load_time = started.elapsed();
+        assert!(content.len() > 500 * 1024);
+
+        let fresh = perf_content(1_000);
+        let started = Instant::now();
+        storage.ingest_at(&fresh, Source::Copy, &[], 1_000).unwrap();
+        let ingest_time = started.elapsed();
+
+        let started = Instant::now();
+        let hits = storage.search("needle42x", 200).unwrap();
+        let search_time = started.elapsed();
+        assert_eq!(hits.len(), 1);
+
+        eprintln!(
+            "perf: list {list_time:?}, load_content {load_time:?}, \
+             ingest 500 KB {ingest_time:?}, search {search_time:?}"
+        );
+        assert!(list_time < Duration::from_millis(10), "list took {list_time:?}");
+        assert!(load_time < Duration::from_millis(20), "load_content took {load_time:?}");
+        assert!(ingest_time < Duration::from_millis(100), "ingest took {ingest_time:?}");
+        assert!(search_time < Duration::from_millis(20), "search took {search_time:?}");
+    }
 }

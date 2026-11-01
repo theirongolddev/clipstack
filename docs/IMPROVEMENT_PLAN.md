@@ -589,7 +589,7 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 #### 1.5 Test plan
 
 - **Unit tests:** as listed. Time-dependent tests use `ingest_at` with fixed `now_ms`. There are no sleeps.
-- **Performance** (replaces `test_performance_large_entries`), 100 × 500 KB entries, `#[ignore]` and run with `cargo test --release -- --ignored` at the end of the step (debug builds of bundled SQLite and trigram indexing of 256 K characters per entry won't meet these):
+- **Performance** (replaces `test_performance_large_entries`; `query::tests::perf_100_entries_of_500kb`), 100 × 500 KB entries, `#[ignore]` and run with `cargo test --release -- --ignored perf_` at the end of the step (debug builds of bundled SQLite and trigram indexing of 256 K characters per entry won't meet these). The `perf_` filter matters: a bare `--ignored` also runs the `clipboard.rs` round-trip tests, which use the real `wl-copy`/`wl-paste` and overwrite the desktop clipboard. The searched term sits in the first 256 K characters, since nothing past the FTS window is indexed. Measured in release: list 0.1 ms, load_content 0.3 ms, ingest 85 ms, search 0.5 ms:
   - `list(PinnedFirst, None)` < 10 ms
   - `load_content` < 20 ms
   - `ingest` of 500 KB < 100 ms
