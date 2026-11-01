@@ -25,15 +25,18 @@ case "${1:-}" in
         ;;
 esac
 
-# Write to temp files and rename, so a reader never sees half a selection
+# Write to temp files and rename, so a reader never sees half a selection.
+# The names are per process: concurrent copies must not share a temp file.
+content_tmp="$dir/content.tmp.$$"
+types_tmp="$dir/types.tmp.$$"
 if [ "$#" -gt 0 ]; then
-    printf '%s' "$*" > "$dir/content.tmp"
+    printf '%s' "$*" > "$content_tmp"
 else
-    cat > "$dir/content.tmp"
+    cat > "$content_tmp"
 fi
 {
     printf 'text/plain;charset=utf-8\ntext/plain\nUTF8_STRING\nTEXT\nSTRING\n'
     [ "$sensitive" -eq 0 ] || printf 'x-kde-passwordManagerHint\n'
-} > "$dir/types.tmp"
-mv "$dir/types.tmp" "$dir/types"
-mv "$dir/content.tmp" "$dir/content"
+} > "$types_tmp"
+mv "$types_tmp" "$dir/types"
+mv "$content_tmp" "$dir/content"
