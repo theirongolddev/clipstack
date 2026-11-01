@@ -1,14 +1,6 @@
-//! SQLite storage (WAL mode, FTS5 search index).
-//!
-//! `json` is the old `index.json` + content-file store. It stays the live
-//! storage for the CLI, daemon and picker until commit 1-12.
+//! SQLite storage (WAL mode, FTS5 search index). An old `index.json` +
+//! content-file store is imported once by `legacy`.
 
-// The SQLite storage has no callers until commit 1-12 switches the CLI,
-// daemon and picker to it; this allow is removed there.
-#![allow(dead_code)]
-
-#[warn(dead_code)] // json is the live storage until 1-12: keep its lint on
-pub mod json;
 mod ingest;
 mod legacy;
 mod query;

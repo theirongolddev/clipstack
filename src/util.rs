@@ -8,13 +8,6 @@ pub fn compute_hash(content: &str) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Compute SHA256 hash and return as formatted string (sha256:hex)
-pub fn compute_hash_string(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
-}
-
 /// Format bytes into human-readable size
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {

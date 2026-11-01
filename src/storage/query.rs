@@ -62,6 +62,10 @@ impl Storage {
     }
 
     /// The entry at 1-based `position` in recency order.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "storage API; first caller is Step 3 `get`")
+    )]
     pub fn nth(&self, position: usize) -> Result<Option<ClipEntry>> {
         let Some(offset) = position.checked_sub(1) else {
             return Ok(None);
@@ -110,6 +114,10 @@ impl Storage {
         Ok(entries.collect::<rusqlite::Result<_>>()?)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "storage API; first caller is Step 3 `get`")
+    )]
     pub fn get(&self, id: EntryId) -> Result<Option<ClipEntry>> {
         let conn = self.conn();
         let sql = format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id = ?1");
@@ -117,6 +125,10 @@ impl Storage {
     }
 
     /// The pinned entry with this alias.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "storage API; first caller is Step 3 `get`")
+    )]
     pub fn by_alias(&self, alias: &str) -> Result<Option<ClipEntry>> {
         let conn = self.conn();
         let sql = format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE alias = ?1");

@@ -95,6 +95,7 @@ impl IngestPolicy {
     }
 
     /// Total patterns, user and built-in.
+    #[cfg(test)]
     pub fn pattern_count(&self) -> usize {
         self.ignore.len()
     }

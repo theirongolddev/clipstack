@@ -1,6 +1,6 @@
 use crate::clipboard::Clipboard;
 use crate::daemon::Daemon;
-use crate::storage::json::{ClipEntry, Storage};
+use crate::storage::{ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
 use crate::util;
 use anyhow::Result;
 use crossterm::{
@@ -22,7 +22,7 @@ use ratatui::{
     },
     Frame, Terminal,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{stdout, Stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -48,7 +48,7 @@ enum StatusLevel {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum MatchLocation {
     Preview, // Match found in preview (fast path)
-    Content, // Match found in full content (lazy load)
+    Content, // Match found in full content (FTS search)
 }
 
 /// Entry with search metadata for filtered results
@@ -84,7 +84,7 @@ pub struct Picker {
     scroll_state: ScrollbarState,
     search_query: String,
     preview_content: Option<String>,
-    preview_id: Option<String>,
+    preview_id: Option<EntryId>,
     matcher: SkimMatcherV2,
     mode: Mode,
     status_message: Option<(String, StatusLevel, Instant)>,
@@ -98,8 +98,7 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(storage: Storage) -> Result<Self> {
-        let mut entries = storage.load_index()?.entries;
-        order_pinned_first(&mut entries);
+        let entries = storage.list(ListOrder::PinnedFirst, None)?;
 
         let mut picker = Self {
             storage,
@@ -131,14 +130,11 @@ impl Picker {
         Ok(picker)
     }
 
-    /// Two-phase search: first search previews (fast), then full content (lazy load)
-    ///
-    /// Performance limits to prevent UI freezes:
-    /// - Stop content search after MAX_CONTENT_MATCHES matches found
-    /// - Stop content search after MAX_FILE_LOADS files loaded
+    /// Two-phase search: fuzzy match on previews, then the storage's
+    /// full-content search for entries whose preview didn't match.
     fn filter_entries(&self, query: &str) -> Vec<FilteredEntry> {
-        const MAX_CONTENT_MATCHES: usize = 10;
-        const MAX_FILE_LOADS: usize = 50;
+        /// Most full-content hits taken from storage per query
+        const MAX_CONTENT_RESULTS: usize = 200;
 
         let mut results: Vec<FilteredEntry> = Vec::new();
 
@@ -153,34 +149,28 @@ impl Picker {
             }
         }
 
-        // Phase 2: For entries not matched in preview, search full content
-        // Limited to prevent performance degradation with large histories
+        // Phase 2: full-content search (substring per token, case-insensitive)
+        // for entries whose preview didn't match. They rank after preview hits.
         let preview_matched: HashSet<usize> = results.iter().map(|r| r.index).collect();
-
-        let mut content_matches = 0;
-        let mut file_loads = 0;
-
-        for (idx, entry) in self.entries.iter().enumerate() {
-            // Stop if we've hit either limit
-            if content_matches >= MAX_CONTENT_MATCHES || file_loads >= MAX_FILE_LOADS {
-                break;
-            }
-
-            if preview_matched.contains(&idx) {
-                continue; // Already matched in preview
-            }
-
-            // Lazy load content only when needed
-            file_loads += 1;
-            if let Ok(content) = self.storage.load_content(&entry.id)
-                && let Some(score) = self.matcher.fuzzy_match(&content, query)
+        let index_of: HashMap<EntryId, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (e.id, idx))
+            .collect();
+        let hits = self
+            .storage
+            .search(query, MAX_CONTENT_RESULTS)
+            .unwrap_or_default();
+        for hit in hits {
+            if let Some(&idx) = index_of.get(&hit.id)
+                && !preview_matched.contains(&idx)
             {
                 results.push(FilteredEntry {
                     index: idx,
-                    score,
+                    score: 0,
                     match_location: MatchLocation::Content,
                 });
-                content_matches += 1;
             }
         }
 
@@ -232,9 +222,9 @@ impl Picker {
     /// Toggle pin status of selected entry
     fn toggle_pin_selected(&mut self) -> Result<()> {
         if let Some(idx) = self.selected.selected().and_then(|i| self.filtered.get(i).copied()) {
-            let entry_id = self.entries[idx].id.clone();
+            let entry_id = self.entries[idx].id;
 
-            match self.storage.toggle_pin(&entry_id) {
+            match self.storage.toggle_pin(entry_id) {
                 Ok(is_pinned) => {
                     // Update local state
                     self.entries[idx].pinned = is_pinned;
@@ -255,7 +245,7 @@ impl Picker {
 
     /// Sort entries: pinned first, each group kept in recency (index) order
     fn sort_entries_by_pin(&mut self) {
-        let selected_id = self.selected_entry().map(|e| e.id.clone());
+        let selected_id = self.selected_entry().map(|e| e.id);
 
         order_pinned_first(&mut self.entries);
 
@@ -284,21 +274,19 @@ impl Picker {
     }
 
     fn load_preview(&mut self) {
-        let entry_id = self.selected_entry().map(|e| e.id.clone());
+        let entry_id = self.selected_entry().map(|e| e.id);
 
         match entry_id {
-            Some(id) if self.preview_id.as_ref() != Some(&id) => {
-                match self.storage.load_content(&id) {
-                    Ok(content) => {
-                        self.preview_content = Some(content);
-                        self.preview_id = Some(id);
-                    }
-                    Err(_) => {
-                        self.preview_content = None;
-                        self.preview_id = None;
-                    }
+            Some(id) if self.preview_id != Some(id) => match self.storage.load_content(id) {
+                Ok(content) => {
+                    self.preview_content = Some(content);
+                    self.preview_id = Some(id);
                 }
-            }
+                Err(_) => {
+                    self.preview_content = None;
+                    self.preview_id = None;
+                }
+            },
             None => {
                 self.preview_content = None;
                 self.preview_id = None;
@@ -314,7 +302,7 @@ impl Picker {
             None => return,
         };
 
-        if let Ok(content) = self.storage.load_content(&entry.id) {
+        if let Ok(content) = self.storage.load_content(entry.id) {
             // Wrap lines to preview width (typically terminal width - padding)
             let wrap_width = 80;
             self.preview_lines = content
@@ -444,7 +432,7 @@ impl Picker {
 
     fn delete_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.selected_entry().cloned() {
-            let content = self.storage.load_content(&entry.id)?;
+            let content = self.storage.load_content(entry.id)?;
             let preview: String = entry.preview.chars().take(30).collect();
             let was_pinned = entry.pinned;
 
@@ -455,7 +443,7 @@ impl Picker {
                 deleted_at: Instant::now(),
             });
 
-            self.storage.delete_entry(&entry.id)?;
+            self.storage.delete_entry(entry.id)?;
             self.entries.retain(|e| e.id != entry.id);
             self.update_filter();
             self.load_preview();
@@ -470,14 +458,24 @@ impl Picker {
         if let Some(deleted) = self.last_deleted.take() {
             if deleted.deleted_at.elapsed() < UNDO_WINDOW {
                 let preview: String = deleted.entry.preview.chars().take(30).collect();
-                let restored = self.storage.save_entry(&deleted.content)?;
+                let restored = match self.storage.ingest(&deleted.content, Source::Picker, &[])? {
+                    IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry) => entry,
+                    IngestOutcome::Skipped(reason) => {
+                        let reason = self.storage.policy().describe_skip(&reason);
+                        self.set_status(format!("Can't restore: {reason}"), StatusLevel::Warning);
+                        return Ok(());
+                    }
+                };
 
+                // Best effort: the pin limit or a reused alias may refuse
                 if deleted.was_pinned {
-                    let _ = self.storage.set_pinned(&restored.id, true);
+                    let _ = self.storage.set_pinned(restored.id, true);
+                }
+                if let Some(alias) = deleted.entry.alias.as_deref() {
+                    let _ = self.storage.set_alias(restored.id, Some(alias));
                 }
 
-                let index = self.storage.load_index()?;
-                self.entries = index.entries;
+                self.entries = self.storage.list(ListOrder::PinnedFirst, None)?;
                 self.sort_entries_by_pin();
                 self.update_filter();
                 self.load_preview();
@@ -604,7 +602,7 @@ impl Picker {
             .enumerate()
             .map(|(filtered_pos, &idx)| {
                 let entry = &self.entries[idx];
-                let time = util::format_relative_time(entry.timestamp);
+                let time = util::format_relative_time(entry.last_used);
                 let size = util::format_size(entry.size);
 
                 // Check if this is a content match (not preview match)
@@ -795,7 +793,7 @@ impl Picker {
         // Normal preview rendering (Focus::List mode)
         let (content, metadata) = if let Some(entry) = self.selected_entry() {
             let content = self.preview_content.as_deref().unwrap_or("(loading...)");
-            let time = util::format_relative_time(entry.timestamp);
+            let time = util::format_relative_time(entry.last_used);
             let size = util::format_size(entry.size);
             (content, format!("Preview - {} - {}", size, time))
         } else {
@@ -997,7 +995,7 @@ impl Picker {
             // Select
             KeyCode::Enter => {
                 if let Some(entry) = self.selected_entry() {
-                    let content = self.storage.load_content(&entry.id)?;
+                    let content = self.storage.load_content(entry.id)?;
                     return Ok(Some(Some(content)));
                 }
             }
@@ -1083,7 +1081,7 @@ impl Picker {
             // Select from search
             KeyCode::Enter => {
                 if let Some(entry) = self.selected_entry() {
-                    let content = self.storage.load_content(&entry.id)?;
+                    let content = self.storage.load_content(entry.id)?;
                     return Ok(Some(Some(content)));
                 }
             }
@@ -1126,15 +1124,14 @@ impl Picker {
     }
 }
 
-/// Stable sort: pinned entries first, preserving the index's recency order
-/// within each group (the index, not timestamps, is the source of truth for
-/// recency since re-copies move entries to the front).
+/// Stable sort: pinned entries first, keeping the recency order within each
+/// group (entries come from storage in recency order).
 fn order_pinned_first(entries: &mut [ClipEntry]) {
     entries.sort_by_key(|e| !e.pinned);
 }
 
 /// Arguments for auto-spawning the daemon against the picker's storage.
-/// The limit is deliberately omitted so the daemon reuses the stored one.
+/// The limit is deliberately omitted so the daemon reuses the saved one.
 fn daemon_spawn_args(storage_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
     vec![
         "--storage-dir".into(),
@@ -1202,16 +1199,32 @@ pub fn pick_and_paste(storage: Storage) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::IngestPolicy;
     use tempfile::TempDir;
 
-    // Helper: Create a test storage with entries
+    // Helper: Create a test storage with entries, oldest first
     fn create_test_storage(entries: &[&str]) -> (TempDir, Storage) {
         let temp = TempDir::new().unwrap();
-        let storage = Storage::new(temp.path().to_path_buf(), 100).unwrap();
-        for content in entries {
-            storage.save_entry(content).unwrap();
+        let storage = Storage::open(
+            temp.path().to_path_buf(),
+            Some(100),
+            IngestPolicy::default(),
+        )
+        .unwrap();
+        for (i, content) in entries.iter().enumerate() {
+            storage
+                .ingest_at(content, Source::Copy, &[], i as i64 + 1)
+                .unwrap();
         }
         (temp, storage)
+    }
+
+    fn previews(picker: &Picker) -> Vec<&str> {
+        picker
+            .filtered
+            .iter()
+            .map(|&i| picker.entries[i].preview.as_str())
+            .collect()
     }
 
     // ======== Status line Tests ========
@@ -1247,17 +1260,67 @@ mod tests {
     #[test]
     fn test_pinned_entries_shown_first_on_open() {
         let (_temp, storage) = create_test_storage(&["oldest", "middle", "newest"]);
-        let oldest_id = storage.load_index().unwrap().entries[2].id.clone();
-        storage.toggle_pin(&oldest_id).unwrap();
+        let oldest_id = storage.list(ListOrder::Recency, None).unwrap()[2].id;
+        storage.toggle_pin(oldest_id).unwrap();
 
         let picker = Picker::new(storage).unwrap();
-        let order: Vec<&str> = picker
-            .filtered
-            .iter()
-            .map(|&i| picker.entries[i].preview.as_str())
-            .collect();
-        // Pinned first, then the rest in recency (index) order
-        assert_eq!(order, vec!["oldest", "newest", "middle"]);
+        // Pinned first, then the rest in recency order
+        assert_eq!(previews(&picker), vec!["oldest", "newest", "middle"]);
+    }
+
+    // ======== Undo Tests ========
+
+    #[test]
+    fn undo_restores_deleted_entry_with_pin_and_alias() {
+        let (_temp, storage) = create_test_storage(&["keep", "signature"]);
+        let sig = storage.list(ListOrder::Recency, None).unwrap()[0].id;
+        storage.set_alias(sig, Some("sig")).unwrap();
+        let mut picker = Picker::new(storage).unwrap();
+        assert_eq!(picker.selected_entry().unwrap().preview, "signature");
+
+        picker.delete_selected().unwrap();
+        assert_eq!(previews(&picker), vec!["keep"]);
+        assert_eq!(
+            picker.storage.get(sig).unwrap(),
+            None,
+            "deleted from storage"
+        );
+
+        picker.undo_delete().unwrap();
+        assert_eq!(previews(&picker), vec!["signature", "keep"]);
+        let restored = picker
+            .storage
+            .by_alias("sig")
+            .unwrap()
+            .expect("alias restored");
+        assert!(restored.pinned);
+        assert_eq!(restored.source, Source::Picker);
+        assert_eq!(
+            picker.storage.load_content(restored.id).unwrap(),
+            "signature"
+        );
+    }
+
+    #[test]
+    fn undo_restores_unpinned_entry_unpinned() {
+        let (_temp, storage) = create_test_storage(&["a", "b"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.delete_selected().unwrap();
+        picker.undo_delete().unwrap();
+        let entries = picker.storage.list(ListOrder::Recency, None).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| !e.pinned));
+    }
+
+    #[test]
+    fn undo_after_window_does_not_restore() {
+        let (_temp, storage) = create_test_storage(&["a", "b"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.delete_selected().unwrap();
+        let deleted = picker.last_deleted.as_mut().unwrap();
+        deleted.deleted_at = Instant::now() - UNDO_WINDOW - Duration::from_secs(1);
+        picker.undo_delete().unwrap();
+        assert_eq!(picker.storage.counts().unwrap().total, 1);
     }
 
     // ======== Daemon auto-start Tests ========
@@ -1266,7 +1329,7 @@ mod tests {
     fn test_daemon_spawn_args_use_picker_storage_dir() {
         let args = daemon_spawn_args(std::path::Path::new("/custom/clips"));
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
-        // No --max-entries: the daemon reuses the limit stored in the index
+        // No --max-entries: the daemon reuses the saved limit
         assert_eq!(args, vec!["--storage-dir", "/custom/clips", "daemon"]);
     }
 

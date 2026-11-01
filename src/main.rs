@@ -111,15 +111,13 @@ fn main() -> Result<()> {
     let policy = config.ingest_policy()?;
 
     let storage_dir = cli.storage_dir.unwrap_or_else(storage::Storage::default_dir);
-    if matches!(cli.command, None | Some(Commands::Pick)) {
-        // Default action: open picker (still on the JSON store until 1-12b)
-        picker::pick_and_paste(storage::json::Storage::open(storage_dir, max_entries)?)?;
-        return Ok(());
-    }
     let storage = storage::Storage::open(storage_dir, max_entries, policy)?;
 
     match cli.command {
-        None | Some(Commands::Pick) => unreachable!("handled above"),
+        None | Some(Commands::Pick) => {
+            // Default action: open picker
+            picker::pick_and_paste(storage)?;
+        }
 
         Some(Commands::Copy) => {
             let mut content = String::new();
