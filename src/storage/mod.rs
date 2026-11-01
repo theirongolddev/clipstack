@@ -276,6 +276,12 @@ impl Storage {
                 report.pruned, report.limit
             );
         }
+        if report.unpinned > 0 {
+            eprintln!(
+                "{} older pinned entries were unpinned to stay within the {MAX_PINNED}-pin limit",
+                report.unpinned
+            );
+        }
         if report.skipped > 0 {
             eprintln!(
                 "{} entries were not imported because the storage policy rejects them \

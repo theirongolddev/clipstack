@@ -8,7 +8,8 @@
 
 use super::ingest::{DEFAULT_MIME, IngestPolicy, classify, make_preview, prune_to_max_entries};
 use super::{
-    ABSOLUTE_MAX_ENTRIES, DEFAULT_MAX_ENTRIES, SETTING_MAX_ENTRIES, get_setting, set_setting,
+    ABSOLUTE_MAX_ENTRIES, DEFAULT_MAX_ENTRIES, MAX_PINNED, SETTING_MAX_ENTRIES, get_setting,
+    set_setting,
 };
 use crate::{perms, util};
 use anyhow::{Context, Result};
@@ -68,6 +69,8 @@ pub(super) struct ImportReport {
     pub pruned: usize,
     /// The max_entries limit the import pruned to
     pub limit: usize,
+    /// Pinned entries unpinned to stay within `MAX_PINNED` (oldest first)
+    pub unpinned: usize,
     /// Content files that are not UTF-8 text: moved to the backup, not imported
     pub not_text: usize,
     /// Content files the ingest policy rejects: moved to the backup, not imported
@@ -264,6 +267,13 @@ pub(super) fn import_with(
         .or_else(|| get_setting(&tx, SETTING_MAX_ENTRIES).ok().flatten()?.parse().ok())
         .unwrap_or(DEFAULT_MAX_ENTRIES)
         .clamp(1, ABSOLUTE_MAX_ENTRIES);
+    // The old store had no pin limit: keep the most recently used pins
+    report.unpinned = tx.execute(
+        "UPDATE entries SET pinned = 0, alias = NULL WHERE id IN (
+           SELECT id FROM entries WHERE pinned = 1
+           ORDER BY last_used DESC, id DESC LIMIT -1 OFFSET ?1)",
+        [i64::try_from(MAX_PINNED)?],
+    )?;
     prune_to_max_entries(&tx, limit)?;
     report.limit = limit;
     {
@@ -548,6 +558,33 @@ mod tests {
             .query_row("SELECT value FROM settings WHERE key = 'legacy_imported_count'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, "2", "the entries actually kept");
+    }
+
+    #[test]
+    fn import_caps_pins_at_max_pinned_keeping_most_recent() {
+        use crate::storage::MAX_PINNED;
+        let dir = TempDir::new().unwrap();
+        let n = MAX_PINNED + 5;
+        let ids: Vec<String> = (0..n).map(|i| format!("{}", 1000 + i)).collect();
+        let texts: Vec<String> = (0..n).map(|i| format!("pin {i}")).collect();
+        let legacy: Vec<Legacy<'_>> = (0..n)
+            .map(|i| Legacy { pinned: true, ..entry(&ids[i], 1000 + i as i64, &texts[i]) })
+            .collect();
+        write_legacy(dir.path(), 100, &legacy);
+        let mut conn = connection(&dir);
+        let report =
+            import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 9_000, &|_| Ok(())).unwrap();
+        assert_eq!(report.unpinned, 5);
+        assert_eq!(report.kept, n, "unpinned entries stay in the history");
+        let pinned: Vec<String> = conn
+            .prepare("SELECT content FROM entries WHERE pinned = 1 ORDER BY last_used")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(pinned.len(), MAX_PINNED);
+        assert_eq!(pinned[0], "pin 5", "the oldest five lost their pin");
     }
 
     #[test]

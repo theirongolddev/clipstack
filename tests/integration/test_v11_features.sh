@@ -306,15 +306,21 @@ for i in $(seq 1 30); do
 done
 build_index "$TEST_DIR/test8" 100 "${ENTRIES8[@]}"
 
-# Run stats (which triggers pruning logic)
-$CLIPSTACK --storage-dir "$TEST_DIR/test8" --max-entries 100 stats >/dev/null 2>&1
+# Run stats (which triggers the import)
+STDERR8=$($CLIPSTACK --storage-dir "$TEST_DIR/test8" --max-entries 100 stats 2>&1 >/dev/null)
 
-# The import keeps every pinned entry, even past MAX_PINNED (25): it never
-# drops data. MAX_PINNED applies when pinning, not to imported pins.
-PINNED_COUNT=$(exported "$TEST_DIR/test8" --max-entries 100 | jq 'map(select(.pinned)) | length')
-[[ "$PINNED_COUNT" -eq 30 ]] && \
-    log_pass "All imported pins kept ($PINNED_COUNT pinned)" || \
-    log_fail "Unexpected pinned count: $PINNED_COUNT"
+# The import caps pins at MAX_PINNED (25), keeping the most recently used;
+# the 5 oldest are unpinned but stay in the history.
+EXPORT8=$(exported "$TEST_DIR/test8" --max-entries 100)
+PINNED_COUNT=$(jq 'map(select(.pinned)) | length' <<<"$EXPORT8")
+TOTAL8=$(jq 'length' <<<"$EXPORT8")
+OLDEST_PIN=$(jq -r 'map(select(.pinned)) | min_by(.last_used) | .content' <<<"$EXPORT8")
+[[ "$PINNED_COUNT" -eq 25 && "$TOTAL8" -eq 30 && "$OLDEST_PIN" == "pinned 6" ]] && \
+    log_pass "Imported pins capped at 25, all 30 entries kept" || \
+    log_fail "Unexpected pins: $PINNED_COUNT pinned of $TOTAL8, oldest pin '$OLDEST_PIN'"
+grep -qF "5 older pinned entries were unpinned" <<<"$STDERR8" && \
+    log_pass "Import notice reports the unpinned count" || \
+    log_fail "Import notice lacks the unpinned count: $STDERR8"
 
 # ============================================================================
 # Test 9: Stats shows all v1.1 info
