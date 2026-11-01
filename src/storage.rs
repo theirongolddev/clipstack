@@ -466,7 +466,7 @@ impl Storage {
 
         // Collect back into vec and sort by timestamp descending
         let mut recovered_entries: Vec<ClipEntry> = hash_to_entry.into_values().collect();
-        recovered_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        recovered_entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
 
         let total = recovered_entries.len();
         eprintln!("[recovery] Total entries after dedup: {}", total);
