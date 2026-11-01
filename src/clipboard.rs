@@ -43,22 +43,8 @@ impl Clipboard {
 
     /// Paste content from the system clipboard using wl-paste
     pub fn paste() -> Result<String> {
-        Self::paste_selection(false)
-    }
-
-    /// Paste content from PRIMARY selection (mouse selection)
-    pub fn paste_primary() -> Result<String> {
-        Self::paste_selection(true)
-    }
-
-    fn paste_selection(primary: bool) -> Result<String> {
-        let mut cmd = Command::new("wl-paste");
-        cmd.arg("--no-newline");
-        if primary {
-            cmd.arg("--primary");
-        }
-
-        let output = cmd
+        let output = Command::new("wl-paste")
+            .arg("--no-newline")
             .output()
             .with_context(|| format!("Failed to run wl-paste.\n{}", CLIPBOARD_TROUBLESHOOT))?;
 

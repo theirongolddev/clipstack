@@ -82,16 +82,12 @@ impl Daemon {
         self.running.store(true, Ordering::SeqCst);
 
         let mut last_clipboard_hash: Option<Vec<u8>> = None;
-        let mut last_primary_hash: Option<Vec<u8>> = None;
 
-        eprintln!("clipstack daemon started, monitoring clipboard + primary selection...");
+        eprintln!("clipstack daemon started, monitoring clipboard...");
 
         while self.running.load(Ordering::SeqCst) {
-            // Check regular clipboard
+            // Check regular clipboard (Ctrl+C copies only)
             self.check_and_save(Clipboard::paste(), &mut last_clipboard_hash, "clipboard");
-
-            // Check PRIMARY selection (mouse selection, used by terminals)
-            self.check_and_save(Clipboard::paste_primary(), &mut last_primary_hash, "primary");
 
             std::thread::sleep(self.poll_interval);
         }
