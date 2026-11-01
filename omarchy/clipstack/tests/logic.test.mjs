@@ -386,6 +386,14 @@ test("commandError: success, search no-match and failures", () => {
   assert.equal(L.commandError("list", 127, "", ""), "clipstack list failed (exit 127)");
 });
 
+test("commandError: search exit 1 with a message is a failure, not a no-match", () => {
+  // Exit 1 is also "any failure not listed" (README exit codes); a no-match
+  // is silent
+  assert.equal(L.commandError("search", 1, "", "Error: Failed to create storage dir: \"/x\"\n\nCaused by:\n    No such file\n"),
+               "Failed to create storage dir: \"/x\"");
+  assert.equal(L.commandError("search", 1, "[]\n", "\n"), "");
+});
+
 test("commandError takes the Error: line clipstack prints, not its causes", () => {
   assert.equal(L.commandError("alias", 1, "", "Error: alias @sig already used by id:5\n"),
                "alias @sig already used by id:5");

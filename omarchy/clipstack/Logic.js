@@ -488,11 +488,11 @@ function actionClosesOverlay(action) {
   return action === "paste" || action === "copy" || action === "edit";
 }
 
-// "" on success, else one line for the footer status. `search` exits 1 on
-// no match, which is not an error.
+// "" on success, else one line for the footer status. `search` exits 1
+// silently on no match, which is not an error; exit 1 with a message is.
 function commandError(kind, exitCode, stdout, stderr) {
   if (exitCode === 0) return "";
-  if (kind === "search" && exitCode === 1) return "";
+  if (kind === "search" && exitCode === 1 && String(stderr || "").trim() === "") return "";
   var lines = String(stderr || "").split("\n");
   var last = "";
   for (var i = 0; i < lines.length; i++) {
