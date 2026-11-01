@@ -88,7 +88,6 @@ impl Clipboard {
     }
 
     /// Put `bytes` on the clipboard offered as `mime` (`wl-copy --type MIME`).
-    #[allow(dead_code)] // TEMP: called by the `get` image commit
     pub fn copy_bytes(&self, bytes: &[u8], mime: &str) -> Result<()> {
         self.run_copy(bytes, Some(mime)).map_err(tool_failure)
     }

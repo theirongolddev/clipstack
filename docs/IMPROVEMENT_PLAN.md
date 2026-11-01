@@ -1169,6 +1169,13 @@ created as v1 and migrated, so the migration runs everywhere.
 `clear` and retention also remove cached image files whose entry is gone (the
 runtime dir is tmpfs, so leftovers vanish at logout anyway).
 
+*As built:* `get --copy` of an image copies it and prints `Copied image WxH (size)`
+to stderr, writing nothing to stdout (so it works from a terminal); `--image-path`
+conflicts with `--copy`. A cached file of the right size is reused (ids are never
+reused). Files whose entry is gone are removed by `delete`, `clear`, every
+`get --image-path` and the daemon's 60 s expiry tick (which also catches entries
+evicted by `max_entries` or `max_total_bytes`).
+
 #### 5.4 Overlay plugin (`omarchy/clipstack/`)
 
 - Manifest: id `solsystemlabs.clipstack`, kind `overlay`, `keepLoaded: true`, entry

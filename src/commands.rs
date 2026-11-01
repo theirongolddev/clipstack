@@ -2,15 +2,15 @@
 //! config, opens storage and dispatches here.
 
 use crate::cli::{Cli, CliError, EntryRef, Exit, LimitSource, resolve_max_entries};
-use crate::storage::{self, ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
+use crate::storage::{self, ClipEntry, EntryId, IngestOutcome, Kind, ListOrder, Source, Storage};
 use std::collections::HashMap;
-use crate::{clipboard, config, daemon, perms, protocol, util};
+use crate::{clipboard, config, daemon, image_cache, perms, png, protocol, util};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -161,12 +161,22 @@ fn resolve(storage: &Storage, reference: &EntryRef) -> Result<ClipEntry> {
     entry.ok_or_else(|| CliError::new(Exit::NotFound, format!("no entry for {reference}")).into())
 }
 
-/// `get REF [--copy]`: the content to stdout as stored, with no newline
-/// added. `--copy` also puts it on the clipboard and bumps it through
-/// `ingest`, so it is the newest entry without needing the daemon (the watch
-/// hook's own bump, if a daemon runs, changes nothing).
-pub fn get(storage: &Storage, reference: &EntryRef, copy: bool) -> Result<()> {
+/// `get REF [--copy | --image-path]`: the content to stdout as stored, with
+/// no newline added. `--copy` also puts it on the clipboard and bumps it
+/// through `ingest`, so it is the newest entry without needing the daemon
+/// (the watch hook's own bump, if a daemon runs, changes nothing). An image
+/// is written as PNG bytes, but never to a terminal (exit 2); with `--copy`
+/// it is copied as `image/png` and not written. `--image-path` prints the
+/// path of the image's cached file instead (exit 1 for text).
+pub fn get(storage: &Storage, reference: &EntryRef, copy: bool, image_path: bool) -> Result<()> {
     let entry = resolve(storage, reference)?;
+    if image_path {
+        let path = image_cache::ensure(storage, &entry)?;
+        return write_stdout(format!("{}\n", path.display()).as_bytes());
+    }
+    if entry.kind == Kind::Image {
+        return get_image(storage, &entry, reference, copy);
+    }
     let content = storage.load_content(entry.id)?;
     if copy {
         clipboard::Clipboard::system().copy(&content)?;
@@ -174,11 +184,97 @@ pub fn get(storage: &Storage, reference: &EntryRef, copy: bool) -> Result<()> {
             eprintln!("Copied, but not kept in the history: {}", storage.policy().describe_skip(&reason));
         }
     }
+    write_stdout(content.as_bytes())
+}
+
+/// `get` of an image entry: copy it as `image/png`, or write the PNG to a
+/// stdout that is not a terminal.
+fn get_image(storage: &Storage, entry: &ClipEntry, reference: &EntryRef, copy: bool) -> Result<()> {
+    if !copy && io::stdout().is_terminal() {
+        return Err(image_on_terminal(entry, reference).into());
+    }
+    let png = storage.load_image(entry.id)?;
+    if !copy {
+        return write_stdout(&png);
+    }
+    clipboard::Clipboard::system().copy_bytes(&png, png::MIME)?;
+    match storage.ingest_image(&png, Source::Copy, &[])? {
+        IngestOutcome::Skipped(reason) => eprintln!(
+            "Copied {}, but not kept in the history: {}",
+            image_label(entry),
+            storage.policy().describe_skip(&reason)
+        ),
+        IngestOutcome::Inserted(_) | IngestOutcome::Bumped(_) => eprintln!("Copied {}", image_label(entry)),
+    }
+    Ok(())
+}
+
+/// "image 640x480 (12.3 KB)".
+fn image_label(entry: &ClipEntry) -> String {
+    let (width, height) = (entry.width.unwrap_or(0), entry.height.unwrap_or(0));
+    format!("image {width}x{height} ({})", util::format_size(entry.size))
+}
+
+/// Exit 2: PNG bytes would garble the terminal.
+fn image_on_terminal(entry: &ClipEntry, reference: &EntryRef) -> CliError {
+    CliError::new(
+        Exit::Usage,
+        format!(
+            "id:{} is an {}; not writing it to a terminal. Redirect it \
+             (clipstack get {reference} > image.png), or use --copy or --image-path",
+            entry.id,
+            image_label(entry)
+        ),
+    )
+}
+
+/// Write `bytes` to stdout; a closed stdout ends quietly.
+fn write_stdout(bytes: &[u8]) -> Result<()> {
     let mut out = io::stdout().lock();
-    match out.write_all(content.as_bytes()).and_then(|()| out.flush()) {
+    match out.write_all(bytes).and_then(|()| out.flush()) {
         Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+/// `pin REF`: pin the entry; already pinned is fine.
+pub fn pin(storage: &Storage, reference: &EntryRef) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    if entry.pinned {
+        println!("id:{} is already pinned", entry.id);
+        return Ok(());
+    }
+    storage.set_pinned(entry.id, true)?;
+    println!("id:{} is now pinned", entry.id);
+    Ok(())
+}
+
+/// `unpin REF`: unpin the entry, which also removes its alias.
+pub fn unpin(storage: &Storage, reference: &EntryRef) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    if !entry.pinned {
+        println!("id:{} is not pinned", entry.id);
+        return Ok(());
+    }
+    storage.set_pinned(entry.id, false)?;
+    match entry.alias {
+        Some(alias) => println!("id:{} is no longer pinned (its alias @{alias} was removed)", entry.id),
+        None => println!("id:{} is no longer pinned", entry.id),
+    }
+    Ok(())
+}
+
+/// `delete REF`: delete one entry, and its cached image file if any.
+pub fn delete(storage: &Storage, reference: &EntryRef) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    if !storage.delete_entry(entry.id)? {
+        return Err(CliError::new(Exit::NotFound, format!("no entry for {reference}")).into());
+    }
+    if entry.kind == Kind::Image {
+        image_cache::remove(entry.id);
+    }
+    println!("Deleted id:{}", entry.id);
+    Ok(())
 }
 
 /// `pick [--paste]`: copy the entry chosen in the picker; with `paste` (or
@@ -239,6 +335,7 @@ pub fn alias(storage: &Storage, reference: &EntryRef, name: Option<&str>) -> Res
 /// `clear`: every entry and the legacy backup dirs.
 pub fn clear(storage: &Storage) -> Result<()> {
     let cleared = storage.clear()?;
+    image_cache::prune(storage);
     println!("Clipboard history cleared ({cleared} entries)");
     let (removed, left) = storage.remove_legacy_backups()?;
     if removed > 0 {
@@ -654,3 +751,31 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     .expect("Error setting signal handler");
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_on_a_terminal_is_a_usage_error_with_a_hint() {
+        let entry = ClipEntry {
+            id: 7,
+            created_at: 0,
+            last_used: 0,
+            size: 2048,
+            preview: "Image \u{b7} 640x480".to_string(),
+            pinned: false,
+            alias: None,
+            source: Source::Watch,
+            mime: png::MIME.to_string(),
+            kind: Kind::Image,
+            width: Some(640),
+            height: Some(480),
+        };
+        let err = image_on_terminal(&entry, &EntryRef::Id(7));
+        assert_eq!(err.code, Exit::Usage);
+        for part in ["id:7", "640x480", "clipstack get id:7 > image.png", "--copy", "--image-path"] {
+            assert!(err.msg.contains(part), "{part:?} missing: {}", err.msg);
+        }
+    }
+}

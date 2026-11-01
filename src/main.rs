@@ -3,6 +3,7 @@ mod clipboard;
 mod commands;
 mod config;
 mod daemon;
+mod image_cache;
 mod perms;
 mod protocol;
 mod picker;
@@ -75,7 +76,10 @@ fn run(cli: Cli) -> Result<()> {
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count, json, pinned }) => commands::list(&storage, count, json, pinned),
         Some(Commands::Search { query, count, json }) => commands::search(&storage, &query.join(" "), count, json),
-        Some(Commands::Get { entry, copy }) => commands::get(&storage, &entry, copy),
+        Some(Commands::Get { entry, copy, image_path }) => commands::get(&storage, &entry, copy, image_path),
+        Some(Commands::Pin { entry }) => commands::pin(&storage, &entry),
+        Some(Commands::Unpin { entry }) => commands::unpin(&storage, &entry),
+        Some(Commands::Delete { entry }) => commands::delete(&storage, &entry),
         Some(Commands::Alias { entry, name, remove: _ }) => commands::alias(&storage, &entry, name.as_deref()),
         Some(Commands::Clear) => commands::clear(&storage),
         Some(Commands::Daemon) => commands::run_daemon(storage, &config, cli.config.as_deref()),

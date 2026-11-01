@@ -78,15 +78,42 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Print one entry's content (no newline added); --copy also puts it on the clipboard
+    /// Print one entry's content (no newline added; an image's PNG bytes, never to a terminal)
     Get {
         /// N (position, 1 = newest), id:ID or @alias
         #[arg(value_name = "REF")]
         entry: EntryRef,
 
-        /// Also copy it to the clipboard and make it the newest entry
+        /// Also copy it to the clipboard and make it the newest entry (an
+        /// image is copied as image/png and not printed)
         #[arg(long)]
         copy: bool,
+
+        /// Images only: write the PNG to <runtime dir>/clipstack-images/<id>.png
+        /// (if it isn't there yet) and print that path
+        #[arg(long, conflicts_with = "copy")]
+        image_path: bool,
+    },
+
+    /// Pin an entry so the entry limit and retention never remove it
+    Pin {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
+    },
+
+    /// Unpin an entry; its alias, if any, is removed too
+    Unpin {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
+    },
+
+    /// Delete one entry from the history
+    Delete {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
     },
 
     /// Name an entry (pinning it) so `get @NAME` finds it; --remove drops the name and keeps the pin

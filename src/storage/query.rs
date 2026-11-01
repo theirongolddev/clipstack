@@ -167,7 +167,6 @@ impl Storage {
 
     /// The PNG bytes of an image entry; an error if it doesn't exist or is
     /// text (`StorageError::NotImage`).
-    #[allow(dead_code)] // TEMP: called by the `get` image commit
     pub fn load_image(&self, id: EntryId) -> Result<Vec<u8>> {
         let conn = self.conn();
         let image: Option<Vec<u8>> = conn
@@ -176,6 +175,14 @@ impl Storage {
             .optional()?
             .with_context(|| format!("No entry with id {id}"))?;
         image.ok_or_else(|| StorageError::NotImage { id }.into())
+    }
+
+    /// The ids of every image entry (for cleaning the image cache).
+    pub fn image_ids(&self) -> Result<std::collections::HashSet<EntryId>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached("SELECT id FROM entries WHERE kind = 'image'")?;
+        let ids = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
     }
 
     /// Write every entry as one JSON object per line, oldest first (by
@@ -274,6 +281,18 @@ mod tests {
         assert_eq!(json["kind"], "text");
         assert_eq!(json["width"], serde_json::Value::Null);
         assert_eq!(json["height"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn image_ids_lists_only_images() {
+        let (storage, _dir) = test_storage();
+        add(&storage, "text", 1);
+        let image = |tag: &[u8]| match storage.ingest_image(&crate::png::test_png(2, 2, tag), Source::Watch, &[]) {
+            Ok(crate::storage::IngestOutcome::Inserted(e)) => e.id,
+            other => panic!("{other:?}"),
+        };
+        let (a, b) = (image(b"a"), image(b"b"));
+        assert_eq!(storage.image_ids().unwrap(), std::collections::HashSet::from([a, b]));
     }
 
     #[test]

@@ -122,7 +122,7 @@ impl Daemon {
             self.options.clipboard.clone(),
             self.options.hook.clone(),
         );
-        let mut expire = ExpireTimer::new(Instant::now());
+        let mut expire = ExpireTimer::new(Instant::now(), crate::image_cache::dir().ok());
         let status: socket::CaptureStatus = Arc::new(std::sync::Mutex::new(capture.capturing()));
         let server = self.start_socket(&status);
 
@@ -192,11 +192,14 @@ impl Daemon {
 /// retries a scrub of deleted text that a reader blocked.
 struct ExpireTimer {
     next: Instant,
+    /// The image cache to clean of files whose entry is gone (`None` in
+    /// tests, which must never touch the user's runtime dir)
+    image_dir: Option<PathBuf>,
 }
 
 impl ExpireTimer {
-    fn new(now: Instant) -> Self {
-        Self { next: now + EXPIRE_INTERVAL }
+    fn new(now: Instant, image_dir: Option<PathBuf>) -> Self {
+        Self { next: now + EXPIRE_INTERVAL, image_dir }
     }
 
     /// Expire if due at `now`; returns whether it ran.
@@ -209,6 +212,10 @@ impl ExpireTimer {
             Ok(0) => {}
             Ok(n) => eprintln!("[storage] expired {n} entries"),
             Err(e) => eprintln!("[storage] expiry failed: {e:#}"),
+        }
+        // Cached image files of entries expired or evicted since the last tick
+        if let Some(dir) = &self.image_dir {
+            crate::image_cache::prune_dir(storage, dir);
         }
         match storage.retry_pending_scrub() {
             Ok(Some(false)) => eprintln!("[storage] scrub of deleted entries still blocked by a reader"),
@@ -365,7 +372,7 @@ mod tests {
         let old = |s: &Storage| s.ingest_at("old", crate::storage::Source::Copy, &[], 1_000).unwrap();
 
         let t0 = Instant::now();
-        let mut timer = ExpireTimer::new(t0);
+        let mut timer = ExpireTimer::new(t0, None);
         old(&storage);
         assert!(!timer.tick(&storage, t0 + Duration::from_secs(59)));
         assert_eq!(count(&storage), 1, "not due before 60 s");
@@ -378,6 +385,28 @@ mod tests {
         assert_eq!(count(&storage), 1);
         assert!(timer.tick(&storage, t0 + Duration::from_secs(120)));
         assert_eq!(count(&storage), 0);
+    }
+
+    #[test]
+    fn tick_removes_cached_images_of_gone_entries() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().join("store"), Some(100), Default::default()).unwrap();
+        let png = crate::png::test_png(2, 2, b"kept");
+        let kept = match storage.ingest_image(&png, crate::storage::Source::Watch, &[]).unwrap() {
+            crate::storage::IngestOutcome::Inserted(e) => e.id,
+            other => panic!("{other:?}"),
+        };
+        let cache = dir.path().join("images");
+        std::fs::create_dir(&cache).unwrap();
+        for name in [format!("{kept}.png"), format!("{}.png", kept + 1)] {
+            std::fs::write(cache.join(name), b"x").unwrap();
+        }
+
+        let t0 = Instant::now();
+        let mut timer = ExpireTimer::new(t0, Some(cache.clone()));
+        assert!(timer.tick(&storage, t0 + Duration::from_secs(60)));
+        let left: Vec<_> = std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [std::ffi::OsString::from(format!("{kept}.png"))]);
     }
 
     #[test]
@@ -407,7 +436,7 @@ mod tests {
         assert!(pending(&storage), "the other process's blocked scrub is recorded");
 
         let t0 = Instant::now();
-        let mut timer = ExpireTimer::new(t0);
+        let mut timer = ExpireTimer::new(t0, None);
         assert!(timer.tick(&storage, t0 + Duration::from_secs(60)));
         assert!(!pending(&storage), "the tick retried it");
     }
