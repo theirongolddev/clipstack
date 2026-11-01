@@ -2,7 +2,8 @@
 //! config, opens storage and dispatches here.
 
 use crate::cli::{Cli, CliError, EntryRef, Exit, LimitSource, resolve_max_entries};
-use crate::storage::{self, ClipEntry, IngestOutcome, ListOrder, Source, Storage};
+use crate::storage::{self, ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
+use std::collections::HashMap;
 use crate::{clipboard, config, daemon, perms, protocol, util};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
@@ -74,6 +75,37 @@ pub fn list(storage: &Storage, count: usize, json: bool, pinned: bool) -> Result
         println!("... and {} more", total - entries.len());
     }
     Ok(())
+}
+
+/// `search QUERY [-c N] [--json]`: entries holding every word, pinned
+/// first, then newest. No match exits 1 silently (`[]` with `--json`).
+pub fn search(storage: &Storage, query: &str, count: usize, json: bool) -> Result<()> {
+    if query.trim().is_empty() {
+        return Err(CliError::new(Exit::Usage, "the search query is empty").into());
+    }
+    let mut found = storage.search(query, count.saturating_add(1))?;
+    let more = found.len() > count;
+    found.truncate(count);
+
+    if json {
+        // Positions in the full recency order, so `get N` finds the same
+        // entry (one deleted between the two queries is left out)
+        let positions: HashMap<EntryId, usize> =
+            positioned(storage.list(ListOrder::Recency, None)?).into_iter().map(|(n, e)| (e.id, n)).collect();
+        let entries: Vec<_> = found.into_iter().filter_map(|e| Some((*positions.get(&e.id)?, e))).collect();
+        print_json(&entries)?;
+        return no_match_if(entries.is_empty());
+    }
+    print_lines(found.iter());
+    if more {
+        println!("... more matches (show more with -c N)");
+    }
+    no_match_if(found.is_empty())
+}
+
+/// Exit 1 without a message when nothing matched (grep-like).
+fn no_match_if(empty: bool) -> Result<()> {
+    if empty { Err(CliError::new(Exit::NotFound, "").into()) } else { Ok(()) }
 }
 
 /// Entries in recency order, each with its 1-based position (`get N`).

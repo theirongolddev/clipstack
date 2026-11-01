@@ -58,6 +58,21 @@ pub enum Commands {
         pinned: bool,
     },
 
+    /// Find entries containing every word (case-insensitive; pinned first, then newest)
+    Search {
+        /// Words to find; each must appear in the first 256 K characters of an entry
+        #[arg(value_name = "QUERY", required = true)]
+        query: Vec<String>,
+
+        /// Number of matches to show
+        #[arg(short, long, default_value = "10")]
+        count: usize,
+
+        /// Print a JSON array, as `list --json` does
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print one entry's content (no newline added); --copy also puts it on the clipboard
     Get {
         /// N (position, 1 = newest), id:ID or @alias

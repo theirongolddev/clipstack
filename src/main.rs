@@ -72,6 +72,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Commands::Copy) => commands::copy(&storage),
         Some(Commands::Paste) => commands::paste(),
         Some(Commands::List { count, json, pinned }) => commands::list(&storage, count, json, pinned),
+        Some(Commands::Search { query, count, json }) => commands::search(&storage, &query.join(" "), count, json),
         Some(Commands::Get { entry, copy }) => commands::get(&storage, &entry, copy),
         Some(Commands::Clear) => commands::clear(&storage),
         Some(Commands::Daemon) => commands::run_daemon(storage, &config, cli.config.as_deref()),

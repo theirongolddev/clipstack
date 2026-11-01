@@ -248,3 +248,62 @@ fn list_pinned_keeps_recency_positions() {
     assert!(human.contains("pinned new") && human.contains("pinned old"), "{human}");
     assert!(!human.contains("plain") && !human.contains("newest"), "{human}");
 }
+
+// ======== search (3-6) ========
+
+#[test]
+fn search_finds_deep_match() {
+    let env = TestEnv::new();
+    let deep = format!("{}needle-in-the-haystack at the end", "filler ".repeat(100));
+    copy_all(&env, &[&deep, "unrelated", "another needle-in-the-haystack, short"]);
+
+    let out = run(&env, &["search", "needle-in-the-haystack"], None);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let lines: Vec<_> = stdout(&out).lines().map(str::to_string).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("another needle"), "newest first: {lines:?}");
+    assert!(lines[1].contains("filler filler"), "match past the preview: {lines:?}");
+
+    // Every word must match, case-insensitively
+    let out = run(&env, &["search", "NEEDLE", "end"], None);
+    assert_eq!(stdout(&out).lines().count(), 1, "{}", stdout(&out));
+}
+
+#[test]
+fn search_json_shape() {
+    let env = TestEnv::new();
+    copy_all(&env, &["alpha match", "beta", "gamma match"]);
+    set_alias_in_db(&env, id_of(&env, "alpha match"), "a");
+
+    let list = json(&run(&env, &["search", "match", "--json"], None));
+    let list = list.as_array().unwrap();
+    // Pinned first, then newest; positions are recency positions for `get N`
+    let got: Vec<_> = list.iter().map(|e| (e["preview"].clone(), e["position"].clone())).collect();
+    assert_eq!(got, [("alpha match".into(), 3.into()), ("gamma match".into(), 1.into())]);
+    for e in list {
+        for key in ["position", "id", "created_at", "last_used", "size", "preview", "pinned", "alias", "source", "mime"] {
+            assert!(e.get(key).is_some(), "{key} missing from {e}");
+        }
+    }
+    assert_eq!(list[0]["alias"], "a");
+
+    let limited = json(&run(&env, &["search", "match", "--json", "-c", "1"], None));
+    assert_eq!(limited.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn search_no_match_exits_1() {
+    let env = TestEnv::new();
+    copy_all(&env, &["something"]);
+    let out = run(&env, &["search", "nothing-like-it"], None);
+    assert_eq!(code(&out), 1, "stderr: {}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(stderr(&out).is_empty(), "silent like grep: {}", stderr(&out));
+
+    let out = run(&env, &["search", "nothing-like-it", "--json"], None);
+    assert_eq!(code(&out), 1);
+    assert_eq!(stdout(&out).trim_end(), "[]");
+
+    let out = run(&env, &["search", " "], None);
+    assert_eq!(code(&out), 2, "an empty query is a usage error: {}", stderr(&out));
+}
