@@ -1,9 +1,13 @@
 //! Connection setup, PRAGMAs and schema migrations.
 
 use super::StorageError;
+use crate::perms;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, TransactionBehavior};
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Newest schema this binary understands (`PRAGMA user_version`).
@@ -58,6 +62,7 @@ END;
 /// Open `path`, set the connection PRAGMAs and bring the schema to
 /// `SCHEMA_VERSION`.
 pub fn open_connection(path: &Path) -> Result<Connection> {
+    prepare_private_files(path)?;
     let mut conn =
         Connection::open(path).with_context(|| format!("Failed to open database: {path:?}"))?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -79,6 +84,41 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
 
     apply_migrations(&mut conn).with_context(|| format!("Failed to migrate database: {path:?}"))?;
     Ok(conn)
+}
+
+/// `<db>-wal` and `<db>-shm`, which SQLite creates next to the database.
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = OsString::from(path.as_os_str());
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Make the storage dir 0700 and pre-create the database 0600, so SQLite
+/// (which gives `-wal`/`-shm` the database file's mode) never writes a
+/// world-readable file. Existing files left by an older umask are tightened.
+fn prepare_private_files(path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        perms::ensure_private_dir(dir)
+            .with_context(|| format!("Failed to create storage dir: {dir:?}"))?;
+    }
+    perms::private_file_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("Failed to create database: {path:?}"))?;
+
+    for file in [path.to_path_buf(), sidecar(path, "-wal"), sidecar(path, "-shm")] {
+        let Ok(meta) = fs::symlink_metadata(&file) else {
+            continue; // -wal/-shm only exist while a connection is open
+        };
+        if meta.file_type().is_file() && meta.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(&file, fs::Permissions::from_mode(perms::FILE_MODE))
+                .with_context(|| format!("Failed to tighten permissions: {file:?}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {
@@ -233,5 +273,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(secure, 1);
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn sidecars(db: &Path) -> [std::path::PathBuf; 3] {
+        let with = |suffix: &str| {
+            let mut name = db.as_os_str().to_owned();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        [db.to_path_buf(), with("-wal"), with("-shm")]
+    }
+
+    #[test]
+    fn db_and_wal_files_are_0600() {
+        let dir = TempDir::new().unwrap();
+        let path = db(&dir);
+        let conn = open_connection(&path).unwrap();
+        conn.execute("INSERT INTO settings (key, value) VALUES ('k', 'v')", []).unwrap();
+
+        // -wal and -shm exist while the connection is open
+        for file in sidecars(&path) {
+            assert!(file.exists(), "{file:?} should exist");
+            assert_eq!(mode(&file), 0o600, "{file:?}");
+        }
+    }
+
+    #[test]
+    fn tightens_existing_0644_db() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = db(&dir);
+        let first = open_connection(&path).unwrap();
+        first.execute("INSERT INTO settings (key, value) VALUES ('k', 'v')", []).unwrap();
+        // Simulate files left world-readable by an older umask
+        for file in sidecars(&path) {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let _second = open_connection(&path).unwrap();
+        for file in sidecars(&path) {
+            assert_eq!(mode(&file), 0o600, "{file:?}");
+        }
     }
 }
