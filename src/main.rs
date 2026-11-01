@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             // Use custom storage dir if provided, but always use global lock file
             let daemon = daemon::Daemon::new(Some(storage.base_dir().to_path_buf()), max_entries)?;
 
-            // Handle Ctrl+C
+            // Stop cleanly on SIGINT, SIGTERM and SIGHUP (ctrlc "termination")
             let running = daemon.stop_handle();
             ctrlc_handler(running);
 
@@ -443,7 +443,7 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     ctrlc::set_handler(move || {
         running.store(false, std::sync::atomic::Ordering::SeqCst);
     })
-    .expect("Error setting Ctrl-C handler");
+    .expect("Error setting signal handler");
 }
 
 #[cfg(test)]

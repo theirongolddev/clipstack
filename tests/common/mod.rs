@@ -140,6 +140,21 @@ impl TestEnv {
         }
     }
 
+    /// Send `signal` (e.g. "TERM") to a child this env spawned. Panics for
+    /// any other PID so a test can never signal a process it doesn't own.
+    pub fn signal(&self, pid: u32, signal: &str) {
+        assert!(
+            self.children.iter().any(|c| c.id() == pid),
+            "refusing to signal pid {pid}: not spawned by this TestEnv"
+        );
+        let status = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(pid.to_string())
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "kill -{signal} {pid} failed");
+    }
+
     /// Wait until the daemon lock in our runtime dir records `pid`.
     pub fn wait_for_lock_pid(&self, pid: u32, timeout: Duration) -> bool {
         wait_until(timeout, || {

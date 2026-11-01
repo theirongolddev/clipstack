@@ -31,3 +31,25 @@ fn harness_isolates_runtime_dir() {
     assert!(env.storage_dir.is_dir());
     assert!(!env.data_home.join("clipd").exists());
 }
+
+#[test]
+fn daemon_exits_zero_on_sigterm() {
+    let mut env = TestEnv::new();
+    let mut cmd = env.cmd();
+    cmd.arg("daemon");
+    let pid = env.spawn(cmd);
+    assert!(env.wait_for_lock_pid(pid, Duration::from_secs(5)));
+
+    env.signal(pid, "TERM");
+    let done = env
+        .wait_for_exit(pid, Duration::from_secs(2))
+        .expect("daemon should exit within 2 s of SIGTERM");
+    assert_eq!(
+        done.status.code(),
+        Some(0),
+        "expected a clean exit, got {:?}; stderr: {}",
+        done.status,
+        done.stderr
+    );
+    assert!(done.stderr.contains("daemon stopped"), "stderr: {}", done.stderr);
+}
