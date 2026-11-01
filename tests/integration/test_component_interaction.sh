@@ -16,7 +16,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-TEST_DIR=$(mktemp -d)
+# Temp XDG dirs, fake wl-paste/wl-copy first on PATH, no WAYLAND_DISPLAY
+# shellcheck source=../lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+isolate_env
+
+TEST_DIR="$ISOLATED_ROOT/work"
+mkdir -p "$TEST_DIR"
 CLIPSTACK="./target/release/clipstack"
 GREP="/usr/bin/grep"
 
@@ -25,13 +31,7 @@ log_fail() { echo -e "${RED}✗${NC} $1"; exit 1; }
 log_info() { echo -e "${YELLOW}→${NC} $1"; }
 log_skip() { echo -e "${YELLOW}⊘${NC} [WAYLAND] $1 - requires manual testing"; }
 
-cleanup() {
-    # Kill any daemon processes we started
-    pkill -f "clipstack.*daemon" 2>/dev/null || true
-    # Remove lock file
-    rm -f /tmp/clipstack-daemon.lock
-    rm -rf "$TEST_DIR"
-}
+# cleanup (tests/lib.sh) stops only PIDs recorded with track_pid
 trap cleanup EXIT
 
 # Helper to create a test entry in storage
@@ -87,7 +87,6 @@ echo ""
 
 # Test 1: Lock file prevents multiple daemons (simulate check)
 log_info "Test 1: Lock file detection"
-rm -f /tmp/clipstack-daemon.lock
 
 # Verify status works without lock
 STATUS_OUT=$($CLIPSTACK status 2>&1)
