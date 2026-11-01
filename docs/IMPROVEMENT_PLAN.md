@@ -1209,7 +1209,9 @@ evicted by `max_entries` or `max_total_bytes`).
   alias (holding Enter to save an alias must not then paste). Keys typed ahead
   of the rows wait for them: Enter right after typing acts on the search's top
   match, and Down Enter right after opening on the fresh list's second row. Every action is also a button with its
-  shortcut shown; mouse click selects, double-click pastes.
+  shortcut shown, right-aligned under the preview (Delete set apart on the left,
+  then Edit, Alias, Pin, Copy, and Paste at the far right); mouse click selects,
+  double-click pastes.
 - Groups: PINNED, TODAY, YESTERDAY, EARLIER; while searching, one MATCHES group
   with the query highlighted in each row. Footer: `N clips · P pinned`.
 - Look: the C palette (accent `#A9B4FF`), Noto Sans / JetBrains Mono, panel

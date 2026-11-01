@@ -552,7 +552,7 @@ It works from any shell (it finds `OMARCHY_PATH` itself when the session hasn't 
 | `Ctrl+Delete` | Delete the entry (`Ctrl+Backspace` deletes a word in the search field) |
 | `Esc` | Clear the search; a second `Esc` closes |
 
-Every action is also a button showing its key. Click selects a row, double-click pastes it.
+Every action is also a button showing its key, in a row at the bottom right of the preview: Delete set apart, then Edit, Alias, Pin, Copy and Paste at the far right. Click selects a row, double-click pastes it.
 
 ## Remote Clipboard (SSH)
 
