@@ -1,7 +1,7 @@
 use crate::clipboard::Clipboard;
 use crate::perms;
 use std::os::unix::fs::PermissionsExt;
-use crate::storage::Storage;
+use crate::storage::json::Storage;
 use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;

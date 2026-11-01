@@ -1,6 +1,6 @@
 use crate::clipboard::Clipboard;
 use crate::daemon::Daemon;
-use crate::storage::{ClipEntry, Storage};
+use crate::storage::json::{ClipEntry, Storage};
 use crate::util;
 use anyhow::Result;
 use crossterm::{

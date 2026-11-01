@@ -100,8 +100,8 @@ fn main() -> Result<()> {
     let env_limit = std::env::var("CLIPSTACK_MAX_ENTRIES").ok();
     let (max_entries, limit_source) = resolve_max_entries(cli.max_entries, env_limit.as_deref());
 
-    let storage_dir = cli.storage_dir.unwrap_or_else(storage::Storage::default_dir);
-    let storage = storage::Storage::open(storage_dir, max_entries)?;
+    let storage_dir = cli.storage_dir.unwrap_or_else(storage::json::Storage::default_dir);
+    let storage = storage::json::Storage::open(storage_dir, max_entries)?;
 
     match cli.command {
         None | Some(Commands::Pick) => {
@@ -306,7 +306,7 @@ fn check_dependencies() -> Result<()> {
 }
 
 /// Print daemon and system status
-fn print_status(storage: &storage::Storage, limit_source: LimitSource) -> Result<()> {
+fn print_status(storage: &storage::json::Storage, limit_source: LimitSource) -> Result<()> {
     // Check daemon status
     let daemon_running = daemon::Daemon::is_running();
 
@@ -365,7 +365,7 @@ fn generate_completions(shell: Shell) {
 /// Maximum size for incoming TCP data (10MB)
 const MAX_TCP_CONTENT_SIZE: usize = 10 * 1024 * 1024;
 
-fn serve_clipboard(storage: storage::Storage, port: u16) -> Result<()> {
+fn serve_clipboard(storage: storage::json::Storage, port: u16) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("Clipboard server listening on {}", addr);

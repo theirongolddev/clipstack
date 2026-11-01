@@ -369,8 +369,8 @@ src/config.rs          Config (see contracts), load(), builtin secret patterns
 
 1. `perms::ensure_private_dir(dir)`. Pre-create `clipstack.db` with `private_file_options()` (`create(true)`, no truncate) so SQLite inherits `0600`. SQLite gives `-wal` and `-shm` the same mode as the db file. Then chmod any existing `-wal`/`-shm` to `0600` (they may be left over from an older umask).
 2. `Connection::open(path)`, then `conn.busy_timeout(5s)`.
-3. Per-connection PRAGMAs: `journal_mode = WAL` (persistent, re-asserting is harmless), `synchronous = NORMAL`, `secure_delete = ON`, `trusted_schema = OFF`, `temp_store = MEMORY` (no plaintext temp files during sorts).
-4. Creation-only PRAGMAs, set before the first table: `auto_vacuum = INCREMENTAL`, `application_id = 0x434C5053` ("CLPS").
+3. `auto_vacuum = INCREMENTAL` **first**: on a new file it only sticks if it is set before `journal_mode = WAL`, which writes the database header (checked in sqlite3 3.54: in the other order it reads back `0`). On an existing file it is a no-op.
+4. Per-connection PRAGMAs: `journal_mode = WAL` (persistent, re-asserting is harmless), `synchronous = NORMAL`, `secure_delete = ON`, `trusted_schema = OFF`, `temp_store = MEMORY` (no plaintext temp files during sorts). `application_id = 0x434C5053` ("CLPS") is set in the v1 migration transaction.
 5. `apply_migrations()`: read `user_version`. If it is 0, run the v1 DDL in a transaction and set `user_version = 1`. If it is greater than `SCHEMA_VERSION`, fail with `StorageError::NewerSchema { found, supported }` (exit 4 in Step 3).
 6. `Storage::open` then runs the legacy import (below) if a legacy store is detected, and `expire()`.
 
