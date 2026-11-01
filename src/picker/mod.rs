@@ -23,7 +23,7 @@ use keys::Action;
 use data::{DeletedEntry, PickerData, UNDO_WINDOW, order_pinned_first};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use search::{FilteredEntry, IDLE_POLL, MatchLocation, SearchState, search_timeout};
-use state::{Focus, Mode, StatusLevel, ViewState};
+use state::{Focus, Mode, PreviewKey, StatusLevel, ViewState};
 use std::io::{Stdout, stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -172,8 +172,8 @@ impl Picker {
     }
 
     /// Load and wrap preview content for Focus::Preview mode
-    /// Wrap the selected entry to `width` columns into `view.preview_lines`
-    /// (kept until the entry or the width changes). Another entry starts
+    /// Lay out the selected entry at `width` columns into `view.preview_lines`
+    /// (kept until the entry, the width or a display toggle changes). Another entry starts
     /// at its top.
     fn wrap_preview(&mut self, width: u16) {
         self.load_preview();
@@ -182,14 +182,20 @@ impl Picker {
             self.view.preview_key = None;
             return;
         };
-        let key = (*id, width);
+        let key = PreviewKey {
+            id: *id,
+            width,
+            show_whitespace: self.view.show_whitespace,
+            show_line_numbers: self.view.show_line_numbers,
+        };
         if self.view.preview_key == Some(key) {
             return;
         }
-        if self.view.preview_key.map(|(old, _)| old) != Some(*id) {
+        if self.view.preview_key.map(|old| old.id) != Some(*id) {
             self.view.preview_scroll = 0;
         }
-        self.view.preview_lines = text::wrap_to_width(content, width as usize);
+        self.view.preview_lines =
+            text::layout_preview(content, usize::from(width), key.show_whitespace, key.show_line_numbers);
         self.view.preview_key = Some(key);
         self.view.preview_scroll = self.view.preview_scroll.min(self.view.max_preview_scroll());
     }
@@ -377,6 +383,8 @@ impl Picker {
             }
             Action::ScrollTop => self.view.preview_scroll = 0,
             Action::ScrollBottom => self.view.preview_scroll = self.view.max_preview_scroll(),
+            Action::ToggleWhitespace => self.view.show_whitespace = !self.view.show_whitespace,
+            Action::ToggleLineNumbers => self.view.show_line_numbers = !self.view.show_line_numbers,
         }
         Ok(None)
     }
@@ -594,7 +602,8 @@ pub(super) mod tests {
         let mut outcome = None;
         for c in keys.chars() {
             let mods = if c.is_ascii_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
-            outcome = picker.handle_key(KeyEvent::new(KeyCode::Char(c), mods)).unwrap();
+            let code = if c == '\t' { KeyCode::Tab } else { KeyCode::Char(c) };
+            outcome = picker.handle_key(KeyEvent::new(code, mods)).unwrap();
         }
         outcome
     }
@@ -811,6 +820,28 @@ pub(super) mod tests {
 
         let counts: Vec<_> = picker.view.preview_lines.iter().map(|l| l.chars().count()).collect();
         assert_eq!(counts, [40, 40, 20]);
+    }
+
+    #[test]
+    fn w_and_n_in_preview_rewrap_both_panes() {
+        let (_temp, storage) = create_test_storage(&["a b\nc"]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["a b", "c"]);
+        press(&mut picker, "\tw");
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["a·b¶", "c"]);
+        press(&mut picker, "n");
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["   1 │ a·b¶", "   2 │ c"]);
+        // Back in list focus the preview pane keeps the flags
+        press(&mut picker, "q");
+        assert_eq!(picker.view.focus, Focus::List);
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["   1 │ a·b¶", "   2 │ c"]);
+        press(&mut picker, "\twn");
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["a b", "c"]);
     }
 
     #[test]

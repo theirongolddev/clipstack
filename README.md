@@ -319,6 +319,8 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `Page Up` / `Page Down` | Scroll one page |
 | `g` / `Home` | Jump to top of content |
 | `G` / `End` | Jump to bottom of content |
+| `w` | Toggle visible whitespace (`·` space, `→` tab, `␍` CR, `¶` newline) |
+| `n` | Toggle line numbers |
 | `Tab` / `Esc` / `q` | Exit preview mode |
 | `Ctrl+C` | Exit without copying |
 
@@ -331,7 +333,8 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 - A fixed-width age column (`  5s`, ` 12m`, `  3h`, ` 40d`, capped at `999d`), so the rows stay aligned
 - Entry size displayed in human-readable format (e.g., "1.2KB")
 - Status messages for actions (delete confirmation, undo countdown)
-- Preview shows `[+N lines, Tab to scroll]` for truncated content
+- The preview wraps to the pane's width (wide CJK characters count as two columns; tabs expand to stops of 4) and shows `[+N lines, Tab to scroll]` when the wrapped text is taller than the pane
+- The whitespace and line-number toggles stay on for the rest of the session, in both the list's preview pane and preview mode
 
 **Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running. The daemon is the same executable as the picker (not whichever `clipstack` is first on `PATH`), uses the same `--storage-dir` and keeps the saved entry limit.
 

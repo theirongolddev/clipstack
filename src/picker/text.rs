@@ -37,6 +37,69 @@ pub fn wrap_to_width(content: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// The preview rows for `content` at `width` columns, optionally with
+/// visible whitespace and a line-number gutter.
+pub fn layout_preview(content: &str, width: usize, show_ws: bool, show_ln: bool) -> Vec<String> {
+    let lines: Vec<String> = if show_ws {
+        let ends_with_newline = content.ends_with('\n');
+        let segments: Vec<&str> = content.split_terminator('\n').collect();
+        let last = segments.len().saturating_sub(1);
+        segments
+            .iter()
+            .enumerate()
+            .map(|(i, line)| visualize_whitespace(line, i < last || ends_with_newline))
+            .collect()
+    } else {
+        content.lines().map(str::to_string).collect()
+    };
+    let text_width = width.saturating_sub(if show_ln { GUTTER_WIDTH } else { 0 });
+    let mut rows = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let mut wrapped = wrap_to_width(line, text_width);
+        if wrapped.is_empty() {
+            wrapped.push(String::new());
+        }
+        for (i, row) in wrapped.into_iter().enumerate() {
+            rows.push(match (show_ln, i) {
+                (false, _) => row,
+                (true, 0) => format!("{:>4} │ {row}", n + 1),
+                (true, _) => format!("     │ {row}"),
+            });
+        }
+    }
+    rows
+}
+
+/// Columns taken by the line-number gutter (`{:>4} │ `)
+pub const GUTTER_WIDTH: usize = 7;
+
+/// One line (without its `\n`) with visible whitespace: `·` space, `→`
+/// tab (padded to its stop), `␍` CR, and `¶` where a newline ends it.
+pub fn visualize_whitespace(line: &str, newline: bool) -> String {
+    let mut out = String::with_capacity(line.len() + 4);
+    let mut column = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let n = TAB_WIDTH - column % TAB_WIDTH;
+            out.push('→');
+            out.extend(std::iter::repeat_n(' ', n - 1));
+            column += n;
+            continue;
+        }
+        let shown = match c {
+            ' ' => '·',
+            '\r' => '␍',
+            _ => c,
+        };
+        out.push(shown);
+        column += shown.width().unwrap_or(0);
+    }
+    if newline {
+        out.push('¶');
+    }
+    out
+}
+
 /// Age as exactly 4 columns, right-aligned: `  5s`, ` 12m`, `  3h`,
 /// ` 40d`, capped at `999d`; a future time (clock skew) is `  0s`.
 pub fn format_compact_age(ts_ms: i64, now_ms: i64) -> String {
@@ -64,6 +127,28 @@ mod tests {
         assert_eq!(wrap_to_width("\tabcdef", 6), ["    ab", "cdef"]);
         assert!(wrap_to_width("", 4).is_empty());
         assert_eq!(wrap_to_width("abc", 0), ["a", "b", "c"], "a zero width still makes progress");
+    }
+
+    #[test]
+    fn visualize_whitespace_symbols() {
+        assert_eq!(layout_preview("a b\n", 40, true, false), ["a·b¶"]);
+        assert_eq!(layout_preview("a\tb", 40, true, false), ["a→  b"], "tab: arrow, then pad to the stop");
+        assert_eq!(layout_preview("x\r\ny", 40, true, false), ["x␍¶", "y"], "no ¶ without a newline");
+        assert_eq!(layout_preview("a\n\n", 40, true, false), ["a¶", "¶"], "a blank line shows its newline");
+        assert_eq!(layout_preview("  ", 1, true, false), ["·", "·"], "symbols wrap like text");
+        assert_eq!(layout_preview("a b\n", 40, false, false), ["a b"], "off: unchanged");
+    }
+
+    #[test]
+    fn number_lines_gutter() {
+        assert_eq!(layout_preview("a\nb", 40, false, true), ["   1 │ a", "   2 │ b"]);
+        assert_eq!(
+            layout_preview("abcdef\n\nz", 10, false, true),
+            ["   1 │ abc", "     │ def", "   2 │ ", "   3 │ z"],
+            "a wrapped row has a blank gutter; numbers count logical lines"
+        );
+        assert_eq!(layout_preview("a b", 40, true, true), ["   1 │ a·b"]);
+        assert_eq!(layout_preview("", 40, false, true), Vec::<String>::new());
     }
 
     const SEC: i64 = 1000;

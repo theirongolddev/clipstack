@@ -237,7 +237,7 @@ impl Picker {
         match (self.view.mode, self.view.focus) {
             (Mode::Search, _) => "[SEARCH] type to filter  ↑/↓:Nav  Enter:Copy  Esc:Done".to_string(),
             (Mode::Normal, Focus::Preview) => {
-                "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  Tab/Esc/q:Back".to_string()
+                "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  w:Whitespace  n:Numbers  Tab/Esc/q:Back".to_string()
             }
             (Mode::Normal, Focus::List) => {
                 "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit".to_string()

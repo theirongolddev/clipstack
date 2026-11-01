@@ -34,6 +34,8 @@ pub enum Action {
     ScrollPage(isize),
     ScrollTop,
     ScrollBottom,
+    ToggleWhitespace,
+    ToggleLineNumbers,
 }
 
 /// The action for `key` in the current mode and focus.
@@ -120,6 +122,8 @@ fn preview_key(key: KeyEvent) -> Action {
         (KeyCode::PageUp, _) => Action::ScrollPage(-1),
         (KeyCode::Home, _) | (_, Some('g')) => Action::ScrollTop,
         (KeyCode::End, _) | (_, Some('G')) => Action::ScrollBottom,
+        (_, Some('w')) => Action::ToggleWhitespace,
+        (_, Some('n')) => Action::ToggleLineNumbers,
         _ => Action::None,
     }
 }
@@ -176,6 +180,18 @@ mod tests {
         assert_eq!(map_key(&normal, key(KeyCode::Enter)), Action::Select);
         // In search mode j is text, not a move
         assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('j')), Action::SearchInput('j'));
+    }
+
+    #[test]
+    fn w_and_n_only_bound_in_preview() {
+        let preview = view(Mode::Normal, Focus::Preview);
+        assert_eq!(map_key(&preview, ch('w')), Action::ToggleWhitespace);
+        assert_eq!(map_key(&preview, ch('n')), Action::ToggleLineNumbers);
+        assert_eq!(map_key(&view(Mode::Normal, Focus::List), ch('w')), Action::None);
+        assert_eq!(map_key(&view(Mode::Normal, Focus::List), ch('n')), Action::None);
+        assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('w')), Action::SearchInput('w'));
+        assert_eq!(map_key(&view(Mode::Search, Focus::List), ch('n')), Action::SearchInput('n'));
+        assert_eq!(map_key(&preview, ctrl('w')), Action::None);
     }
 
     #[test]

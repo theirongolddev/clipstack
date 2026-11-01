@@ -26,6 +26,15 @@ pub enum StatusLevel {
     Warning,
 }
 
+/// The inputs `ViewState::preview_lines` was laid out from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewKey {
+    pub id: EntryId,
+    pub width: u16,
+    pub show_whitespace: bool,
+    pub show_line_numbers: bool,
+}
+
 pub struct ViewState {
     pub mode: Mode,
     pub focus: Focus,
@@ -43,8 +52,11 @@ pub struct ViewState {
     pub preview_scroll: usize,
     /// The selected entry's content wrapped to the pane, as drawn in both focuses
     pub preview_lines: Vec<String>,
-    /// What `preview_lines` was made from: entry and pane width
-    pub preview_key: Option<(EntryId, u16)>,
+    /// What `preview_lines` was made from
+    pub preview_key: Option<PreviewKey>,
+    /// Preview toggles (`w`, `n` in preview focus); both panes follow them
+    pub show_whitespace: bool,
+    pub show_line_numbers: bool,
     /// Rows inside the preview border (set at each render)
     pub preview_height: u16,
 }
@@ -63,6 +75,8 @@ impl Default for ViewState {
             preview_scroll: 0,
             preview_lines: Vec::new(),
             preview_key: None,
+            show_whitespace: false,
+            show_line_numbers: false,
             preview_height: 10, // Updated dynamically during render
         }
     }

@@ -983,8 +983,8 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 **[16] Compact time:** `format_compact_age(ts_ms, now_ms) -> String` produces exactly 4 columns, right-aligned: `  5s`, ` 12m`, `  3h`, ` 40d`, `999d`, capping at `999d`. The list uses `{:>4}`. `list` CLI output keeps the "5m ago" style.
 
 **[17] Preview toggles:**
-- Key bindings live in preview focus only, so they don't clash with type-to-search: `w` toggles visible whitespace (`·` space, `→` tab, `␍` CR, `¶` end of line) and `n` toggles a line-number gutter (`{:>4} │`).
-- The list-focus preview pane follows the same flags.
+- Key bindings live in preview focus only, so `w` and `n` stay free in list focus: `w` toggles visible whitespace (`·` space, `→` tab, `␍` CR, `¶` end of line) and `n` toggles a line-number gutter (`{:>4} │`).
+- The list-focus preview pane follows the same flags. `¶` marks only a newline that is there (not the end of content without one), and wrapped rows get a blank gutter (`     │ `).
 
 **[9] Aliases:**
 - `P` opens `Prompt::Alias` in the search-box area.
