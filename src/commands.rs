@@ -181,6 +181,26 @@ pub fn get(storage: &Storage, reference: &EntryRef, copy: bool) -> Result<()> {
     }
 }
 
+/// `alias REF NAME` names the entry (pinning it if needed); with `name`
+/// `None` (`alias --remove REF`) the alias goes and the pin stays.
+pub fn alias(storage: &Storage, reference: &EntryRef, name: Option<&str>) -> Result<()> {
+    let entry = resolve(storage, reference)?;
+    let Some(name) = name else {
+        storage.set_alias(entry.id, None)?;
+        match entry.alias {
+            Some(old) => println!("Removed @{old} from id:{} (still pinned)", entry.id),
+            None => println!("id:{} has no alias", entry.id),
+        }
+        return Ok(());
+    };
+    if let Some(owner) = storage.by_alias(name)?.filter(|owner| owner.id != entry.id) {
+        return Err(CliError::new(Exit::NotFound, format!("alias @{name} already used by id:{}", owner.id)).into());
+    }
+    storage.set_alias(entry.id, Some(name))?;
+    println!("id:{} is now @{name} (pinned)", entry.id);
+    Ok(())
+}
+
 /// `clear`: every entry and the legacy backup dirs.
 pub fn clear(storage: &Storage) -> Result<()> {
     let cleared = storage.clear()?;

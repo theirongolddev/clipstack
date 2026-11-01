@@ -84,6 +84,21 @@ pub enum Commands {
         copy: bool,
     },
 
+    /// Name an entry (pinning it) so `get @NAME` finds it; --remove drops the name and keeps the pin
+    Alias {
+        /// N (position, 1 = newest), id:ID or @alias
+        #[arg(value_name = "REF")]
+        entry: EntryRef,
+
+        /// 1-32 characters from a-z, 0-9, '_' and '-' (a leading @ is optional)
+        #[arg(value_name = "NAME", value_parser = parse_alias_name, required_unless_present = "remove")]
+        name: Option<String>,
+
+        /// Remove the entry's alias; it stays pinned
+        #[arg(long, conflicts_with = "name")]
+        remove: bool,
+    },
+
     /// Clear clipboard history
     Clear,
 
@@ -194,6 +209,16 @@ impl fmt::Display for EntryRef {
             EntryRef::Id(id) => write!(f, "id:{id}"),
             EntryRef::Alias(name) => write!(f, "@{name}"),
         }
+    }
+}
+
+/// The `alias` NAME argument: an alias, optionally written `@name`.
+fn parse_alias_name(s: &str) -> Result<String, String> {
+    let name = s.strip_prefix('@').unwrap_or(s);
+    if is_valid_alias(name) {
+        Ok(name.to_string())
+    } else {
+        Err("use 1-32 characters from a-z, 0-9, '_' and '-', starting with a letter or digit".to_string())
     }
 }
 

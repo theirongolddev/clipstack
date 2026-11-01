@@ -307,3 +307,87 @@ fn search_no_match_exits_1() {
     let out = run(&env, &["search", " "], None);
     assert_eq!(code(&out), 2, "an empty query is a usage error: {}", stderr(&out));
 }
+
+// ======== alias (3-7) ========
+
+/// (pinned, alias) of the entry holding `content`, from `export`.
+fn pin_state(env: &TestEnv, content: &str) -> (bool, Option<String>) {
+    let entries = env.export();
+    let e = entries.iter().find(|e| e["content"] == content).expect("entry exists");
+    (e["pinned"].as_bool().unwrap(), e["alias"].as_str().map(str::to_string))
+}
+
+#[test]
+fn alias_pins_and_names() {
+    let env = TestEnv::new();
+    copy_all(&env, &["my signature", "newer"]);
+    let out = run(&env, &["alias", "2", "sig"], None);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("@sig"), "{}", stdout(&out));
+    assert_eq!(pin_state(&env, "my signature"), (true, Some("sig".into())));
+    assert_eq!(stdout(&run(&env, &["get", "@sig"], None)), "my signature");
+
+    // A leading @ on the name is accepted; renaming replaces the old alias
+    let id = id_of(&env, "my signature");
+    assert_eq!(code(&run(&env, &["alias", &format!("id:{id}"), "@signature"], None)), 0);
+    assert_eq!(pin_state(&env, "my signature"), (true, Some("signature".into())));
+    assert_eq!(code(&run(&env, &["get", "@sig"], None)), 1);
+
+    // Invalid names are usage errors
+    for bad in ["Sig", "-x", "a b", ""] {
+        let out = run(&env, &["alias", "1", bad], None);
+        assert_eq!(code(&out), 2, "{bad:?}: {}", stderr(&out));
+    }
+    assert_eq!(code(&run(&env, &["alias", "1"], None)), 2, "NAME or --remove is required");
+}
+
+#[test]
+fn alias_conflict_exits_1() {
+    let env = TestEnv::new();
+    copy_all(&env, &["first", "second"]);
+    let first = id_of(&env, "first");
+    assert_eq!(code(&run(&env, &["alias", &format!("id:{first}"), "x"], None)), 0);
+
+    let out = run(&env, &["alias", "1", "x"], None);
+    assert_eq!(code(&out), 1, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains(&format!("alias @x already used by id:{first}")), "{}", stderr(&out));
+    assert_eq!(pin_state(&env, "second"), (false, None), "nothing changed");
+    // Naming an entry with the alias it already has is fine
+    assert_eq!(code(&run(&env, &["alias", &format!("id:{first}"), "x"], None)), 0);
+    // A missing entry is not found
+    assert_eq!(code(&run(&env, &["alias", "id:999", "y"], None)), 1);
+}
+
+#[test]
+fn alias_remove_keeps_pin() {
+    let env = TestEnv::new();
+    copy_all(&env, &["named"]);
+    assert_eq!(code(&run(&env, &["alias", "1", "n"], None)), 0);
+    let out = run(&env, &["alias", "--remove", "@n"], None);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(pin_state(&env, "named"), (true, None));
+    assert_eq!(code(&run(&env, &["get", "@n"], None)), 1);
+    // Removing from an entry without an alias is a no-op
+    assert_eq!(code(&run(&env, &["alias", "--remove", "1"], None)), 0);
+    // A name and --remove together are a usage error
+    assert_eq!(code(&run(&env, &["alias", "--remove", "1", "n"], None)), 2);
+}
+
+#[test]
+fn alias_at_pin_limit_exits_1() {
+    let env = TestEnv::new();
+    let texts: Vec<String> = (0..26).map(|i| format!("entry {i}")).collect();
+    copy_all(&env, &texts.iter().map(String::as_str).collect::<Vec<_>>());
+    // Pin the 25 oldest directly
+    rusqlite::Connection::open(env.storage_dir.join("clipstack.db"))
+        .unwrap()
+        .execute("UPDATE entries SET pinned = 1 WHERE content != 'entry 25'", [])
+        .unwrap();
+
+    let out = run(&env, &["alias", "1", "one-too-many"], None);
+    assert_eq!(code(&out), 1, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("Maximum pinned entries (25)"), "{}", stderr(&out));
+    assert_eq!(pin_state(&env, "entry 25"), (false, None));
+    // An entry that is already pinned can still be named
+    assert_eq!(code(&run(&env, &["alias", "2", "fine"], None)), 0);
+}
