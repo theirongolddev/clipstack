@@ -1120,8 +1120,13 @@ created as v1 and migrated, so the migration runs everywhere.
   Re-copying the same image bumps it like text.
 - Only `image/png` is stored. Width and height come from the PNG IHDR chunk; bytes
   without a valid PNG signature and IHDR are rejected (`SkipReason::NotPng`).
-- Caps: new `[storage] max_image_bytes` (default 8 MiB). `max_total_bytes` and
+- Caps: new `[storage] max_image_bytes` (default 8 MiB, 1..=64 MiB). `max_total_bytes` and
   `max_entries` count image entries like text. Retention applies to them too.
+  *Amended:* an image over the cap is `SkipReason::ImageTooLarge { size, limit }`
+  (code `too_large`, message names `max_image_bytes`) rather than reusing
+  `TooLarge`, whose message names `max_entry_bytes`. The effective image cap is
+  `min(max_image_bytes, max_total_bytes)`, so an image is never saved only to be
+  pruned by the total cap in the same transaction.
 - `x-kde-passwordManagerHint` skips images as well. Text ignore patterns do not
   apply to images.
 - `ClipEntry` gains `kind: Kind` (`Text | Image`, serialised lowercase),

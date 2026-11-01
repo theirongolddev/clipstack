@@ -27,6 +27,8 @@ pub struct StorageConfig {
     pub retention_days: u32,
     pub max_entry_bytes: u64,
     pub max_total_bytes: u64,
+    /// Largest PNG image saved (images are not limited by max_entry_bytes)
+    pub max_image_bytes: u64,
     pub ignore_patterns: Vec<String>,
     pub builtin_secret_patterns: bool,
 }
@@ -37,6 +39,7 @@ impl Default for StorageConfig {
             retention_days: 0,
             max_entry_bytes: crate::storage::DEFAULT_MAX_ENTRY_BYTES,
             max_total_bytes: crate::storage::DEFAULT_MAX_TOTAL_BYTES,
+            max_image_bytes: crate::storage::DEFAULT_MAX_IMAGE_BYTES,
             ignore_patterns: Vec::new(),
             builtin_secret_patterns: true,
         }
@@ -235,6 +238,12 @@ impl Config {
                 s.max_entry_bytes
             )));
         }
+        if !(1..=MAX_ENTRY_BYTES_LIMIT).contains(&s.max_image_bytes) {
+            return Err(ConfigError(format!(
+                "[storage] max_image_bytes = {} must be between 1 and {MAX_ENTRY_BYTES_LIMIT} (64 MiB)",
+                s.max_image_bytes
+            )));
+        }
         if s.max_total_bytes < s.max_entry_bytes {
             return Err(ConfigError(format!(
                 "[storage] max_total_bytes = {} must be at least max_entry_bytes = {}",
@@ -272,7 +281,8 @@ impl Config {
             s.max_entry_bytes as usize,
             s.max_total_bytes,
             retention,
-        ))
+        )
+        .with_max_image_bytes(s.max_image_bytes as usize))
     }
 }
 
@@ -330,6 +340,7 @@ mod tests {
                 retention_days: 30,
                 max_entry_bytes: 1024,
                 max_total_bytes: 4096,
+                max_image_bytes: crate::storage::DEFAULT_MAX_IMAGE_BYTES,
                 ignore_patterns: vec!["^secret:".to_string()],
                 builtin_secret_patterns: false,
             }
@@ -452,6 +463,21 @@ mod tests {
         let text = format!("[storage]\nignore_patterns = [{}]\n", many.join(", "));
         let err = Config::parse(&text).unwrap().ingest_policy().unwrap_err();
         assert!(err.to_string().contains("64"), "{err}");
+    }
+
+    #[test]
+    fn max_image_bytes_defaults_to_8_mib_and_is_validated() {
+        assert_eq!(Config::default().storage.max_image_bytes, 8 * 1024 * 1024);
+        assert_eq!(policy("").max_image_bytes(), 8 * 1024 * 1024);
+        assert_eq!(policy("[storage]\nmax_image_bytes = 4096\n").max_image_bytes(), 4096);
+        assert_eq!(policy("[storage]\nmax_image_bytes = 67108864\n").max_image_bytes(), 64 << 20);
+        for bad in ["0", "67108865"] {
+            let err = Config::parse(&format!("[storage]\nmax_image_bytes = {bad}\n"))
+                .unwrap()
+                .ingest_policy()
+                .unwrap_err();
+            assert!(err.to_string().contains("max_image_bytes"), "{bad}: {err}");
+        }
     }
 
     #[test]

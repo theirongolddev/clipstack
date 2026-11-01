@@ -8,6 +8,15 @@ pub fn compute_hash(content: &str) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// SHA-256 of `b"image\0"` followed by the PNG bytes: the hash of an image
+/// entry, so an image can never share a hash with a text entry.
+pub fn compute_image_hash(png: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"image\0");
+    hasher.update(png);
+    hasher.finalize().to_vec()
+}
+
 /// Format bytes into human-readable size
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {

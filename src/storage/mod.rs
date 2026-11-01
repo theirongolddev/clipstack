@@ -6,7 +6,9 @@ mod legacy;
 mod query;
 mod schema;
 
-pub use ingest::{DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestOutcome, IngestPolicy, now_ms};
+pub use ingest::{
+    DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestOutcome, IngestPolicy, now_ms,
+};
 
 use std::fmt;
 
@@ -25,6 +27,10 @@ pub enum StorageError {
     InvalidAlias(String),
     /// `check` found damage it didn't (or couldn't) repair
     Corrupt(String),
+    /// `load_content` on an image entry
+    NotText { id: EntryId },
+    /// `load_image` on a text entry
+    NotImage { id: EntryId },
 }
 
 impl fmt::Display for StorageError {
@@ -48,6 +54,8 @@ impl fmt::Display for StorageError {
                  starting with a letter or digit"
             ),
             StorageError::Corrupt(what) => write!(f, "{what}"),
+            StorageError::NotText { id } => write!(f, "Entry id:{id} is an image, not text"),
+            StorageError::NotImage { id } => write!(f, "Entry id:{id} is text, not an image"),
         }
     }
 }

@@ -294,9 +294,11 @@ fn cause_exit(cause: &(dyn std::error::Error + 'static)) -> Option<Exit> {
         return Some(match e {
             StorageError::NewerSchema { .. } | StorageError::Corrupt(_) => Exit::Storage,
             StorageError::InvalidAlias(_) => Exit::Usage,
-            StorageError::NotFound { .. } | StorageError::PinLimit { .. } | StorageError::AliasTaken(_) => {
-                Exit::NotFound
-            }
+            StorageError::NotFound { .. }
+            | StorageError::PinLimit { .. }
+            | StorageError::AliasTaken(_)
+            | StorageError::NotText { .. }
+            | StorageError::NotImage { .. } => Exit::NotFound,
         });
     }
     // Locked (busy past the timeout), I/O or corruption reported by SQLite

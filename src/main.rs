@@ -6,6 +6,7 @@ mod daemon;
 mod perms;
 mod protocol;
 mod picker;
+mod png;
 mod storage;
 mod util;
 

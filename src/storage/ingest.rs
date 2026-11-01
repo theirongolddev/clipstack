@@ -2,7 +2,7 @@
 
 use super::query::{ENTRY_COLUMNS, entry_from_row};
 use super::{ClipEntry, Source, Storage};
-use crate::util;
+use crate::{png, util};
 use anyhow::Result;
 use regex::RegexSet;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -12,6 +12,8 @@ use std::time::Duration;
 pub const DEFAULT_MAX_ENTRY_BYTES: u64 = 10 * 1024 * 1024;
 /// Default `[storage] max_total_bytes` of unpinned content.
 pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Default `[storage] max_image_bytes`: larger PNG copies are not saved.
+pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// What `ingest` refuses to save and how much history it keeps.
 /// Built from the config file by `Config::ingest_policy`.
@@ -22,6 +24,7 @@ pub struct IngestPolicy {
     user_patterns: usize,
     max_entry_bytes: usize,
     max_total_bytes: u64,
+    max_image_bytes: usize,
     retention: Option<Duration>,
 }
 
@@ -33,6 +36,7 @@ impl Default for IngestPolicy {
             user_patterns: 0,
             max_entry_bytes: DEFAULT_MAX_ENTRY_BYTES as usize,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES as usize,
             retention: None,
         }
     }
@@ -47,7 +51,20 @@ impl IngestPolicy {
         max_total_bytes: u64,
         retention: Option<Duration>,
     ) -> Self {
-        Self { ignore, user_patterns, max_entry_bytes, max_total_bytes, retention }
+        Self {
+            ignore,
+            user_patterns,
+            max_entry_bytes,
+            max_total_bytes,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES as usize,
+            retention,
+        }
+    }
+
+    /// The same policy with `[storage] max_image_bytes` set.
+    pub fn with_max_image_bytes(mut self, max_image_bytes: usize) -> Self {
+        self.max_image_bytes = max_image_bytes;
+        self
     }
 
     /// Index of the first ignore pattern matching `content`.
@@ -72,6 +89,17 @@ impl IngestPolicy {
         self.max_total_bytes
     }
 
+    #[allow(dead_code)] // TEMP: read by the daemon capture commit
+    pub fn max_image_bytes(&self) -> usize {
+        self.max_image_bytes
+    }
+
+    /// The largest image `ingest_image` saves: `max_image_bytes`, but never
+    /// more than `max_total_bytes`, which would prune it at once.
+    fn image_limit(&self) -> usize {
+        self.max_image_bytes.min(usize::try_from(self.max_total_bytes).unwrap_or(usize::MAX))
+    }
+
     /// `None` = keep unpinned entries forever.
     pub fn retention(&self) -> Option<Duration> {
         self.retention
@@ -90,6 +118,10 @@ impl IngestPolicy {
             SkipReason::IgnoredPattern { index } => format!("matches {}", self.pattern_label(*index)),
             SkipReason::TooLarge { size, limit } => {
                 format!("too large ({size} bytes; max_entry_bytes is {limit})")
+            }
+            SkipReason::NotPng => "not a PNG image".to_string(),
+            SkipReason::ImageTooLarge { size, limit } => {
+                format!("image too large ({size} bytes; max_image_bytes is {limit})")
             }
         }
     }
@@ -121,17 +153,22 @@ pub enum SkipReason {
     /// Index into the policy's pattern set (`IngestPolicy::pattern_label`)
     IgnoredPattern { index: usize },
     TooLarge { size: usize, limit: usize },
+    /// `ingest_image`: no PNG signature and valid IHDR chunk
+    NotPng,
+    /// `ingest_image`: over `max_image_bytes` (or `max_total_bytes`, if smaller)
+    ImageTooLarge { size: usize, limit: usize },
 }
 
 impl SkipReason {
     /// Short machine-readable reason, as in the socket's `reason=`:
-    /// `empty`, `sensitive`, `ignored` or `too_large`.
+    /// `empty`, `sensitive`, `ignored`, `too_large` or `not_png`.
     pub fn code(&self) -> &'static str {
         match self {
             SkipReason::Empty => "empty",
             SkipReason::Sensitive => "sensitive",
             SkipReason::IgnoredPattern { .. } => "ignored",
-            SkipReason::TooLarge { .. } => "too_large",
+            SkipReason::TooLarge { .. } | SkipReason::ImageTooLarge { .. } => "too_large",
+            SkipReason::NotPng => "not_png",
         }
     }
 }
@@ -150,6 +187,28 @@ pub fn classify(content: &str, mime_types: &[String], policy: &IngestPolicy) -> 
         return Some(SkipReason::TooLarge { size: content.len(), limit: policy.max_entry_bytes });
     }
     policy.ignored_by(content).map(|index| SkipReason::IgnoredPattern { index })
+}
+
+/// The PNG header of `png`, or why it must not be saved. Checks run in
+/// order: empty, password-manager hint, size, PNG signature and IHDR. Text
+/// ignore patterns don't apply to images.
+pub fn classify_image(png: &[u8], mime_types: &[String], policy: &IngestPolicy) -> Result<png::PngInfo, SkipReason> {
+    if png.is_empty() {
+        return Err(SkipReason::Empty);
+    }
+    if crate::clipboard::is_sensitive_offer(mime_types) {
+        return Err(SkipReason::Sensitive);
+    }
+    let limit = policy.image_limit();
+    if png.len() > limit {
+        return Err(SkipReason::ImageTooLarge { size: png.len(), limit });
+    }
+    png::parse_header(png).ok_or(SkipReason::NotPng)
+}
+
+/// The preview of an image entry: `Image · WxH`.
+pub fn image_preview(width: u32, height: u32) -> String {
+    format!("Image \u{b7} {width}x{height}")
 }
 
 /// Preview length in characters.
@@ -184,6 +243,36 @@ impl Storage {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (entry, inserted) = insert_or_bump(&tx, content, source, mime_types, now_ms)?;
+        let pruned = enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
+        tx.commit()?;
+        if pruned > 0 {
+            super::scrub_deleted(&conn);
+        }
+        Ok(if inserted { IngestOutcome::Inserted(entry) } else { IngestOutcome::Bumped(entry) })
+    }
+
+    /// Save a PNG image: the image counterpart of `ingest` (same bump,
+    /// caps and retention; `max_image_bytes` instead of `max_entry_bytes`).
+    #[allow(dead_code)] // TEMP: called by the daemon capture commit
+    pub fn ingest_image(&self, png: &[u8], source: Source, mime_types: &[String]) -> Result<IngestOutcome> {
+        self.ingest_image_at(png, source, mime_types, now_ms())
+    }
+
+    /// `ingest_image` with an injected clock, for tests.
+    pub(crate) fn ingest_image_at(
+        &self,
+        png: &[u8],
+        source: Source,
+        mime_types: &[String],
+        now_ms: i64,
+    ) -> Result<IngestOutcome> {
+        let info = match classify_image(png, mime_types, &self.policy) {
+            Ok(info) => info,
+            Err(reason) => return Ok(IngestOutcome::Skipped(reason)),
+        };
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (entry, inserted) = insert_or_bump_image(&tx, png, info, source, now_ms)?;
         let pruned = enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
         tx.commit()?;
         if pruned > 0 {
@@ -330,6 +419,47 @@ pub(crate) fn insert_or_bump(
             now_ms,
             source.as_str(),
             chosen_mime(mime_types),
+        ],
+        entry_from_row,
+    )?;
+    Ok((entry, true))
+}
+
+/// `insert_or_bump` for a PNG: `content` is empty (nothing is indexed),
+/// the bytes go in `image`.
+fn insert_or_bump_image(
+    tx: &Transaction<'_>,
+    png: &[u8],
+    info: png::PngInfo,
+    source: Source,
+    now_ms: i64,
+) -> Result<(ClipEntry, bool)> {
+    let hash = util::compute_image_hash(png);
+    let bump = format!("UPDATE entries SET last_used = ?1 WHERE hash = ?2 RETURNING {ENTRY_COLUMNS}");
+    if let Some(entry) = tx
+        .prepare_cached(&bump)?
+        .query_row(params![now_ms, hash], entry_from_row)
+        .optional()?
+    {
+        return Ok((entry, false));
+    }
+
+    let insert = format!(
+        "INSERT INTO entries (content, hash, size, preview, created_at, last_used, source, mime,
+                              kind, width, height, image)
+         VALUES ('', ?1, ?2, ?3, ?4, ?4, ?5, ?6, 'image', ?7, ?8, ?9) RETURNING {ENTRY_COLUMNS}"
+    );
+    let entry = tx.prepare_cached(&insert)?.query_row(
+        params![
+            hash,
+            i64::try_from(png.len())?,
+            image_preview(info.width, info.height),
+            now_ms,
+            source.as_str(),
+            png::MIME,
+            info.width,
+            info.height,
+            png,
         ],
         entry_from_row,
     )?;
@@ -614,6 +744,144 @@ mod tests {
         // An entry exactly at the cap pushes out every older unpinned entry
         storage.ingest_at("dddddddddd", Source::Copy, &[], 5).unwrap();
         assert_eq!(contents(&storage), ["PPPPPPPPPP", "dddddddddd"]);
+    }
+
+    // ======== images (5.1) ========
+
+    use crate::png::test_png;
+    use crate::storage::Kind;
+
+    fn png_types() -> Vec<String> {
+        vec!["image/png".to_string()]
+    }
+
+    #[test]
+    fn image_inserts_with_dimensions_and_bumps_on_recopy() {
+        let (storage, _dir) = test_storage();
+        let png = test_png(640, 480, b"one");
+        let entry = inserted(storage.ingest_image_at(&png, Source::Watch, &png_types(), 1_000).unwrap());
+        assert_eq!(entry.kind, Kind::Image);
+        assert_eq!((entry.width, entry.height), (Some(640), Some(480)));
+        assert_eq!(entry.mime, "image/png");
+        assert_eq!(entry.preview, "Image \u{b7} 640x480");
+        assert_eq!(entry.size, png.len());
+        assert_eq!(entry.source, Source::Watch);
+        assert_eq!(storage.get(entry.id).unwrap(), Some(entry.clone()));
+
+        assert_eq!(storage.load_image(entry.id).unwrap(), png);
+        let err = storage.load_content(entry.id).unwrap_err();
+        assert!(err.to_string().contains("image"), "{err}");
+
+        let again = bumped(storage.ingest_image_at(&png, Source::Copy, &[], 2_000).unwrap());
+        assert_eq!(again.id, entry.id);
+        assert_eq!(again.last_used, 2_000);
+        assert_eq!(again.created_at, 1_000);
+        let other = inserted(storage.ingest_image_at(&test_png(640, 480, b"two"), Source::Watch, &[], 3_000).unwrap());
+        assert_ne!(other.id, entry.id, "same size, different bytes");
+        assert_eq!(entry_count(&storage), 2);
+    }
+
+    #[test]
+    fn image_hash_is_prefixed_so_it_never_collides_with_text() {
+        let (storage, _dir) = test_storage();
+        let png = test_png(2, 2, b"");
+        let entry = inserted(storage.ingest_image_at(&png, Source::Copy, &[], 1).unwrap());
+        let stored: Vec<u8> = storage.with_conn(|c| {
+            c.query_row("SELECT hash FROM entries WHERE id = ?1", [entry.id], |r| r.get(0)).unwrap()
+        });
+        let mut prefixed = b"image\0".to_vec();
+        prefixed.extend_from_slice(&png);
+        use sha2::{Digest, Sha256};
+        assert_eq!(stored, Sha256::digest(&prefixed).to_vec());
+        assert_eq!(util::compute_image_hash(&png), stored);
+    }
+
+    #[test]
+    fn text_entry_is_not_an_image() {
+        let (storage, _dir) = test_storage();
+        let entry = inserted(storage.ingest_at("words", Source::Copy, &[], 1).unwrap());
+        let err = storage.load_image(entry.id).unwrap_err();
+        assert!(err.to_string().contains("not an image"), "{err}");
+        assert!(storage.load_image(999).is_err());
+    }
+
+    #[test]
+    fn image_skips_not_png_empty_sensitive_and_too_large() {
+        let policy = IngestPolicy::new(RegexSet::new(["."]).unwrap(), 1, 1024, 1 << 20, None)
+            .with_max_image_bytes(100);
+        let (storage, _dir) = storage_with(policy);
+        let skip = |bytes: &[u8], types: &[String]| storage.ingest_image_at(bytes, Source::Watch, types, 1).unwrap();
+
+        assert_eq!(skip(b"", &[]), IngestOutcome::Skipped(SkipReason::Empty));
+        assert_eq!(skip(b"GIF89a not a png at all", &[]), IngestOutcome::Skipped(SkipReason::NotPng));
+        let hint = vec!["image/png".to_string(), PASSWORD_HINT_MIME.to_string()];
+        assert_eq!(skip(&test_png(1, 1, b""), &hint), IngestOutcome::Skipped(SkipReason::Sensitive));
+        let big = test_png(1, 1, &[b'x'; 200]);
+        assert_eq!(
+            skip(&big, &[]),
+            IngestOutcome::Skipped(SkipReason::ImageTooLarge { size: big.len(), limit: 100 })
+        );
+        assert_eq!(entry_count(&storage), 0);
+
+        // The text ignore pattern "." matches anything, but not images
+        assert!(matches!(skip(&test_png(1, 1, b""), &[]), IngestOutcome::Inserted(_)));
+
+        let policy = storage.policy();
+        assert_eq!(policy.max_image_bytes(), 100);
+        assert_eq!(SkipReason::NotPng.code(), "not_png");
+        assert_eq!(SkipReason::ImageTooLarge { size: 1, limit: 1 }.code(), "too_large");
+        assert!(policy.describe_skip(&SkipReason::NotPng).contains("PNG"));
+        assert!(policy
+            .describe_skip(&SkipReason::ImageTooLarge { size: 200, limit: 100 })
+            .contains("max_image_bytes is 100"));
+    }
+
+    #[test]
+    fn image_cap_is_at_most_the_total_cap() {
+        let policy = limits(1024, 60, 0).with_max_image_bytes(1 << 20);
+        let (storage, _dir) = storage_limited(100, policy);
+        let png = test_png(1, 1, &[b'x'; 40]);
+        assert!(png.len() > 60);
+        assert_eq!(
+            storage.ingest_image_at(&png, Source::Copy, &[], 1).unwrap(),
+            IngestOutcome::Skipped(SkipReason::ImageTooLarge { size: png.len(), limit: 60 }),
+            "an image the total cap would prune at once is not saved"
+        );
+    }
+
+    #[test]
+    fn images_count_toward_total_bytes_max_entries_and_retention() {
+        let png = test_png(3, 3, b"");
+        let cap = png.len() as u64 + 8;
+        let (storage, _dir) = storage_limited(100, limits(1024, cap, 0));
+        storage.ingest_image_at(&png, Source::Copy, &[], 1).unwrap();
+        storage.ingest_at("12345678", Source::Copy, &[], 2).unwrap();
+        assert_eq!(entry_count(&storage), 2, "exactly at the cap");
+        storage.ingest_at("x", Source::Copy, &[], 3).unwrap();
+        assert_eq!(contents(&storage), ["12345678", "x"], "the image was the oldest");
+
+        let (storage, _dir) = storage_limited(2, IngestPolicy::default());
+        storage.ingest_image_at(&png, Source::Copy, &[], 1).unwrap();
+        storage.ingest_at("a", Source::Copy, &[], 2).unwrap();
+        storage.ingest_at("b", Source::Copy, &[], 3).unwrap();
+        assert_eq!(contents(&storage), ["a", "b"], "max_entries counts images");
+
+        let (storage, _dir) = storage_limited(100, limits(1024, 1 << 20, 7));
+        let t0 = 1_000 * DAY_MS;
+        storage.ingest_image_at(&png, Source::Copy, &[], t0).unwrap();
+        assert_eq!(storage.expire_at(t0 + 8 * DAY_MS).unwrap(), 1, "retention expires images");
+    }
+
+    #[test]
+    fn images_are_not_found_by_search_but_are_listed() {
+        let (storage, _dir) = test_storage();
+        let image = inserted(storage.ingest_image_at(&test_png(4, 4, b"Image"), Source::Copy, &[], 1).unwrap());
+        storage.ingest_at("an Image caption", Source::Copy, &[], 2).unwrap();
+        assert_eq!(storage.search("image", 10).unwrap().len(), 1, "nothing of an image is indexed");
+        let listed = storage.list(crate::storage::ListOrder::Recency, None).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].id, image.id);
+        assert_eq!(storage.counts().unwrap().total_bytes as usize, image.size + 16);
     }
 
     #[test]
