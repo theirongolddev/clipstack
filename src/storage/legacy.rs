@@ -2,9 +2,11 @@
 //!
 //! Crash-safe and idempotent: entries are upserted by content hash in one
 //! transaction, and the old files are moved to `legacy-backup-<ms>/` only
-//! after it commits. Nothing is deleted.
+//! after it commits. Nothing is deleted: content the ingest policy rejects
+//! (empty, ignore and secret patterns, oversize) is not imported, but its
+//! file still goes to the backup.
 
-use super::ingest::{DEFAULT_MIME, make_preview, prune_to_max_entries};
+use super::ingest::{DEFAULT_MIME, IngestPolicy, classify, make_preview, prune_to_max_entries};
 use super::{
     ABSOLUTE_MAX_ENTRIES, DEFAULT_MAX_ENTRIES, SETTING_MAX_ENTRIES, get_setting, set_setting,
 };
@@ -64,6 +66,8 @@ pub(super) struct ImportReport {
     pub imported: usize,
     /// Content files that are not UTF-8 text: moved to the backup, not imported
     pub not_text: usize,
+    /// Content files the ingest policy rejects: moved to the backup, not imported
+    pub skipped: usize,
     /// Where the old files went; `None` if there was nothing to move
     pub backup_dir: Option<PathBuf>,
 }
@@ -167,22 +171,25 @@ fn scan(dir: &Path) -> Result<LegacyScan> {
     Ok(LegacyScan { index_file, max_entries, items, tmp_files })
 }
 
-/// Import the old store in `dir`. `explicit_limit` is the CLI/env
-/// `max_entries`; the import prunes to the effective limit (and only that:
-/// retention and the size caps are left to the next open).
+/// Import the old store in `dir`. Each entry goes through `classify`, like
+/// any ingest. `explicit_limit` is the CLI/env `max_entries`; the import
+/// prunes to the effective limit (retention and the total-size cap are left
+/// to the next open, so the notice can warn first).
 pub(super) fn import(
     conn: &mut Connection,
     dir: &Path,
     explicit_limit: Option<usize>,
+    policy: &IngestPolicy,
     now_ms: i64,
 ) -> Result<ImportReport> {
-    import_with(conn, dir, explicit_limit, now_ms, &|_| Ok(()))
+    import_with(conn, dir, explicit_limit, policy, now_ms, &|_| Ok(()))
 }
 
 pub(super) fn import_with(
     conn: &mut Connection,
     dir: &Path,
     explicit_limit: Option<usize>,
+    policy: &IngestPolicy,
     now_ms: i64,
     hook: &dyn Fn(Stage) -> Result<()>,
 ) -> Result<ImportReport> {
@@ -223,6 +230,10 @@ pub(super) fn import_with(
                 report.not_text += 1;
                 continue;
             };
+            if classify(&content, &[], policy).is_some() {
+                report.skipped += 1;
+                continue;
+            }
             upsert.execute(params![
                 util::compute_hash(&content),
                 i64::try_from(content.len())?,
@@ -449,10 +460,52 @@ mod tests {
         let legacy: Vec<Legacy<'_>> =
             (0..5).map(|i| entry(&ids[i], 1000 + i as i64, &entries[i])).collect();
         write_legacy(dir.path(), 3, &legacy);
-        let policy = IngestPolicy::new(regex::RegexSet::empty(), 0, 4, 4, None);
+        let policy = IngestPolicy::new(regex::RegexSet::empty(), 0, 8, 8, None);
         let storage = Storage::open(dir.path().to_path_buf(), None, policy).unwrap();
-        // Total-size cap (4 bytes) is not applied by the importing open
+        // Total-size cap (8 bytes, one entry) is not applied by the importing open
         assert_eq!(contents(&storage), ["entry 4", "entry 3", "entry 2"]);
+    }
+
+    #[test]
+    fn import_skips_what_the_ingest_policy_rejects() {
+        let dir = TempDir::new().unwrap();
+        let key = format!("-----BEGIN RSA {} KEY-----\nMIIE\n", "PRIVATE");
+        let big = "b".repeat(65);
+        write_legacy(
+            dir.path(),
+            100,
+            &[
+                entry("5000", 5000, "kept entry"),
+                entry("4000", 4000, ""),
+                entry("3000", 3000, &key),
+                entry("2000", 2000, &big),
+                entry("1000", 1000, "password: hunter2"),
+            ],
+        );
+        let config = crate::config::Config::parse(
+            "[storage]\nmax_entry_bytes = 64\nmax_total_bytes = 1024\nignore_patterns = ['^password:']\n",
+        )
+        .unwrap();
+        let policy = config.ingest_policy().unwrap();
+        let mut conn = connection(&dir);
+        let report = import_with(&mut conn, dir.path(), None, &policy, 9_000, &|_| Ok(())).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped, 4, "empty, built-in pattern, oversize, ignore pattern");
+        let left: Vec<String> = conn
+            .prepare("SELECT content FROM entries")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["kept entry"]);
+        // Skipped files are only in the backup, which is now their one copy
+        let backup = &backup_dirs(dir.path())[0];
+        assert_eq!(
+            sorted_names(backup),
+            ["1000.txt", "2000.txt", "3000.txt", "4000.txt", "5000.txt", "index.json"]
+        );
+        assert_eq!(root_files(dir.path()), ["index.lock"]);
     }
 
     #[test]
@@ -529,7 +582,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_legacy(dir.path(), 100, &[entry("1000", 1000, "a"), entry("2000", 2000, "b")]);
         let mut conn = connection(&dir);
-        let err = import_with(&mut conn, dir.path(), None, 5_000, &fail_at(Stage::BeforeCommit))
+        let err = import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 5_000, &fail_at(Stage::BeforeCommit))
             .unwrap_err();
         assert!(err.to_string().contains("injected"), "{err:#}");
         assert_eq!(entry_count(&conn), 0, "rolled back");
@@ -544,11 +597,11 @@ mod tests {
         pinned.pinned = true;
         write_legacy(dir.path(), 100, &[pinned, entry("2000", 2000, "b")]);
         let mut conn = connection(&dir);
-        import_with(&mut conn, dir.path(), None, 5_000, &fail_at(Stage::BeforeMove)).unwrap_err();
+        import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 5_000, &fail_at(Stage::BeforeMove)).unwrap_err();
         assert_eq!(entry_count(&conn), 2, "committed");
         assert!(dir.path().join("index.json").exists(), "but nothing moved");
 
-        let report = import_with(&mut conn, dir.path(), None, 6_000, &|_| Ok(())).unwrap();
+        let report = import_with(&mut conn, dir.path(), None, &IngestPolicy::default(), 6_000, &|_| Ok(())).unwrap();
         assert_eq!(report.imported, 2);
         assert_eq!(entry_count(&conn), 2, "no duplicates");
         let pinned: i64 = conn.query_row("SELECT sum(pinned) FROM entries", [], |r| r.get(0)).unwrap();

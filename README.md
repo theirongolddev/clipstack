@@ -465,7 +465,7 @@ Versions before the SQLite store kept `index.json` plus one `<id>.txt` file per 
 
 The first command of the new version imports the old store automatically:
 
-- It takes the old `index.lock`, so a still-running old daemon can't change the files mid-import, and imports every entry with its timestamp and pinned flag in one transaction. Identical contents are merged. Only the entry limit applies during the import (the old version enforced it too); ignore patterns never apply to imported entries, and retention and the size caps apply from the next start.
+- It takes the old `index.lock`, so a still-running old daemon can't change the files mid-import, and imports every entry with its timestamp and pinned flag in one transaction. Identical contents are merged. Each entry goes through the same filter as a new copy: empty entries, entries over `max_entry_bytes`, and entries matching your `ignore_patterns` or the built-in secret patterns are not imported (their files still go to the backup, below). Of the limits, only the entry limit applies during the import (the old version enforced it too); retention and the total-size cap apply from the next start.
 - Only after the transaction commits are `index.json`, the `.txt` files and any `.tmp` leftovers moved into `legacy-backup-<ms>/` (`0700`). `index.lock` stays where it is. Nothing is deleted.
 - It prints `Imported N entries from index.json; old files kept in .../legacy-backup-<ms>/ (delete after checking)` once. If retention is on, it also says how many imported entries will expire at the next start.
 - `status` and `check` keep listing the backup until you delete it. The backup holds your old history as plain text files, so delete it once `clipstack list` looks right.

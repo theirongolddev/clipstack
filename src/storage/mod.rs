@@ -213,7 +213,7 @@ impl Storage {
         let db_path = dir.join(DB_FILE);
         let mut conn = schema::open_connection(&db_path)?;
         let import = if legacy::detect(&dir) {
-            let report = legacy::import(&mut conn, &dir, max_entries, ingest::now_ms())
+            let report = legacy::import(&mut conn, &dir, max_entries, &policy, ingest::now_ms())
                 .with_context(|| format!("Failed to import the old store in {dir:?}"))?;
             Some(report)
         } else {
@@ -268,6 +268,13 @@ impl Storage {
             report.imported,
             backup.display()
         );
+        if report.skipped > 0 {
+            eprintln!(
+                "{} entries were not imported because the storage policy rejects them \
+                 (empty, too large, or matching an ignore or secret pattern); they are in the backup dir",
+                report.skipped
+            );
+        }
         if report.not_text > 0 {
             eprintln!(
                 "{} content files are not UTF-8 text and were not imported; they are in the backup dir",
