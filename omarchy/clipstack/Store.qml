@@ -50,8 +50,11 @@ Item {
     root.aliasInput = "";
     if (!root.statusWhileClosed) root.status = "";
     root.statusWhileClosed = false;
+    // The last session may have closed on a search: show the history as
+    // last listed until the fresh list arrives
     root.resetSelection = true;
-    root.selectedIndex = root.rows.length > 0 ? 0 : -1;
+    if (root.loaded) root.showRows(root.allEntries);
+    root.resetSelection = true;
     root.refresh();
     root.focusSearch();
   }

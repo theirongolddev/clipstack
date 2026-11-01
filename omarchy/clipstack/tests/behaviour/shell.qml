@@ -101,6 +101,13 @@ ShellRoot {
             JSON.stringify(log));
         });
       }],
+      [300, function () {
+        store.close();
+        store.open("{}");
+        const groups = store.rows.map(function (r) { return r.group; });
+        shellRoot.check("reopening never shows the last session's matches", groups.indexOf("MATCHES") < 0,
+          JSON.stringify(groups));
+      }],
     ];
     stepTimer.interval = 1;
     stepTimer.start();
