@@ -379,10 +379,11 @@ function actionArgv(bin, action, entry, arg) {
   return [];
 }
 
-// Paste and edit close the overlay first so focus returns to the previous
-// window (wtype types into it; the editor opens over it).
+// Picking an entry closes the overlay, as in Maccy. Paste and edit close it
+// before the command runs so focus is back on the previous window (wtype
+// types into it; the editor opens over it).
 function actionClosesOverlay(action) {
-  return action === "paste" || action === "edit";
+  return action === "paste" || action === "copy" || action === "edit";
 }
 
 // "" on success, else one line for the footer status. `search` exits 1 on

@@ -355,10 +355,12 @@ test("actionArgv builds each entry action", () => {
   assert.deepEqual(j(L.actionArgv("cs", "nope", e)), []);
 });
 
-test("actionClosesOverlay: paste and edit hand focus back first", () => {
+test("actionClosesOverlay: paste, copy and edit close (Maccy), the rest stay open", () => {
   assert.equal(L.actionClosesOverlay("paste"), true);
   assert.equal(L.actionClosesOverlay("edit"), true);
-  assert.equal(L.actionClosesOverlay("copy"), false);
+  assert.equal(L.actionClosesOverlay("copy"), true);
+  assert.equal(L.actionClosesOverlay("pin"), false);
+  assert.equal(L.actionClosesOverlay("alias"), false);
   assert.equal(L.actionClosesOverlay("delete"), false);
 });
 
