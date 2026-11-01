@@ -356,6 +356,12 @@ test("argv builders put user input in its own argument", () => {
   assert.deepEqual(j(L.imagePathArgv("cs", 7)), ["cs", "get", "id:7", "--image-path"]);
 });
 
+test("fileUrl percent-encodes each path segment", () => {
+  assert.equal(L.fileUrl("/run/user/1000/clipstack-images/6.png"), "file:///run/user/1000/clipstack-images/6.png");
+  assert.equal(L.fileUrl("/tmp/a b#1 %20?x/ü.png"), "file:///tmp/a%20b%231%20%2520%3Fx/%C3%BC.png");
+  assert.equal(L.fileUrl(""), "");
+});
+
 test("actionArgv builds each entry action", () => {
   const e = { id: 7, pinned: false };
   assert.deepEqual(j(L.actionArgv("cs", "paste", e)), ["cs", "get", "id:7", "--paste"]);

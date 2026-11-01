@@ -50,6 +50,12 @@ ShellRoot {
     id: store
   }
 
+  Image {
+    id: probe
+    source: store.imageUrl(6)
+    sourceSize: Qt.size(16, 10)
+  }
+
   // ------------------------------------------------ CliCall ordering
   property var callLog: []
   CliCall {
@@ -145,6 +151,11 @@ ShellRoot {
       [800, function () {
         shellRoot.check("an image path that failed is tried again on the next open", store.imageUrl(6) !== "",
           JSON.stringify(store.imagePaths[6]));
+      }],
+      [500, function () {
+        // The fake dir's name has a space, # and % in it (test-overlay.sh)
+        shellRoot.check("the image loads from its path", probe.status === Image.Ready,
+          "status " + probe.status + " for " + probe.source);
       }],
     ];
     stepTimer.interval = 1;

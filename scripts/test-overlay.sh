@@ -65,7 +65,8 @@ fi
 # a fresh fake history. Prints the log path; extra env goes before the call.
 run_harness() {
   local harness=$1 name=$2 dir
-  dir=$(mktemp -d "$work/$name.XXXX")
+  # An odd name, so file paths reach Quickshell with a space, # and %
+  dir=$(mktemp -d "$work/$name #1 %20.XXXX")
   mkdir -p "$dir/config/plugin"
   cp "$plugin"/*.qml "$plugin"/Logic.js "$dir/config/plugin/"
   cp "$harness" "$dir/config/shell.qml"

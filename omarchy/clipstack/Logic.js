@@ -449,6 +449,16 @@ function footerText(total, pinned) {
   return total + (total === 1 ? " clip" : " clips") + " · " + pinned + " pinned";
 }
 
+// ------------------------------------------------------------------ paths
+
+// file:// URL of an absolute path; each segment is percent-encoded, so a
+// space, # or % in the runtime dir still names the file.
+function fileUrl(path) {
+  path = String(path || "");
+  if (path === "") return "";
+  return "file://" + path.split("/").map(encodeURIComponent).join("/");
+}
+
 // ------------------------------------------------------------------ commands
 
 // Every command is an argv array; user input is always its own element.

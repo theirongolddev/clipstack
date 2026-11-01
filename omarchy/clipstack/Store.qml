@@ -314,7 +314,7 @@ Item {
       var error = Logic.commandError("get", exitCode, stdout, stderr);
       var path = stdout.trim();
       let next = Object.assign({}, root.imagePaths);
-      next[tag] = error === "" && path !== "" ? "file://" + path : "";
+      next[tag] = error === "" && path !== "" ? Logic.fileUrl(path) : "";
       root.imagePaths = next;
       root.report(error);
     }
