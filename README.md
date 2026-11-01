@@ -106,6 +106,7 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack list [-c N]` | List last N entries (default: 10) |
 | `clipstack clear` | Clear clipboard history |
 | `clipstack daemon` | Run the background monitoring daemon |
+| `clipstack kill` | Stop the running daemon |
 | `clipstack stats` | Show storage statistics |
 | `clipstack status` | Check daemon and system health |
 | `clipstack recover` | Rebuild index from content files (for corrupted storage) |
@@ -117,7 +118,7 @@ cp target/release/clipstack ~/.cargo/bin/
 | Option | Description |
 |--------|-------------|
 | `--storage-dir PATH` | Custom storage directory |
-| `--max-entries N` | Maximum entries to store (1-10000, default: 100) |
+| `--max-entries N` | Maximum entries to store (1-10000, default: 100). Saved to the index and reused by later runs |
 
 ### Examples
 
@@ -242,7 +243,7 @@ The picker uses vim-style modal navigation with multiple modes:
 - Status messages for actions (delete confirmation, undo countdown)
 - Preview shows `[+N lines, Tab to scroll]` for truncated content
 
-**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running.
+**Auto-Start:** Opening the picker automatically starts the background daemon if it isn't running. The daemon uses the same `--storage-dir` as the picker and keeps the saved entry limit.
 
 ### Search Features
 
@@ -263,7 +264,7 @@ Pin frequently-used text to protect it from automatic pruning:
 
 - Press `p` to toggle pin status on selected entry
 - Pinned entries show a `★` indicator
-- Pinned entries always appear at the top of the list (sorted by timestamp)
+- Pinned entries always appear at the top of the list (most recently used first)
 - Maximum 25 pinned entries allowed
 - Pinned entries survive when the history limit is exceeded
 - Re-copying pinned content moves it to the top while preserving pin status
@@ -280,6 +281,9 @@ clipstack daemon
 
 # Run in background
 nohup clipstack daemon > /tmp/clipstack.log 2>&1 &
+
+# Stop the running daemon
+clipstack kill
 ```
 
 ### Systemd User Service
@@ -399,14 +403,15 @@ Clipboard history is stored in `~/.local/share/clipd/`:
 ```
 ~/.local/share/clipd/
 ├── index.json              # Metadata index (timestamps, hashes, previews)
-└── {timestamp}_{nanos}.txt # Full content files (named by unique ID)
+├── index.lock              # Lock that serializes index updates across processes
+└── {timestamp}_{nnn}.txt   # Full content files (named by unique ID)
 ```
 
 ### Storage Limits
 
 | Limit | Value | Notes |
 |-------|-------|-------|
-| Max entries | 100 (default) | Configurable 1-10,000; oldest unpinned entries pruned |
+| Max entries | 100 (default) | Configurable 1-10,000; oldest unpinned entries pruned. The limit is saved in `index.json` |
 | Max pinned | 25 | Pinned entries exempt from pruning |
 | Max preview | 100 characters | Stored in index for fast display |
 | Max entry size | Unlimited | Each entry stored in separate file |
@@ -433,8 +438,8 @@ The `index.json` file contains entry metadata for fast loading:
 
 | Field | Description |
 |-------|-------------|
-| `id` | Unique identifier (millisecond timestamp + nanoseconds) |
-| `timestamp` | Unix timestamp in milliseconds |
+| `id` | Unique identifier: millisecond timestamp + 3-digit suffix that never reuses an existing ID |
+| `timestamp` | Unix timestamp in milliseconds of the last copy (refreshed when identical content is copied again) |
 | `size` | Content size in bytes |
 | `preview` | First 100 characters (control chars sanitized) |
 | `hash` | SHA256 hash for deduplication |
@@ -443,6 +448,7 @@ The `index.json` file contains entry metadata for fast loading:
 ### Data Safety
 
 - **Atomic writes**: All file writes use write-to-temp, fsync, then atomic rename
+- **Index lock**: Daemon, picker, and server updates are serialized via `index.lock`, so concurrent changes are never lost
 - **Orphaned temp cleanup**: Interrupted writes are cleaned up on startup
 - **Recovery command**: `clipstack recover` rebuilds the index from content files
 - **Duplicate detection**: Identical content is deduplicated by hash
@@ -482,7 +488,7 @@ cat ~/.local/share/clipd/index.json | jq '.entries[] | select(.pinned)'
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLIPSTACK_MAX_ENTRIES` | Maximum entries to store (1-10000) | `100` |
+| `CLIPSTACK_MAX_ENTRIES` | Maximum entries to store (1-10000); overridden by `--max-entries` | saved limit, else `100` |
 | `CB_PORT` | Port for remote clipboard server/client | `7779` |
 
 ### Recommended Setup
@@ -505,10 +511,13 @@ The `clipstack status` command provides a comprehensive health check:
 $ clipstack status
 Daemon:  running  (or: not running)
 
-Storage: /home/user/.local/share/clipd
+Storage: "/home/user/.local/share/clipd"
 Entries: 42/100
 Size:    156.3KB
 Latest:  2m ago
+
+Config:
+  Max entries: 100 (saved)
 
 Wayland: detected  (or: not detected)
 ```
@@ -517,6 +526,7 @@ This helps diagnose issues with:
 - **Daemon not running**: Entries won't be saved automatically
 - **Wayland not detected**: ClipStack requires a Wayland session
 - **Storage issues**: Shows where data is stored and current usage
+- **Unexpected limit**: Shows where the entry limit comes from: `--max-entries`, `CLIPSTACK_MAX_ENTRIES`, `saved` (from the index), or `default`
 
 ## Architecture
 
@@ -527,7 +537,8 @@ This helps diagnose issues with:
 │  CLI (main.rs)                                                  │
 │  ├── copy/paste    → clipboard.rs (wl-copy/wl-paste wrapper)   │
 │  ├── pick          → picker.rs (TUI with ratatui)              │
-│  ├── daemon        → daemon.rs (polling loop + lock file)      │
+│  ├── daemon        → daemon.rs (polling loop + PID lock file)  │
+│  ├── kill          → Signal the daemon PID from its lock file  │
 │  ├── serve         → TCP server for remote clipboard           │
 │  ├── recover       → Rebuild index from content files          │
 │  ├── status        → Health check (daemon, wayland, storage)   │
@@ -536,6 +547,7 @@ This helps diagnose issues with:
 │  Storage (storage.rs)                                           │
 │  ├── index.json    → Entry metadata (id, timestamp, hash, etc) │
 │  ├── {id}.txt      → Full content files (one per entry)        │
+│  ├── index.lock    → Cross-process lock for index updates      │
 │  └── atomic_write  → Write-temp-fsync-rename pattern           │
 ├─────────────────────────────────────────────────────────────────┤
 │  Picker (picker.rs)                                             │
@@ -555,9 +567,9 @@ This helps diagnose issues with:
 2. **Two-Phase Search**: Previews searched first (instant), then full content loaded only for non-matches. Performance limits prevent UI freezes.
 3. **Atomic Writes**: All file operations use write-to-temp, fsync, atomic-rename pattern. Crashes never corrupt storage.
 4. **Polling vs Events**: Uses 250ms polling instead of `wl-paste --watch` for reliability across different Wayland compositors.
-5. **SHA256 Deduplication**: Hashes content to prevent duplicates; re-copying moves existing entry to top of list.
+5. **SHA256 Deduplication**: Hashes content to prevent duplicates; re-copying moves the existing entry to the top of the list and refreshes its timestamp.
 6. **File-Based Storage**: Simple JSON index + separate content files. Human-readable, inspectable, no database required.
-7. **Lock File Synchronization**: Prevents multiple daemon instances from corrupting storage.
+7. **Lock File Synchronization**: A global daemon lock (which also records the daemon PID) allows only one daemon at a time. An `index.lock` in the storage directory serializes index updates from every process.
 8. **Modal UI Pattern**: Vim-style normal/search/preview modes keep navigation keyboard-only and predictable.
 9. **Pin Protection**: Pinned entries exempt from automatic pruning, with configurable limits to prevent abuse.
 
@@ -579,7 +591,7 @@ ClipStack is built around several core principles:
 
 **Reliability First**
 - Atomic writes prevent data corruption on crash or power loss
-- Lock file prevents multiple daemon instances from corrupting storage
+- Lock files prevent multiple daemon instances and lost updates between processes
 - SHA256 hashing ensures exact duplicate detection
 - Recovery command can rebuild from orphaned content files
 - Graceful handling of empty clipboard, missing files, and Unicode edge cases
@@ -659,7 +671,7 @@ echo $WAYLAND_DISPLAY
 
 ```bash
 # Check daemon is running
-pgrep -f "clipstack daemon"
+clipstack status
 
 # Run in foreground to see output
 clipstack daemon
