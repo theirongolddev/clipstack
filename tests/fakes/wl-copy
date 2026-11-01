@@ -49,5 +49,6 @@ fi
     fi
     [ "$sensitive" -eq 0 ] || printf 'x-kde-passwordManagerHint\n'
 } > "$types_tmp"
+rm -f "$dir/content.text"
 mv "$types_tmp" "$dir/types"
 mv "$content_tmp" "$dir/content"

@@ -315,6 +315,18 @@ fn wait_for_polls(env: &TestEnv, n: usize) {
     assert!(wait_until(Duration::from_secs(5), || count() >= target), "daemon is not polling");
 }
 
+/// Wait until the daemon has listed the fake clipboard's types `n` more times.
+fn wait_for_list_types(env: &TestEnv, n: usize) {
+    let calls = env.fake_clip_dir.join("wl-paste.calls");
+    let count = || {
+        std::fs::read_to_string(&calls)
+            .map(|s| s.lines().filter(|l| *l == "--list-types").count())
+            .unwrap_or(0)
+    };
+    let target = count() + n;
+    assert!(wait_until(Duration::from_secs(5), || count() >= target), "daemon is not polling");
+}
+
 #[test]
 fn poll_skips_password_hint_types() {
     let mut env = TestEnv::new();
@@ -423,9 +435,9 @@ fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     set_clipboard_bytes(&env, &png, &["image/png", "text/plain;charset=utf-8"]);
     let hook = run_hook(&env, Some("data"), b"caption text");
     assert!(hook.status.success(), "{}", hook.stderr);
-    // A type wl-paste counts as text (json) wins over the PNG as well
-    set_clipboard_bytes(&env, &png, &["image/png", "application/json"]);
-    let hook = run_hook(&env, Some("data"), b"{\"a\": 1}");
+    // Plain text among other text types wins too
+    set_clipboard_bytes(&env, &png, &["text/html", "image/png", "UTF8_STRING"]);
+    let hook = run_hook(&env, Some("data"), b"cell value");
     assert!(hook.status.success(), "{}", hook.stderr);
     // nil is an empty clipboard: nothing to save
     set_clipboard_bytes(&env, &png, &["image/png"]);
@@ -435,6 +447,7 @@ fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     assert_eq!(entries.len(), 2, "{entries:?}");
     assert!(entries.iter().all(|e| e["kind"] == "text"), "{entries:?}");
     assert_eq!(entries[0]["content"], "caption text");
+    assert_eq!(entries[1]["content"], "cell value");
 
     set_clipboard_bytes(&env, &png, &["image/png", HINT]);
     let hook = run_hook(&env, Some("data"), &png);
@@ -457,6 +470,29 @@ fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     set_clipboard_bytes(&env, &png, &["image/png"]);
     run_hook(&env, Some("clear"), b"");
     assert_eq!(env.export().len(), 2);
+}
+
+#[test]
+fn hook_saves_png_offered_with_only_incidental_text() {
+    // A browser's "Copy image": wl-paste passes the <img> HTML on stdin, but
+    // without a plain-text type the PNG is what gets saved
+    let env = TestEnv::new();
+    let png = common::test_png(12, 9, b"browser");
+    let html = b"<meta charset='utf-8'><img src=\"https://example.com/cat.png\"/>";
+    for offer in [
+        &["text/html", "image/png"][..],
+        &["text/x-moz-url", "text/_moz_htmlcontext", "text/html", "image/png", "image/jpeg"][..],
+        &["image/png", "text/uri-list", "application/json"][..],
+    ] {
+        set_clipboard_bytes(&env, &png, offer);
+        let hook = run_hook(&env, Some("data"), html);
+        assert!(hook.status.success(), "{}", hook.stderr);
+        assert!(hook.wrote_all);
+    }
+    let entries = env.export();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["kind"], "image");
+    assert_eq!(decode_image(&entries[0]), png);
 }
 
 #[test]
@@ -500,4 +536,21 @@ fn poll_captures_image_once() {
     let entries = env.wait_for_entries(2);
     assert_eq!(entries[1]["kind"], "text");
     assert_eq!(entries[1]["content"], "poll text");
+}
+
+#[test]
+fn poll_saves_png_offered_with_only_incidental_text() {
+    let mut env = TestEnv::new();
+    start_polling_daemon(&mut env);
+    // As text the offer reads as the <img> fragment
+    let png = common::test_png(7, 3, b"browser");
+    // (types before content: until `content` exists there is no selection)
+    std::fs::write(env.fake_clip_dir.join("content.text"), "<img src=\"cat.png\">").unwrap();
+    std::fs::write(env.fake_clip_dir.join("types"), "text/html\nimage/png\n").unwrap();
+    std::fs::write(env.fake_clip_dir.join("content"), &png).unwrap();
+    let entries = env.wait_for_entries(1);
+    assert_eq!(entries[0]["kind"], "image", "{entries:?}");
+    assert_eq!(decode_image(&entries[0]), png);
+    wait_for_list_types(&env, 3);
+    assert_eq!(env.export().len(), 1);
 }

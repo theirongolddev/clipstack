@@ -1152,13 +1152,19 @@ created as v1 and migrated, so the migration runs everywhere.
   and call `ingest_image`. Text keeps priority whenever both are offered.
   *As built:* a type counts as text when wl-paste 2.3's `mime_type_is_text` says so
   (`text/*`, the X11 names, `*json*`, `*script`, `*xml`, `*yaml`, `*csv`, `*ini`, PGP
-  keys), so `text/html` or `application/json` alone also wins over a PNG. The watcher
+  keys). *Amended (Maccy's choice):* one pure function, `clipboard::choose_offer`,
+  decides for watch and poll: `image/png` with no *plain-text* type (`text/plain*`,
+  `UTF8_STRING`, `STRING`, `TEXT`) is an image, so a browser's "Copy image"
+  (`text/html` `<img>` fragment, `text/uri-list`, `text/x-moz-url` next to the PNG)
+  saves the PNG; a plain-text type next to the PNG (a spreadsheet cell) is text;
+  without a PNG any wl-paste text type is text. The watcher
   runs as `wl-paste --no-newline --watch` without `--type text`: with it, wl-paste
   2.3 never runs the hook for an offer with no text type (it is not reported as
   `nil`, which means an empty clipboard). Without it wl-paste still passes text
   whenever text is offered, else the first offered type; the hook then lists the
-  types and, for a PNG-only offer, fetches the PNG itself. Poll mode lists types whenever the text read is empty
-  and re-reads the PNG on each such poll, saving it only when its hash changes.
+  types and, when the image is chosen, fetches the PNG itself. Poll mode lists types
+  whenever the text read is empty or new, and re-reads the PNG on each such poll,
+  saving it only when its hash changes.
 - `tests/fakes` wl-paste/wl-copy learn `--type image/png` with binary payloads.
 
 #### 5.3 CLI

@@ -6,6 +6,9 @@
 #
 # Clipboard state lives in $FAKE_CLIP_DIR:
 #   content    the selection (written by the fake wl-copy); missing = no selection
+#   content.text  optional: what `--type text` pastes instead of `content`, for
+#                 an offer whose text and image differ (an <img> fragment and
+#                 the PNG); wl-copy removes it
 #   types      offered mime types, one per line (written by wl-copy or a test)
 #   events     FIFO read by --watch, one event per line:
 #                data FILE | sensitive FILE   run CMD with FILE on stdin
@@ -126,5 +129,9 @@ if [ -f "$dir/types" ]; then
         exit 1
     fi
 fi
-cat "$dir/content"
+if [ "$type" = text ] && [ -f "$dir/content.text" ]; then
+    cat "$dir/content.text"
+else
+    cat "$dir/content"
+fi
 [ "$no_newline" -eq 1 ] || [ "$type" != text ] || echo

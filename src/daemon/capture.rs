@@ -31,9 +31,9 @@ pub enum CaptureMode {
 /// `CLIPBOARD_STATE` and `input` the selection. wl-paste 2.3 passes a text
 /// type whenever one is offered (the same choice as `--type text`), else the
 /// first offered type; with `--type text` it would not run the hook at all
-/// for an image-only offer. So when the offer has no text type and includes
-/// `image/png`, the PNG is fetched and saved as an image; other binary
-/// offers are skipped. `nil` is an empty clipboard. Never fails on bad input
+/// for an image-only offer. So when `clipboard::choose_offer` picks the
+/// image (a PNG and no plain-text type), the PNG is fetched and saved as an
+/// image whatever was on stdin; other binary offers are skipped. `nil` is an empty clipboard. Never fails on bad input
 /// (it is logged, without content), so the caller can always exit 0 and
 /// wl-paste keeps running; stdin is always read to the end, so the source
 /// client never sees EPIPE.
@@ -72,7 +72,8 @@ pub fn run_hook(
         eprintln!("[watch] could not list offer types: {e:#}");
         Vec::new()
     });
-    if clipboard::offers_only_png_image(&types) {
+    let offer = clipboard::choose_offer(&types);
+    if offer == clipboard::Offer::Image {
         // stdin held whichever type wl-paste picked; ask for the PNG itself
         let png = clipboard.paste_bytes(crate::png::MIME)?;
         if !png.is_empty() {
@@ -85,7 +86,7 @@ pub fn run_hook(
         eprintln!("[watch] skipped: too large ({size} bytes; max_entry_bytes is {limit})");
         return Ok(());
     }
-    if !types.is_empty() && !clipboard::offers_text(&types) {
+    if !types.is_empty() && offer == clipboard::Offer::Neither {
         eprintln!("[watch] skipped: no text or PNG type offered");
         return Ok(());
     }
@@ -398,21 +399,31 @@ impl Poller {
         // No selection, or none as text, reads as ""; errors are retried next tick
         match clipboard.paste_text() {
             Ok(content) if !content.is_empty() => {
-                self.observe(storage, &content, || clipboard.list_types().unwrap_or_default());
+                if self.last_hash.as_ref() == Some(&util::compute_hash(&content)) {
+                    return;
+                }
+                // New text: its types decide whether the offer is an image
+                let types = clipboard.list_types().unwrap_or_default();
+                if clipboard::choose_offer(&types) == clipboard::Offer::Image {
+                    self.poll_image(storage, clipboard, types);
+                } else {
+                    self.observe(storage, &content, || types);
+                }
             }
-            Ok(_) => self.poll_image(storage, clipboard),
+            Ok(_) => {
+                if let Ok(types) = clipboard.list_types() {
+                    self.poll_image(storage, clipboard, types);
+                }
+            }
             Err(_) => {}
         }
     }
 
-    /// No text on the clipboard: save an offer of only `image/png`. The PNG
-    /// is read on every such poll (there is no cheaper change signal), but
+    /// Save the PNG when `choose_offer` picks it from `types`. The PNG is
+    /// read on every such poll (there is no cheaper change signal), but
     /// saved only when its hash differs from the last poll's.
-    fn poll_image(&mut self, storage: &Storage, clipboard: &Clipboard) {
-        let Ok(types) = clipboard.list_types() else {
-            return;
-        };
-        if !clipboard::offers_only_png_image(&types) {
+    fn poll_image(&mut self, storage: &Storage, clipboard: &Clipboard, types: Vec<String>) {
+        if clipboard::choose_offer(&types) != clipboard::Offer::Image {
             return;
         }
         let Ok(png) = clipboard.paste_bytes(crate::png::MIME) else {

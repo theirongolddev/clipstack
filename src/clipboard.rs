@@ -41,10 +41,37 @@ pub fn is_text_mime(mime: &str) -> bool {
         || mime.contains("application/vnd.ms-publisher")
 }
 
-/// Whether an offer is a PNG image and nothing that reads as text: the only
-/// offers the daemon saves as an image.
-pub fn offers_only_png_image(types: &[String]) -> bool {
-    !offers_text(types) && types.iter().any(|t| t == crate::png::MIME)
+/// A type that holds plain text: `text/plain` (with any parameters) or one
+/// of the X11 names `UTF8_STRING`, `STRING`, `TEXT`.
+pub fn is_plain_text_mime(mime: &str) -> bool {
+    mime.starts_with("text/plain") || matches!(mime, "UTF8_STRING" | "STRING" | "TEXT")
+}
+
+/// What the daemon saves from an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    Text,
+    /// The `image/png` type
+    Image,
+    /// Nothing the daemon saves (no text, no PNG)
+    Neither,
+}
+
+/// Which part of an offer the daemon saves, in watch and poll mode alike.
+/// The PNG wins unless a plain-text type is offered too: a browser copying
+/// an image adds only incidental text (an `<img>` HTML fragment, a URL),
+/// while an app that offers plain text next to a picture of it (a
+/// spreadsheet cell) is copying text. Without a PNG, anything wl-paste
+/// reads as text is text.
+pub fn choose_offer(types: &[String]) -> Offer {
+    let png = types.iter().any(|t| t == crate::png::MIME);
+    if png && !types.iter().any(|t| is_plain_text_mime(t)) {
+        Offer::Image
+    } else if offers_text(types) {
+        Offer::Text
+    } else {
+        Offer::Neither
+    }
 }
 
 /// wl-copy or wl-paste failed (exit code 6). It wraps the underlying error
@@ -283,23 +310,72 @@ mod tests {
         }
     }
 
+    fn types(list: &[&str]) -> Vec<String> {
+        list.iter().map(|t| t.to_string()).collect()
+    }
+
     #[test]
-    fn text_types_win_over_png() {
-        let types = |list: &[&str]| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
-        assert!(offers_only_png_image(&types(&["image/png"])));
-        assert!(offers_only_png_image(&types(&["image/png", PASSWORD_HINT_MIME])));
-        for text in ["text/plain", "text/html", "UTF8_STRING", "STRING", "TEXT"] {
-            assert!(offers_text(&types(&[text])), "{text}");
-            assert!(!offers_only_png_image(&types(&["image/png", text])), "{text}");
+    fn image_wins_over_incidental_text() {
+        // Firefox "Copy Image": HTML fragments and URLs, no plain text
+        let firefox = types(&[
+            "text/x-moz-url",
+            "text/_moz_htmlcontext",
+            "text/_moz_htmlinfo",
+            "text/html",
+            "application/x-moz-nativeimage",
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "application/x-moz-file-promise",
+        ]);
+        assert_eq!(choose_offer(&firefox), Offer::Image);
+        // Chromium "Copy image": an <img> fragment and the PNG
+        let chromium = types(&["chromium/x-internal-source-rfh-token", "text/html", "image/png"]);
+        assert_eq!(choose_offer(&chromium), Offer::Image);
+        assert_eq!(choose_offer(&types(&["image/png", "text/uri-list"])), Offer::Image);
+        // GIMP: many image types, no text
+        let gimp = types(&["image/png", "image/bmp", "image/x-bmp", "image/tiff", "image/jpeg", "image/x-xcf"]);
+        assert_eq!(choose_offer(&gimp), Offer::Image);
+        // grim | wl-copy
+        assert_eq!(choose_offer(&types(&["image/png"])), Offer::Image);
+        // A secret image is still an image offer; ingest skips it as sensitive
+        assert_eq!(choose_offer(&types(&["image/png", PASSWORD_HINT_MIME])), Offer::Image);
+        // Text that isn't plain text no longer beats a PNG either
+        assert_eq!(choose_offer(&types(&["image/png", "application/json"])), Offer::Image);
+    }
+
+    #[test]
+    fn plain_text_wins_over_png() {
+        // LibreOffice Calc cell: text and a rendering of it
+        let calc = types(&[
+            "application/x-openoffice-embed-source-xml;windows_formatname=\"Star Embed Source (XML)\"",
+            "text/plain;charset=utf-8",
+            "UTF8_STRING",
+            "text/html",
+            "text/richtext",
+            "image/png",
+            "image/bmp",
+        ]);
+        assert_eq!(choose_offer(&calc), Offer::Text);
+        for plain in ["text/plain", "text/plain;charset=utf-8", "UTF8_STRING", "STRING", "TEXT"] {
+            assert_eq!(choose_offer(&types(&["text/html", "image/png", plain])), Offer::Text, "{plain}");
         }
-        assert!(!offers_only_png_image(&types(&["image/jpeg"])));
-        assert!(!offers_only_png_image(&[]));
+        // A terminal text copy
+        let terminal = types(&["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"]);
+        assert_eq!(choose_offer(&terminal), Offer::Text);
+    }
+
+    #[test]
+    fn text_without_png_is_text_and_other_binaries_are_neither() {
+        // Any type wl-paste reads as text is text when no PNG is offered
+        for text in ["text/html", "application/json", "application/javascript", "application/xml", "text/csv", "application/x-yaml", "application/pgp-keys"] {
+            assert!(offers_text(&types(&[text])), "{text}");
+            assert_eq!(choose_offer(&types(&[text, "image/jpeg"])), Offer::Text, "{text}");
+        }
         assert!(!offers_text(&types(&["image/png", "application/x-text"])));
-        // wl-paste's own idea of text, so watch and poll agree on what wins
-        for text in ["application/json", "application/javascript", "application/xml", "text/csv", "application/x-yaml", "application/pgp-keys"] {
-            assert!(offers_text(&types(&[text])), "{text}");
-            assert!(!offers_only_png_image(&types(&["image/png", text])), "{text}");
-        }
+        assert_eq!(choose_offer(&types(&["image/jpeg"])), Offer::Neither);
+        assert_eq!(choose_offer(&types(&["application/x-text"])), Offer::Neither);
+        assert_eq!(choose_offer(&[]), Offer::Neither);
     }
 
     #[test]

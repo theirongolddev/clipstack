@@ -1724,8 +1724,8 @@ fn detect_content_type(content: &str) -> ContentType {
 > **Done for PNG in IMPROVEMENT_PLAN Step 5 (5.1-5.3).** Schema v2 stores a PNG in the
 > `entries.image` BLOB column (`kind = 'image'`, `width`, `height` from the IHDR,
 > parsed by hand in `src/png.rs`; no `image` crate), deduplicated by hash, capped by
-> `[storage] max_image_bytes`. The daemon saves offers of only `image/png` in watch
-> and poll mode (text wins when both are offered). `get` writes the PNG, `get --copy`
+> `[storage] max_image_bytes`. The daemon saves `image/png` in watch and poll mode
+> when no plain-text type is offered (plain text wins when both are offered). `get` writes the PNG, `get --copy`
 > and the picker copy it back as `image/png`, `get --image-path` caches it in
 > `$XDG_RUNTIME_DIR/clipstack-images/`. Not done, and not planned for now: other
 > formats (JPEG, BMP), terminal image rendering (sixel/kitty; the picker shows
