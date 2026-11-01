@@ -304,7 +304,8 @@ impl Picker {
             self.preview_lines = content
                 .lines()
                 .flat_map(|line| {
-                    if line.len() <= wrap_width {
+                    // Use char count, not byte length, for correct Unicode handling
+                    if line.chars().count() <= wrap_width {
                         vec![line.to_string()]
                     } else {
                         line.chars()
@@ -1450,5 +1451,44 @@ mod tests {
 
         // 1000 chars / 80 = 12-13 lines
         assert!(picker.preview_lines.len() >= 12);
+    }
+
+    #[test]
+    fn test_wrap_unicode_chars_not_bytes() {
+        // Test that Unicode lines are wrapped by character count, not byte count
+        // 50 Chinese characters = 150 bytes, but should NOT be wrapped at width 80
+        let content = "中".repeat(50);
+        let (_temp, storage) = create_test_storage(&[&content]);
+        let mut picker = Picker::new(storage).unwrap();
+
+        picker.load_preview_content();
+
+        // 50 chars < 80 wrap_width, so should be exactly 1 line
+        // Before fix, this would be wrapped because 150 bytes > 80
+        assert_eq!(
+            picker.preview_lines.len(),
+            1,
+            "50 Unicode chars should not wrap at width 80"
+        );
+        assert_eq!(picker.preview_lines[0].chars().count(), 50);
+    }
+
+    #[test]
+    fn test_wrap_long_unicode_line() {
+        // 100 Chinese characters should wrap to 2 lines at width 80
+        let content = "中".repeat(100);
+        let (_temp, storage) = create_test_storage(&[&content]);
+        let mut picker = Picker::new(storage).unwrap();
+
+        picker.load_preview_content();
+
+        // 100 chars / 80 = 2 lines (80 + 20)
+        assert_eq!(
+            picker.preview_lines.len(),
+            2,
+            "100 Unicode chars should wrap to 2 lines at width 80"
+        );
+        assert_eq!(picker.preview_lines[0].chars().count(), 80);
+        assert_eq!(picker.preview_lines[1].chars().count(), 20);
     }
 }
