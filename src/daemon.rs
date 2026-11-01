@@ -3,8 +3,9 @@ use crate::storage::Storage;
 use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use std::fs::File;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +37,20 @@ impl Daemon {
     }
 
     /// `max_entries`: explicit limit, or `None` to reuse the stored limit
+    /// Read the PID recorded in a lock file
+    pub fn read_pid(lock_path: &Path) -> Option<u32> {
+        std::fs::read_to_string(lock_path).ok()?.trim().parse().ok()
+    }
+
+    /// PID of the running daemon, if one holds the global lock
+    pub fn running_pid() -> Option<u32> {
+        if Self::is_running() {
+            Self::read_pid(&Self::lock_file_path())
+        } else {
+            None
+        }
+    }
+
     pub fn new(storage_dir: Option<PathBuf>, max_entries: Option<usize>) -> Result<Self> {
         Self::new_with_lock(storage_dir, max_entries, false)
     }
@@ -57,12 +72,24 @@ impl Daemon {
             Self::lock_file_path()
         };
 
-        // Acquire exclusive lock - fails if another daemon is running
-        let lock_file = File::create(&lock_path)
+        // Acquire exclusive lock - fails if another daemon is running.
+        // Open without truncating so a failed attempt can't wipe the running
+        // daemon's PID.
+        let mut lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
             .with_context(|| format!("Failed to create lock file: {:?}", lock_path))?;
         lock_file
             .try_lock_exclusive()
             .context("Daemon already running (lock file is held)")?;
+
+        // Record our PID so `clipstack kill` can signal us precisely
+        lock_file.set_len(0)?;
+        write!(lock_file, "{}", std::process::id())?;
+        lock_file.sync_all()?;
 
         Ok(Self {
             storage,
@@ -155,6 +182,35 @@ mod tests {
         // Use local lock file for test isolation
         let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
         assert!(!daemon.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_lock_file_records_daemon_pid() {
+        let dir = TempDir::new().unwrap();
+        let _daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+
+        let pid = Daemon::read_pid(&dir.path().join("clipstack.lock"));
+        assert_eq!(pid, Some(std::process::id()));
+    }
+
+    #[test]
+    fn test_second_daemon_fails_without_clobbering_pid() {
+        let dir = TempDir::new().unwrap();
+        let lock = dir.path().join("clipstack.lock");
+        let _first = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+
+        let second = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true);
+        assert!(second.is_err(), "second daemon must not acquire the lock");
+        assert_eq!(Daemon::read_pid(&lock), Some(std::process::id()));
+    }
+
+    #[test]
+    fn test_read_pid_handles_missing_and_garbage() {
+        let dir = TempDir::new().unwrap();
+        let lock = dir.path().join("clipstack.lock");
+        assert_eq!(Daemon::read_pid(&lock), None);
+        std::fs::write(&lock, "not a pid").unwrap();
+        assert_eq!(Daemon::read_pid(&lock), None);
     }
 
     #[test]

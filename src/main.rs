@@ -166,18 +166,27 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Use pkill to find and kill the daemon process
-            let status = std::process::Command::new("pkill")
-                .args(["-f", "clipstack daemon"])
-                .status();
+            // Signal the exact PID recorded in the daemon's lock file
+            let Some(pid) = daemon::Daemon::running_pid() else {
+                eprintln!("Daemon is running but its PID is unknown (started by an older version?)");
+                eprintln!("Stop it manually, e.g.: pkill -x clipstack");
+                std::process::exit(1);
+            };
 
-            match status {
+            match Command::new("kill").arg(pid.to_string()).status() {
                 Ok(s) if s.success() => {
-                    println!("Daemon stopped");
+                    // Wait briefly for the lock to be released
+                    for _ in 0..20 {
+                        if !daemon::Daemon::is_running() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    println!("Daemon stopped (pid {})", pid);
                 }
                 Ok(_) => {
-                    // pkill returns non-zero if no process found
-                    println!("Daemon is not running");
+                    eprintln!("Failed to signal daemon (pid {})", pid);
+                    std::process::exit(1);
                 }
                 Err(e) => {
                     eprintln!("Failed to kill daemon: {}", e);
