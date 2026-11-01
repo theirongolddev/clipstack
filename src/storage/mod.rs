@@ -87,6 +87,15 @@ pub fn is_valid_alias(alias: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
+/// Sort order of `list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOrder {
+    /// Most recently used first (`list`, `nth`, the `N` entry reference)
+    Recency,
+    /// Pinned entries first, each group by recency (picker)
+    PinnedFirst,
+}
+
 /// History totals for `stats`/`status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counts {
