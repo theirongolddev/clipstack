@@ -152,18 +152,27 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use tempfile::TempDir;
 
-    /// A `/bin/sh` script standing in for wl-paste or wl-copy. Each gets a
-    /// new name: rewriting a script that was just run can fail with ETXTBSY.
+    /// A `/bin/sh` script standing in for wl-paste or wl-copy, under a new
+    /// name each time. A child `sh` writes it: had this process opened it for
+    /// writing, a test thread forking at that moment would hold the write fd
+    /// until its exec, and running the script would fail with ETXTBSY.
     fn fake_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let path = dir.join(format!("{name}-{n}"));
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = writer.stdin.take().unwrap();
+        stdin.write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+        drop(stdin);
+        assert!(writer.wait().unwrap().success());
         path
     }
 
