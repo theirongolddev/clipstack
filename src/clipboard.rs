@@ -107,6 +107,14 @@ const LIST_TYPES_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long `paste_text` waits for wl-paste (the source client sends the data).
 const PASTE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What `Clipboard::paste_bytes` read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Paste {
+    Data(Vec<u8>),
+    /// The selection is longer than `limit` bytes; its content was not kept
+    TooLarge { limit: usize },
+}
+
 /// The wl-clipboard programs to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clipboard {
@@ -180,24 +188,30 @@ impl Clipboard {
     }
 
     /// The selection as `mime` (`wl-paste --no-newline --type MIME`), as raw
-    /// bytes. No selection, or one no longer offered as `mime`, is empty.
-    pub fn paste_bytes(&self, mime: &str) -> Result<Vec<u8>> {
-        self.run_paste_bytes(mime).map_err(tool_failure)
+    /// bytes, reading at most `limit` + 1 of them: a larger selection is
+    /// `Paste::TooLarge` and wl-paste is killed and reaped, so a huge copy is
+    /// never held in memory. No selection, or one no longer offered as
+    /// `mime`, is empty data.
+    pub fn paste_bytes(&self, mime: &str, limit: usize) -> Result<Paste> {
+        self.run_paste_bytes(mime, limit).map_err(tool_failure)
     }
 
-    fn run_paste_bytes(&self, mime: &str) -> Result<Vec<u8>> {
+    fn run_paste_bytes(&self, mime: &str, limit: usize) -> Result<Paste> {
         let mut cmd = Command::new(&self.paste_bin);
         cmd.args(["--no-newline", "--type", mime]);
-        let output = run_with_timeout(cmd, PASTE_TIMEOUT)
-            .with_context(|| format!("Failed to run wl-paste.\n{CLIPBOARD_TROUBLESHOOT}"))?;
+        let Some(output) = run_capped(cmd, PASTE_TIMEOUT, limit)
+            .with_context(|| format!("Failed to run wl-paste.\n{CLIPBOARD_TROUBLESHOOT}"))?
+        else {
+            return Ok(Paste::TooLarge { limit });
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if is_no_text(&stderr) {
-                return Ok(Vec::new());
+                return Ok(Paste::Data(Vec::new()));
             }
             anyhow::bail!("wl-paste --type {mime} failed: {}", stderr.trim());
         }
-        Ok(output.stdout)
+        Ok(Paste::Data(output.stdout))
     }
 
     /// The mime types the current selection is offered as
@@ -263,6 +277,63 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output> {
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     Ok(Output { status, stdout, stderr })
+}
+
+/// `run_with_timeout`, but stdout is read only up to `limit` + 1 bytes: past
+/// that, the child is killed and reaped and the result is `None`. Closing
+/// our end of the pipe alone would not do, as a child that ignores SIGPIPE
+/// or stops writing would keep running.
+fn run_capped(mut cmd: Command, timeout: Duration, limit: usize) -> Result<Option<Output>> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run {}", cmd.get_program().to_string_lossy()))?;
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut stdout_reader = Some(std::thread::spawn({
+        let pipe = child.stdout.take();
+        move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(cap).read_to_end(&mut buf);
+            }
+            buf
+        }
+    }));
+    let stderr = drain(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    let mut stdout = None;
+    let status = loop {
+        if let Some(reader) = stdout_reader.take_if(|r| r.is_finished()) {
+            let buf = reader.join().unwrap_or_default();
+            if buf.len() > limit {
+                // The stderr thread is left to finish when the pipe closes
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            stdout = Some(buf);
+        }
+        if stdout.is_some()
+            && let Some(status) = child.try_wait()?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "{} timed out after {} ms",
+                cmd.get_program().to_string_lossy(),
+                timeout.as_millis()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let stderr = stderr.join().unwrap_or_default();
+    Ok(Some(Output { status, stdout: stdout.unwrap_or_default(), stderr }))
 }
 
 /// Read a child pipe to the end on its own thread.
@@ -476,18 +547,60 @@ mod tests {
             &format!("echo \"$*\" > '{}'\nprintf '\\211PNG\\000\\377\\n'", args.display()),
             "exit 1",
         );
-        assert_eq!(clipboard.paste_bytes("image/png").unwrap(), b"\x89PNG\x00\xff\n");
+        assert_eq!(clipboard.paste_bytes("image/png", 64).unwrap(), Paste::Data(b"\x89PNG\x00\xff\n".to_vec()));
         assert_eq!(std::fs::read_to_string(args).unwrap(), "--no-newline --type image/png\n");
+        // Exactly at the limit is read whole
+        assert_eq!(clipboard.paste_bytes("image/png", 7).unwrap(), Paste::Data(b"\x89PNG\x00\xff\n".to_vec()));
+        assert_eq!(clipboard.paste_bytes("image/png", 6).unwrap(), Paste::TooLarge { limit: 6 });
 
         let gone = fake_clipboard(
             dir.path(),
             "echo 'Clipboard content is not available as requested type \"image/png\"' >&2; exit 1",
             "exit 1",
         );
-        assert_eq!(gone.paste_bytes("image/png").unwrap(), b"", "the selection changed meanwhile");
+        assert_eq!(gone.paste_bytes("image/png", 64).unwrap(), Paste::Data(Vec::new()), "the selection changed meanwhile");
         let broken = fake_clipboard(dir.path(), "echo 'Failed to connect' >&2; exit 1", "exit 1");
-        let err = broken.paste_bytes("image/png").unwrap_err();
+        let err = broken.paste_bytes("image/png", 64).unwrap_err();
         assert!(err.chain().any(|c| c.is::<ClipboardError>()) || err.is::<ClipboardError>(), "{err:#}");
+    }
+
+    /// Whether `pid` is gone, zombie included (a zombie keeps its /proc entry).
+    fn reaped(pid_file: &Path) -> bool {
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        !Path::new(&format!("/proc/{}", pid.trim())).exists()
+    }
+
+    #[test]
+    fn paste_bytes_stops_reading_past_the_limit() {
+        let dir = TempDir::new().unwrap();
+        let pid = dir.path().join("pid");
+        // An endless image: only limit + 1 bytes are read, then it is killed
+        let endless = fake_clipboard(
+            dir.path(),
+            &format!("echo $$ > '{}'; exec cat /dev/zero", pid.display()),
+            "exit 1",
+        );
+        let started = Instant::now();
+        assert_eq!(endless.paste_bytes("image/png", 1000).unwrap(), Paste::TooLarge { limit: 1000 });
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(reaped(&pid), "the wl-paste child is killed and reaped");
+
+        // One that writes too much and then hangs with the pipe still open
+        // (and ignores SIGPIPE) is not waited for either
+        let stuck = fake_clipboard(
+            dir.path(),
+            &format!("trap '' PIPE; echo $$ > '{}'; head -c 5000 /dev/zero; exec sleep 30", pid.display()),
+            "exit 1",
+        );
+        let started = Instant::now();
+        assert_eq!(stuck.paste_bytes("image/png", 1000).unwrap(), Paste::TooLarge { limit: 1000 });
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(reaped(&pid));
+
+        // Within the limit but never exiting: the timeout still applies
+        let silent = fake_bin(dir.path(), "wl-paste", "printf 'abc'; exec sleep 30");
+        let err = run_capped(Command::new(silent), Duration::from_millis(200), 1000).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
     }
 
     #[test]

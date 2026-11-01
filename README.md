@@ -263,7 +263,7 @@ if clipstack search "BEGIN CERTIFICATE" >/dev/null; then echo "a certificate is 
 
 ### Images
 
-When the clipboard offers a PNG and no plain text (`text/plain`, `UTF8_STRING`, `STRING` or `TEXT`), the daemon saves the PNG as an image entry. That covers screenshot tools and "Copy image" in a browser, which offers the PNG with only an `<img>` HTML fragment or a URL (`text/html`, `text/uri-list`, `text/x-moz-url`). When plain text is offered next to the PNG (a spreadsheet cell, which also offers a picture of itself), the text is saved. Without a PNG, any type `wl-paste` reads as text is saved as text, such as `text/html` or `application/json`. Only `image/png` is kept; the size comes from the PNG header, which is checked (an offer that isn't a PNG is skipped). Images up to `max_image_bytes` (8 MiB by default, and never more than `max_total_bytes`) are saved; they count towards `max_entries` and `max_total_bytes` like text, can be pinned and named, and are skipped when a password manager marks the copy secret. They are not searchable.
+When the clipboard offers a PNG and no plain text (`text/plain`, `UTF8_STRING`, `STRING` or `TEXT`), the daemon saves the PNG as an image entry. That covers screenshot tools and "Copy image" in a browser, which offers the PNG with only an `<img>` HTML fragment or a URL (`text/html`, `text/uri-list`, `text/x-moz-url`). When plain text is offered next to the PNG (a spreadsheet cell, which also offers a picture of itself), the text is saved. Without a PNG, any type `wl-paste` reads as text is saved as text, such as `text/html` or `application/json`. Only `image/png` is kept; the size comes from the PNG header, which is checked (an offer that isn't a PNG is skipped). Images up to `max_image_bytes` (8 MiB by default, and never more than `max_total_bytes`) are saved, and a larger one is never read into memory: the daemon stops reading one byte past the cap and logs `skipped: image too large (> N bytes)`. Images count towards `max_entries` and `max_total_bytes` like text, can be pinned and named, and are skipped when a password manager marks the copy secret. They are not searchable.
 
 - `clipstack get REF > file.png` writes the PNG. It refuses to write to a terminal (exit 2).
 - `clipstack get REF --copy` (and Enter in the picker) puts it back on the clipboard as `image/png`.
@@ -422,6 +422,7 @@ Either way, copies a password manager marks as secret (the `x-kde-passwordManage
 [watch] saved image id:43 (48211 bytes)
 [watch] skipped sensitive
 [watch] skipped: matches ignore_patterns[0]
+[watch] skipped: image too large (> 8388608 bytes)
 ```
 
 It also applies retention and the size caps once a minute, so old entries are deleted even when nothing new is copied.

@@ -2,7 +2,7 @@
 //! __watch-hook`, so wl-paste starts the hook once per new selection; the
 //! `Supervisor` restarts the watcher or falls back to the `Poller`.
 
-use crate::clipboard::{self, Clipboard};
+use crate::clipboard::{self, Clipboard, Paste};
 use crate::storage::{IngestOutcome, Kind, Source, Storage};
 use crate::util;
 use anyhow::Result;
@@ -75,9 +75,12 @@ pub fn run_hook(
     let offer = clipboard::choose_offer(&types);
     if offer == clipboard::Offer::Image {
         // stdin held whichever type wl-paste picked; ask for the PNG itself
-        let png = clipboard.paste_bytes(crate::png::MIME)?;
-        if !png.is_empty() {
-            log_outcome("watch", storage, &storage.ingest_image(&png, Source::Watch, &types)?);
+        match clipboard.paste_bytes(crate::png::MIME, storage.policy().image_limit())? {
+            Paste::Data(png) if png.is_empty() => {}
+            Paste::Data(png) => {
+                log_outcome("watch", storage, &storage.ingest_image(&png, Source::Watch, &types)?);
+            }
+            Paste::TooLarge { limit } => eprintln!("[watch] {}", image_too_large(limit)),
         }
         return Ok(());
     }
@@ -111,6 +114,12 @@ pub fn log_outcome(tag: &str, storage: &Storage, outcome: &IngestOutcome) {
             eprintln!("[{tag}] skipped: {}", storage.policy().describe_skip(reason));
         }
     }
+}
+
+/// The skip log for a PNG that `paste_bytes` stopped reading at `limit`
+/// (`min(max_image_bytes, max_total_bytes)`), so its size is unknown.
+fn image_too_large(limit: usize) -> String {
+    format!("skipped: image too large (> {limit} bytes)")
 }
 
 /// `"image "` for an image entry, so a log line says what was saved.
@@ -377,6 +386,10 @@ fn forward_stderr(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
     }
 }
 
+/// `Poller::last_hash` after an image too large to read: no SHA-256 is this
+/// short, so it never matches content.
+const TOO_LARGE: &[u8] = b"too large";
+
 /// Polling capture: read the clipboard every `interval` and save it when it
 /// changed.
 pub struct Poller {
@@ -426,12 +439,18 @@ impl Poller {
         if clipboard::choose_offer(&types) != clipboard::Offer::Image {
             return;
         }
-        let Ok(png) = clipboard.paste_bytes(crate::png::MIME) else {
-            return;
+        let png = match clipboard.paste_bytes(crate::png::MIME, storage.policy().image_limit()) {
+            Ok(Paste::Data(png)) if !png.is_empty() => png,
+            Ok(Paste::TooLarge { limit }) => {
+                // Logged once per offer, not on every poll
+                if self.last_hash.as_deref() != Some(TOO_LARGE) {
+                    eprintln!("[poll] {}", image_too_large(limit));
+                    self.last_hash = Some(TOO_LARGE.to_vec());
+                }
+                return;
+            }
+            Ok(Paste::Data(_)) | Err(_) => return,
         };
-        if png.is_empty() {
-            return;
-        }
         let hash = util::compute_image_hash(&png);
         if self.last_hash.as_ref() == Some(&hash) {
             return;

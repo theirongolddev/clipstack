@@ -96,7 +96,7 @@ impl IngestPolicy {
 
     /// The largest image `ingest_image` saves: `max_image_bytes`, but never
     /// more than `max_total_bytes`, which would prune it at once.
-    fn image_limit(&self) -> usize {
+    pub fn image_limit(&self) -> usize {
         self.max_image_bytes.min(usize::try_from(self.max_total_bytes).unwrap_or(usize::MAX))
     }
 

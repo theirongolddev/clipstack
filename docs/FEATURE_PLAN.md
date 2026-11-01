@@ -1915,7 +1915,7 @@ Capture `ratatui::buffer::Buffer` state for key UI scenarios:
 - Document all config options in one place
 
 ### Clipboard Backend Abstraction
-- Partly addressed: `src/clipboard.rs` now has a `Clipboard` struct (IMPROVEMENT_PLAN Step 2) that holds the wl-paste/wl-copy binaries, so tests and the daemon can swap them, with `paste_bytes`/`copy_bytes(mime)` for images (Step 5); a trait over it is still open
+- Partly addressed: `src/clipboard.rs` now has a `Clipboard` struct (IMPROVEMENT_PLAN Step 2) that holds the wl-paste/wl-copy binaries, so tests and the daemon can swap them, with `paste_bytes(mime, limit)`/`copy_bytes(mime)` for images (Step 5); a trait over it is still open
 - Define a `ClipboardBackend` trait even if only Wayland is supported initially
 - This makes X11/macOS support non-invasive later:
 ```rust

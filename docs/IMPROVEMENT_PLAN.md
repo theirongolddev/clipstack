@@ -1147,6 +1147,12 @@ created as v1 and migrated, so the migration runs everywhere.
 
 - `Clipboard` gains `paste_bytes(mime) -> Result<Vec<u8>>` (`wl-paste --no-newline --type MIME`)
   and `copy_bytes(&[u8], mime)` (`wl-copy --type MIME`).
+  *Amended:* `paste_bytes(mime, limit) -> Result<Paste>` (`Paste::Data(Vec<u8>)` or
+  `Paste::TooLarge { limit }`) reads at most `limit + 1` bytes of wl-paste's stdout;
+  past that it kills and reaps wl-paste and returns `TooLarge`, so an oversized
+  image is never buffered. Watch and poll pass `IngestPolicy::image_limit()`
+  (`min(max_image_bytes, max_total_bytes)`) and log `skipped: image too large (> N
+  bytes)` without content (poll: once per offer).
 - Daemon (watch and poll): after `list_types()`, if no text type is offered
   (`text/plain*`, `UTF8_STRING`, `STRING`, `TEXT`) and `image/png` is, fetch the PNG
   and call `ingest_image`. Text keeps priority whenever both are offered.

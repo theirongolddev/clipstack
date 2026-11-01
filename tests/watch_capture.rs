@@ -457,10 +457,11 @@ fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     let hook = run_hook(&env, Some("data"), b"GIF89a, not a png");
     assert!(hook.stderr.contains("skipped: not a PNG"), "{}", hook.stderr);
 
+    // A PNG over max_image_bytes is not read past the cap
     env.write_config("[storage]\nmax_image_bytes = 10\n");
     set_clipboard_bytes(&env, &png, &["image/png"]);
     let hook = run_hook(&env, Some("data"), &png);
-    assert!(hook.stderr.contains("max_image_bytes is 10"), "{}", hook.stderr);
+    assert!(hook.stderr.contains("[watch] skipped: image too large (> 10 bytes)"), "{}", hook.stderr);
 
     // Other image types are not stored, nor is an explicit clear
     std::fs::remove_file(env.config_home.join("clipstack/config.toml")).unwrap();
@@ -470,6 +471,11 @@ fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
     set_clipboard_bytes(&env, &png, &["image/png"]);
     run_hook(&env, Some("clear"), b"");
     assert_eq!(env.export().len(), 2);
+
+    // Nor past max_total_bytes when that is smaller (which prunes the history)
+    env.write_config("[storage]\nmax_entry_bytes = 8\nmax_total_bytes = 20\n");
+    let hook = run_hook(&env, Some("data"), &png);
+    assert!(hook.stderr.contains("[watch] skipped: image too large (> 20 bytes)"), "{}", hook.stderr);
 }
 
 #[test]
@@ -536,6 +542,20 @@ fn poll_captures_image_once() {
     let entries = env.wait_for_entries(2);
     assert_eq!(entries[1]["kind"], "text");
     assert_eq!(entries[1]["content"], "poll text");
+}
+
+#[test]
+fn poll_skips_image_over_the_cap_and_says_so_once() {
+    let mut env = TestEnv::new();
+    env.write_config("[storage]\nmax_image_bytes = 64\n[capture]\nmode = \"poll\"\npoll_interval_ms = 50\n");
+    let pid = env.start_daemon();
+    set_clipboard_bytes(&env, &common::test_png(9, 9, &[b'x'; 200]), &["image/png"]);
+    wait_for_list_types(&env, 5);
+    assert!(env.export().is_empty());
+    env.signal(pid, "TERM");
+    let done = env.wait_for_exit(pid, Duration::from_secs(2)).expect("daemon exits");
+    let line = "[poll] skipped: image too large (> 64 bytes)";
+    assert_eq!(done.stderr.matches(line).count(), 1, "{}", done.stderr);
 }
 
 #[test]
