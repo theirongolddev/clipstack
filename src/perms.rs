@@ -19,12 +19,16 @@ pub struct TightenReport {
     pub skipped: usize,
 }
 
-/// create_dir_all; newly created leaf gets 0700; existing leaf is chmod'ed to 0700.
+/// Create `path` 0700 (missing parents get the default mode, since they may be
+/// shared dirs like `~/.local/share`); an existing leaf is chmod'ed to 0700.
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(DIR_MODE)
-        .create(path)?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(DIR_MODE).create(path) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {}
+        other => other?,
+    }
     // `mode` only applies to dirs created here; fix a pre-existing leaf too
     if fs::metadata(path)?.permissions().mode() & 0o777 != DIR_MODE {
         fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE))?;
@@ -99,6 +103,16 @@ mod tests {
         ensure_private_dir(&dir).unwrap();
         assert!(dir.is_dir());
         assert_eq!(mode(&dir), DIR_MODE);
+    }
+
+    #[test]
+    fn ensure_private_dir_leaves_new_parents_at_default_mode() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("share");
+        let dir = parent.join("clipd");
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), DIR_MODE);
+        assert_ne!(mode(&parent), DIR_MODE, "only the leaf should be private");
     }
 
     #[test]
