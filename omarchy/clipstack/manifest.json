@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "solsystemlabs.clipstack",
+  "name": "ClipStack",
+  "version": "0.1.0",
+  "author": "solsystemlabs",
+  "license": "MIT",
+  "description": "Maccy-style clipboard history overlay backed by the clipstack CLI: search, pins, aliases, images",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml"
+  }
+}
