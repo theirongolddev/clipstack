@@ -39,7 +39,7 @@ impl fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -126,18 +126,40 @@ pub struct Storage {
     base_dir: PathBuf,
     db_path: PathBuf,
     max_entries: usize,
+    limit_saved: bool,
     policy: IngestPolicy,
 }
 
 impl Storage {
     /// Open (creating if needed) the database in `dir`.
+    ///
+    /// `max_entries` is the CLI/env limit: `Some(n)` is saved in the database
+    /// (and prunes at once); `None` uses the saved limit, else the default.
     pub fn open(dir: PathBuf, max_entries: Option<usize>, policy: IngestPolicy) -> Result<Storage> {
         let db_path = dir.join(DB_FILE);
-        let conn = schema::open_connection(&db_path)?;
+        let mut conn = schema::open_connection(&db_path)?;
+
+        let stored = get_setting(&conn, SETTING_MAX_ENTRIES)?;
+        let limit_saved = stored.is_some() || max_entries.is_some();
         let max_entries = max_entries
+            .or_else(|| stored.as_deref().and_then(|v| v.parse().ok()))
             .unwrap_or(DEFAULT_MAX_ENTRIES)
             .clamp(1, ABSOLUTE_MAX_ENTRIES);
-        let storage = Storage { conn: Mutex::new(conn), base_dir: dir, db_path, max_entries, policy };
+        let value = max_entries.to_string();
+        if limit_saved && stored.as_deref() != Some(value.as_str()) {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            set_setting(&tx, SETTING_MAX_ENTRIES, &value)?;
+            tx.commit()?;
+        }
+
+        let storage = Storage {
+            conn: Mutex::new(conn),
+            base_dir: dir,
+            db_path,
+            max_entries,
+            limit_saved,
+            policy,
+        };
         // Expired entries are gone before any read. Another process holding
         // the write lock past the busy timeout is not fatal: it expires next time.
         match storage.expire() {
@@ -167,6 +189,11 @@ impl Storage {
         self.max_entries
     }
 
+    /// True when a limit is saved in the database (status label "saved").
+    pub fn limit_is_saved(&self) -> bool {
+        self.limit_saved
+    }
+
     pub fn policy(&self) -> &IngestPolicy {
         &self.policy
     }
@@ -182,6 +209,25 @@ impl Storage {
     pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
         f(&self.conn())
     }
+}
+
+/// `settings` key of the saved history length.
+const SETTING_MAX_ENTRIES: &str = "max_entries";
+
+fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+        .query_row([key], |r| r.get(0))
+        .optional()?)
+}
+
+fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    )?
+    .execute([key, value])?;
+    Ok(())
 }
 
 /// `SQLITE_BUSY`/`SQLITE_LOCKED`: another connection holds the lock.
@@ -228,6 +274,84 @@ mod tests {
 
     fn entry_count(storage: &Storage) -> i64 {
         storage.with_conn(|c| c.query_row("SELECT count(*) FROM entries", [], |r| r.get(0)).unwrap())
+    }
+
+    fn open(dir: &tempfile::TempDir, max_entries: Option<usize>) -> Storage {
+        Storage::open(dir.path().to_path_buf(), max_entries, IngestPolicy::default()).unwrap()
+    }
+
+    fn fill(storage: &Storage, n: usize) {
+        for i in 0..n {
+            storage.ingest_at(&format!("entry {i}"), Source::Copy, &[], i as i64 + 1).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_open_without_limit_uses_stored_limit_and_does_not_prune() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // User configured a higher limit once and filled history past the default
+        fill(&open(&dir, Some(500)), 150);
+
+        // A later invocation with no flag/env (e.g. auto-started daemon, `list`)
+        let storage = open(&dir, None);
+        assert_eq!(storage.max_entries(), 500, "should reuse stored limit");
+        assert_eq!(entry_count(&storage), 150, "must not prune to the default");
+        assert!(storage.limit_is_saved());
+    }
+
+    #[test]
+    fn test_open_without_limit_on_fresh_dir_uses_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = open(&dir, None);
+        assert_eq!(storage.max_entries(), DEFAULT_MAX_ENTRIES);
+        assert!(!storage.limit_is_saved(), "nothing stored until a limit is given");
+        let rows: i64 = storage
+            .with_conn(|c| c.query_row("SELECT count(*) FROM settings", [], |r| r.get(0)).unwrap());
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn test_open_with_explicit_limit_persists_and_prunes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fill(&open(&dir, None), 20);
+
+        let storage = open(&dir, Some(5));
+        assert_eq!(entry_count(&storage), 5, "pruned at open");
+
+        // Limit is remembered by the next unconfigured invocation
+        assert_eq!(open(&dir, None).max_entries(), 5);
+    }
+
+    #[test]
+    fn test_max_entries_clamps_low() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(open(&dir, Some(0)).max_entries(), 1);
+        assert_eq!(open(&dir, None).max_entries(), 1, "the clamped value is stored");
+    }
+
+    #[test]
+    fn test_max_entries_clamps_high() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(open(&dir, Some(999_999)).max_entries(), ABSOLUTE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn test_max_entries_clamps_stored_value() {
+        let dir = tempfile::TempDir::new().unwrap();
+        open(&dir, None).with_conn(|c| {
+            c.execute("INSERT INTO settings (key, value) VALUES ('max_entries', '0')", []).unwrap()
+        });
+        assert_eq!(open(&dir, None).max_entries(), 1);
+    }
+
+    #[test]
+    fn limit_is_saved_after_explicit_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(!open(&dir, None).limit_is_saved());
+        assert!(open(&dir, Some(42)).limit_is_saved());
+        let storage = open(&dir, None);
+        assert!(storage.limit_is_saved());
+        assert_eq!(storage.max_entries(), 42);
     }
 
     #[test]
