@@ -379,7 +379,6 @@ src/config.rs          Config (see contracts), load(), builtin secret patterns
 ```sql
 CREATE TABLE entries (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,      -- stable, never reused
-  content     TEXT    NOT NULL,
   hash        BLOB    NOT NULL UNIQUE CHECK (length(hash) = 32),  -- sha256(content bytes)
   size        INTEGER NOT NULL CHECK (size >= 0),
   preview     TEXT    NOT NULL,
@@ -389,6 +388,7 @@ CREATE TABLE entries (
   alias       TEXT    UNIQUE CHECK (alias IS NULL OR (pinned = 1 AND length(alias) BETWEEN 1 AND 32)),
   source      TEXT    NOT NULL DEFAULT 'unknown',
   mime        TEXT    NOT NULL DEFAULT 'text/plain;charset=utf-8',
+  content     TEXT    NOT NULL,                       -- last stored column (see notes)
   search_text TEXT    GENERATED ALWAYS AS (substr(content, 1, 262144)) VIRTUAL
 );
 CREATE INDEX entries_by_recency      ON entries (last_used DESC, id DESC);
@@ -417,6 +417,7 @@ PRAGMA user_version = 1;
 
 Notes on the schema:
 
+- **`content` is the last stored column.** SQLite stores a row's columns in order and spills a large row into overflow pages, so a column after `content` can only be read by walking those pages. With `content` last, the limit checks (`sum(size)` over unpinned rows on every ingest) and list queries read only each row's first page.
 - **External-content FTS on a virtual generated column** means only the first 256 Ki characters of each entry are indexed. That keeps the trigram index (about 3-5x the indexed text) bounded, and `'rebuild'` and `'integrity-check'` still work. I checked this in an in-memory `sqlite3` 3.54 session: trigram matching is case-insensitive, `integrity-check` with rank 1 flags a damaged index, `rebuild` restores it, and queries shorter than 3 characters return nothing.
 - **The `alias` CHECK** makes "alias only on pinned entries" a database invariant. Unpinning runs `UPDATE entries SET pinned = 0, alias = NULL`.
 - **Schema version** is stored in `PRAGMA user_version`, not as a column (see Q1).

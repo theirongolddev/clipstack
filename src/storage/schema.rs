@@ -19,13 +19,14 @@ pub const APPLICATION_ID: i64 = 0x434C_5053;
 /// How long a writer waits for another process's write transaction.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Schema v1. `search_text` is a virtual generated column, so only the first
-/// 256 Ki characters of each entry are indexed; the FTS table is external
-/// content over it and is kept in sync by the triggers.
+/// Schema v1. `content` is the last stored column, so reading the small
+/// columns never walks a large entry's overflow pages. `search_text` is a
+/// virtual generated column, so only the first 256 Ki characters of each
+/// entry are indexed; the FTS table is external content over it and is kept
+/// in sync by the triggers.
 const SCHEMA_V1: &str = "
 CREATE TABLE entries (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  content     TEXT    NOT NULL,
   hash        BLOB    NOT NULL UNIQUE CHECK (length(hash) = 32),
   size        INTEGER NOT NULL CHECK (size >= 0),
   preview     TEXT    NOT NULL,
@@ -35,6 +36,7 @@ CREATE TABLE entries (
   alias       TEXT    UNIQUE CHECK (alias IS NULL OR (pinned = 1 AND length(alias) BETWEEN 1 AND 32)),
   source      TEXT    NOT NULL DEFAULT 'unknown',
   mime        TEXT    NOT NULL DEFAULT 'text/plain;charset=utf-8',
+  content     TEXT    NOT NULL,
   search_text TEXT    GENERATED ALWAYS AS (substr(content, 1, 262144)) VIRTUAL
 );
 CREATE INDEX entries_by_recency      ON entries (last_used DESC, id DESC);
@@ -174,6 +176,23 @@ mod tests {
 
     fn pragma_i64(conn: &Connection, name: &str) -> i64 {
         conn.pragma_query_value(None, name, |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn content_is_the_last_stored_column() {
+        // Small columns first: reading size/pinned/last_used (limits, lists)
+        // must not walk a large entry's overflow pages.
+        let dir = TempDir::new().unwrap();
+        let conn = open_connection(&db(&dir)).unwrap();
+        let mut stmt = conn.prepare("SELECT name, hidden FROM pragma_table_xinfo('entries')").unwrap();
+        let stored: Vec<String> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, hidden)| *hidden == 0)
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(stored.last().map(String::as_str), Some("content"), "{stored:?}");
     }
 
     #[test]

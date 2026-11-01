@@ -5,7 +5,7 @@ use super::{ClipEntry, Source, Storage};
 use crate::util;
 use anyhow::Result;
 use regex::RegexSet;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::time::Duration;
 
 /// Default `[storage] max_entry_bytes`: larger copies are not saved.
@@ -173,9 +173,96 @@ impl Storage {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (entry, inserted) = insert_or_bump(&tx, content, source, mime_types, now_ms)?;
+        enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
         tx.commit()?;
         Ok(if inserted { IngestOutcome::Inserted(entry) } else { IngestOutcome::Bumped(entry) })
     }
+
+    /// Apply max entries, retention and the total-size cap without an
+    /// insert. Run by `open()` and the daemon tick. Returns how many entries
+    /// were deleted.
+    pub fn expire(&self) -> Result<usize> {
+        self.expire_at(now_ms())
+    }
+
+    /// `expire` with an injected clock. Takes the write lock only when a
+    /// cheap read shows something to delete.
+    pub(crate) fn expire_at(&self, now_ms: i64) -> Result<usize> {
+        let mut conn = self.conn();
+        if !limits_exceeded(&conn, self.max_entries, &self.policy, now_ms)? {
+            return Ok(0);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = enforce_limits(&tx, self.max_entries, &self.policy, now_ms)?;
+        tx.commit()?;
+        if deleted > 0 {
+            super::scrub_deleted(&conn);
+        }
+        Ok(deleted)
+    }
+}
+
+/// `last_used` before which unpinned entries expire, if retention is on.
+fn retention_cutoff(policy: &IngestPolicy, now_ms: i64) -> Option<i64> {
+    policy
+        .retention
+        .map(|d| now_ms.saturating_sub(i64::try_from(d.as_millis()).unwrap_or(i64::MAX)))
+}
+
+/// Read-only check: would `enforce_limits` delete anything?
+fn limits_exceeded(
+    conn: &Connection,
+    max_entries: usize,
+    policy: &IngestPolicy,
+    now_ms: i64,
+) -> Result<bool> {
+    let exceeded = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM entries WHERE pinned = 0
+                        ORDER BY last_used DESC, id DESC LIMIT 1 OFFSET ?1)
+             OR (?2 IS NOT NULL AND EXISTS (SELECT 1 FROM entries WHERE pinned = 0 AND last_used < ?2))
+             OR (SELECT coalesce(sum(size), 0) FROM entries WHERE pinned = 0) > ?3",
+    )?
+    .query_row(
+        params![
+            i64::try_from(max_entries)?,
+            retention_cutoff(policy, now_ms),
+            i64::try_from(policy.max_total_bytes).unwrap_or(i64::MAX),
+        ],
+        |r| r.get(0),
+    )?;
+    Ok(exceeded)
+}
+
+/// Delete unpinned entries beyond `max_entries`, older than the retention
+/// cutoff, or beyond `max_total_bytes` (newest kept first). Pinned entries
+/// are never touched. Returns how many were deleted.
+pub(crate) fn enforce_limits(
+    conn: &Connection,
+    max_entries: usize,
+    policy: &IngestPolicy,
+    now_ms: i64,
+) -> Result<usize> {
+    let mut deleted = conn.prepare_cached(
+        "DELETE FROM entries WHERE id IN (
+           SELECT id FROM entries WHERE pinned = 0
+           ORDER BY last_used DESC, id DESC LIMIT -1 OFFSET ?1)",
+    )?
+    .execute([i64::try_from(max_entries)?])?;
+
+    if let Some(cutoff) = retention_cutoff(policy, now_ms) {
+        deleted += conn
+            .prepare_cached("DELETE FROM entries WHERE pinned = 0 AND last_used < ?1")?
+            .execute([cutoff])?;
+    }
+
+    deleted += conn.prepare_cached(
+        "DELETE FROM entries WHERE id IN (
+           SELECT id FROM (SELECT id, sum(size) OVER (ORDER BY last_used DESC, id DESC) AS running
+                           FROM entries WHERE pinned = 0)
+           WHERE running > ?1)",
+    )?
+    .execute([i64::try_from(policy.max_total_bytes).unwrap_or(i64::MAX)])?;
+    Ok(deleted)
 }
 
 /// Mime type recorded for content whose offer listed no `text/` type.
@@ -408,6 +495,104 @@ mod tests {
             IngestOutcome::Inserted(_)
         ));
         assert_eq!(entry_count(&storage), 1);
+    }
+
+    fn limits(max_entry_bytes: usize, max_total_bytes: u64, retention_days: u64) -> IngestPolicy {
+        let retention = (retention_days > 0).then(|| Duration::from_secs(retention_days * DAY_SECS));
+        IngestPolicy::new(RegexSet::empty(), 0, max_entry_bytes, max_total_bytes, retention)
+    }
+
+    fn storage_limited(max_entries: usize, policy: IngestPolicy) -> (Storage, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), Some(max_entries), policy).unwrap();
+        (storage, dir)
+    }
+
+    fn contents(storage: &Storage) -> Vec<String> {
+        storage.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT content FROM entries ORDER BY last_used, id").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        })
+    }
+
+    fn pin(storage: &Storage, id: crate::storage::EntryId) {
+        storage.with_conn(|c| c.execute("UPDATE entries SET pinned = 1 WHERE id = ?1", [id]).unwrap());
+    }
+
+    const DAY_SECS: u64 = 86_400;
+    const DAY_MS: i64 = 86_400_000;
+
+    #[test]
+    fn prunes_unpinned_beyond_max_entries() {
+        let (storage, _dir) = storage_limited(3, IngestPolicy::default());
+        for (i, c) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            storage.ingest_at(c, Source::Copy, &[], i as i64).unwrap();
+        }
+        assert_eq!(contents(&storage), ["c", "d", "e"], "oldest pruned first");
+
+        // A bump makes an old entry newest, so it survives the next prune
+        storage.ingest_at("c", Source::Copy, &[], 10).unwrap();
+        storage.ingest_at("f", Source::Copy, &[], 11).unwrap();
+        assert_eq!(contents(&storage), ["e", "c", "f"]);
+    }
+
+    #[test]
+    fn pinned_survive_pruning() {
+        let (storage, _dir) = storage_limited(2, IngestPolicy::default());
+        let keep = inserted(storage.ingest_at("keep me", Source::Copy, &[], 1).unwrap());
+        pin(&storage, keep.id);
+        for (i, c) in ["b", "c", "d"].iter().enumerate() {
+            storage.ingest_at(c, Source::Copy, &[], 10 + i as i64).unwrap();
+        }
+        assert_eq!(contents(&storage), ["keep me", "c", "d"], "pinned don't count toward the limit");
+    }
+
+    #[test]
+    fn expires_unpinned_older_than_retention() {
+        let (storage, _dir) = storage_limited(100, limits(1024, 1 << 20, 7));
+        let t0 = 1_000 * DAY_MS;
+        let old_pin = inserted(storage.ingest_at("old pinned", Source::Copy, &[], t0).unwrap());
+        pin(&storage, old_pin.id);
+        storage.ingest_at("old", Source::Copy, &[], t0).unwrap();
+        storage.ingest_at("six days", Source::Copy, &[], t0 + 2 * DAY_MS).unwrap();
+
+        storage.ingest_at("new", Source::Copy, &[], t0 + 8 * DAY_MS).unwrap();
+        assert_eq!(contents(&storage), ["old pinned", "six days", "new"]);
+
+        // expire() applies the same rule without an insert
+        assert_eq!(storage.expire_at(t0 + 10 * DAY_MS).unwrap(), 1);
+        assert_eq!(contents(&storage), ["old pinned", "new"]);
+        assert_eq!(storage.expire_at(t0 + 10 * DAY_MS).unwrap(), 0);
+    }
+
+    #[test]
+    fn retention_zero_disables_expiry() {
+        let config = crate::config::Config::parse("[storage]\nretention_days = 0\n").unwrap();
+        let policy = config.ingest_policy().unwrap();
+        assert_eq!(policy.retention(), None);
+
+        let (storage, _dir) = storage_limited(100, policy);
+        storage.ingest_at("ancient", Source::Copy, &[], 0).unwrap();
+        storage.ingest_at("today", Source::Copy, &[], 20_000 * DAY_MS).unwrap();
+        assert_eq!(storage.expire_at(40_000 * DAY_MS).unwrap(), 0);
+        assert_eq!(contents(&storage), ["ancient", "today"]);
+    }
+
+    #[test]
+    fn total_bytes_cap_prunes_oldest_unpinned() {
+        let (storage, _dir) = storage_limited(100, limits(10, 10, 0));
+        let big_pin = inserted(storage.ingest_at("PPPPPPPPPP", Source::Copy, &[], 1).unwrap());
+        pin(&storage, big_pin.id);
+        storage.ingest_at("aaaa", Source::Copy, &[], 2).unwrap();
+        storage.ingest_at("bbbb", Source::Copy, &[], 3).unwrap();
+        assert_eq!(contents(&storage).len(), 3, "pinned bytes don't count toward the cap");
+
+        storage.ingest_at("cccc", Source::Copy, &[], 4).unwrap();
+        assert_eq!(contents(&storage), ["PPPPPPPPPP", "bbbb", "cccc"], "12 > 10 bytes: oldest pruned");
+
+        // An entry exactly at the cap pushes out every older unpinned entry
+        storage.ingest_at("dddddddddd", Source::Copy, &[], 5).unwrap();
+        assert_eq!(contents(&storage), ["PPPPPPPPPP", "dddddddddd"]);
     }
 
     #[test]

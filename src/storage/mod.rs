@@ -38,7 +38,7 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -137,7 +137,16 @@ impl Storage {
         let max_entries = max_entries
             .unwrap_or(DEFAULT_MAX_ENTRIES)
             .clamp(1, ABSOLUTE_MAX_ENTRIES);
-        Ok(Storage { conn: Mutex::new(conn), base_dir: dir, db_path, max_entries, policy })
+        let storage = Storage { conn: Mutex::new(conn), base_dir: dir, db_path, max_entries, policy };
+        // Expired entries are gone before any read. Another process holding
+        // the write lock past the busy timeout is not fatal: it expires next time.
+        match storage.expire() {
+            Err(e) if is_busy(&e) => {}
+            other => {
+                other.context("Failed to apply storage limits")?;
+            }
+        }
+        Ok(storage)
     }
 
     pub fn default_dir() -> PathBuf {
@@ -175,10 +184,83 @@ impl Storage {
     }
 }
 
+/// `SQLITE_BUSY`/`SQLITE_LOCKED`: another connection holds the lock.
+fn is_busy(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// After a deleting write: move the WAL into the database and truncate it
+/// (so frames that carried deleted plaintext are gone), then return free
+/// pages to the filesystem. Best effort: while another connection holds a
+/// read transaction the checkpoint can't finish, and the next delete retries.
+fn scrub_deleted(conn: &Connection) {
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    let _ = conn.execute_batch("PRAGMA incremental_vacuum");
+}
+
 /// A `Storage` in a fresh temp dir with the default policy.
 #[cfg(test)]
 pub(crate) fn test_storage() -> (Storage, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
     let storage = Storage::open(dir.path().to_path_buf(), None, IngestPolicy::default()).unwrap();
     (storage, dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const DAY_MS: i64 = 86_400_000;
+
+    fn retention_days(days: u64) -> IngestPolicy {
+        IngestPolicy::new(
+            regex::RegexSet::empty(),
+            0,
+            1024,
+            1 << 20,
+            Some(Duration::from_secs(days * 86_400)),
+        )
+    }
+
+    fn entry_count(storage: &Storage) -> i64 {
+        storage.with_conn(|c| c.query_row("SELECT count(*) FROM entries", [], |r| r.get(0)).unwrap())
+    }
+
+    #[test]
+    fn open_expires_old_unpinned_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let now = ingest::now_ms();
+        {
+            let storage = Storage::open(dir.path().to_path_buf(), None, IngestPolicy::default()).unwrap();
+            storage.ingest_at("ten days old", Source::Copy, &[], now - 10 * DAY_MS).unwrap();
+            storage.ingest_at("yesterday", Source::Copy, &[], now - DAY_MS).unwrap();
+        }
+        let storage = Storage::open(dir.path().to_path_buf(), None, retention_days(7)).unwrap();
+        let left: Vec<String> = storage.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT content FROM entries").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        });
+        assert_eq!(left, ["yesterday"], "open() expires before any read");
+    }
+
+    #[test]
+    fn expire_returns_zero_without_write_when_nothing_expired() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), None, retention_days(7)).unwrap();
+        storage.ingest("fresh", Source::Copy, &[]).unwrap();
+
+        // Another connection holds the write lock: a writing expire() would
+        // wait out the busy timeout and fail.
+        let other = Connection::open(storage.db_path()).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let start = Instant::now();
+        assert_eq!(storage.expire().unwrap(), 0);
+        assert!(start.elapsed() < Duration::from_secs(1), "took {:?}", start.elapsed());
+        other.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(entry_count(&storage), 1);
+    }
 }
