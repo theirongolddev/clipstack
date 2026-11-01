@@ -7,8 +7,8 @@ use std::time::Instant;
 /// Picker mode for vim-style navigation
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
-    Normal, // j/k navigation, typing starts search
-    Search, // Active search input
+    Normal, // Bare letters are commands (j/k, dd, p ...); `/` starts a search
+    Search, // Typing edits the query; Esc returns to Normal
 }
 
 /// Focus mode for preview scrolling
@@ -33,7 +33,8 @@ pub struct ViewState {
     pub scroll_state: ScrollbarState,
     pub query: String,
     pub status: Option<(String, StatusLevel, Instant)>,
-    pub pending_g: bool,        // For gg command
+    /// First key of a two-key command (`gg`, `dd`)
+    pub pending: Option<char>,
     pub preview_scroll: usize,  // Current scroll offset in preview
     pub preview_lines: Vec<String>, // Cached wrapped lines of preview content
     pub preview_height: u16,    // Available height for preview area
@@ -48,7 +49,7 @@ impl Default for ViewState {
             scroll_state: ScrollbarState::default(),
             query: String::new(),
             status: None,
-            pending_g: false,
+            pending: None,
             preview_scroll: 0,
             preview_lines: Vec::new(),
             preview_height: 10, // Updated dynamically during render

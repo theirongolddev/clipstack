@@ -25,8 +25,8 @@ Built for developers who live in the terminal and want a clipboard manager that 
 **User Experience**
 - **Vim-Style Navigation**: Modal interface with `j/k`, `gg/G`, `/` search
 - **Preview Scrolling**: Press `Tab` to enter scrollable preview mode for long content
-- **Fuzzy Search**: Type to filter with highlighted matches and `[content]` indicator for deep matches
-- **Delete with Undo**: Remove entries with 5-second undo window
+- **Fuzzy Search**: Press `/` and type to filter, with highlighted matches and a `[content]` indicator for deep matches
+- **Delete with Undo**: Remove entries with `dd`, with a 5-second undo window (`u`)
 - **Configurable Limits**: Set 1-10,000 max entries via CLI or environment variable; retention and size caps in a config file
 - **Shell Completions**: Tab completion for bash, zsh, fish, elvish, powershell
 
@@ -269,7 +269,7 @@ clipstack completions powershell >> $PROFILE
 Launch with `clipstack` or `clipstack pick`:
 
 ```
-┌─Search (/ to search, type to filter)────────────────┐
+┌─Search (/ to search)────────────────────────────────┐
 │                                                     │
 └─────────────────────────────────────────────────────┘
 ┌─History (5/5) - 1 pinned─────┐┌─Preview─────5m─1.2KB──┐
@@ -279,10 +279,10 @@ Launch with `clipstack` or `clipstack pick`:
 │    14:25 [   12B] quick text ││                      │
 │    14:20 [  3.1KB] import Re ││                      │
 └──────────────────────────────┘└──────────────────────┘
-[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit
+[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit
 ```
 
-The picker uses vim-style modal navigation with multiple modes:
+The picker uses vim-style modal navigation. In normal mode every letter is a command, so typing a word there never filters (or deletes): press `/` first to search.
 
 **Normal Mode** (default):
 | Key | Action |
@@ -295,22 +295,22 @@ The picker uses vim-style modal navigation with multiple modes:
 | `Ctrl+U` / `Page Up` | Jump up 10 entries |
 | `/` | Enter search mode |
 | `p` | Toggle pin on selected entry (★) |
-| `d` | Delete selected entry |
+| `dd` | Delete selected entry (a single `d` only arms it) |
 | `u` | Undo delete (5 second window) |
 | `Tab` | Enter preview scroll mode |
 | `Enter` | Copy selected entry to clipboard and exit |
-| `Esc` / `q` | Exit without copying |
-| _any letter_ | Start typing to filter (enters search mode) |
+| `Esc` / `q` / `Ctrl+C` | Exit without copying |
 
-**Search Mode** (active when typing):
+**Search Mode** (after `/`):
 | Key | Action |
 |-----|--------|
-| _type_ | Filter entries by fuzzy search |
+| _type_ | Filter entries by fuzzy search (every letter is text here, including `d`, `p`, `q`) |
 | `↑` / `↓` | Navigate while searching |
 | `Ctrl+N` / `Ctrl+P` | Navigate (vim style) |
 | `Backspace` | Delete character (exits search if empty) |
 | `Enter` | Copy selected entry to clipboard and exit |
-| `Esc` | Exit search mode (return to normal) |
+| `Esc` | Leave search mode; the filter stays (Backspace it away, or `/` to edit) |
+| `Ctrl+C` | Exit without copying |
 
 **Preview Mode** (after pressing `Tab`):
 | Key | Action |
@@ -320,6 +320,7 @@ The picker uses vim-style modal navigation with multiple modes:
 | `g` / `Home` | Jump to top of content |
 | `G` / `End` | Jump to bottom of content |
 | `Tab` / `Esc` / `q` | Exit preview mode |
+| `Ctrl+C` | Exit without copying |
 
 **Visual Features:**
 - Mode indicator shows `[NORMAL]`, `[SEARCH]`, or `[PREVIEW]` in status bar

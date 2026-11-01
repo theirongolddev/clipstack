@@ -1007,6 +1007,7 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 - No storage changes.
 - New key bindings: `P` and `e` in list focus, `w` and `n` in preview focus.
 - Per the Q10 default, `/` is required to enter search; bare letters no longer start a filter. README's picker tables change accordingly. If the user picks the alternative, only the `map_key` table and those README rows change.
+- Delete becomes `dd` (vim): a single `d` only arms it, and any other key disarms it. With `d` alone still deleting, typing "docker" in normal mode would still delete on its first letter, which is what `typing_docker_in_normal_mode_deletes_nothing` rules out. `Ctrl+C` quits from every mode (before, it typed a `c`), and Ctrl chords never act as their bare letter (Ctrl+P no longer pins).
 
 #### 4.3 File-by-file
 

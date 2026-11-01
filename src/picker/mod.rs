@@ -15,16 +15,26 @@ use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
     cursor::Show,
-    event::{self, Event, KeyEventKind},
+    event::{self, Event, KeyEvent, KeyEventKind},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use keys::Action;
 use data::{DeletedEntry, PickerData, UNDO_WINDOW, order_pinned_first};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use search::{FilteredEntry, MatchLocation, SearchState};
-use state::{Mode, StatusLevel, ViewState};
+use state::{Focus, Mode, StatusLevel, ViewState};
 use std::io::{Stdout, stdout};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// How the picker ended.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    /// Esc, q or Ctrl+C
+    Cancelled,
+    /// Enter: this content goes to the clipboard
+    Selected(String),
+}
 
 pub struct Picker {
     data: PickerData,
@@ -174,13 +184,13 @@ impl Picker {
         }
     }
 
-    fn move_selection(&mut self, delta: i32) {
+    fn move_selection(&mut self, delta: isize) {
         if self.search.filtered.is_empty() {
             return;
         }
 
-        let current = self.view.selected.selected().unwrap_or(0) as i32;
-        let new_idx = (current + delta).clamp(0, self.search.filtered.len() as i32 - 1) as usize;
+        let current = self.view.selected.selected().unwrap_or(0);
+        let new_idx = current.saturating_add_signed(delta).min(self.search.filtered.len() - 1);
 
         // Clear preview cache when selection changes
         if self.view.selected.selected() != Some(new_idx) {
@@ -278,6 +288,77 @@ impl Picker {
         Ok(())
     }
 
+    /// Map `key` to an action and apply it.
+    fn handle_key(&mut self, key: KeyEvent) -> Result<Option<Outcome>> {
+        let action = keys::map_key(&self.view, key);
+        self.apply(action)
+    }
+
+    /// Apply one action; `Some` ends the picker.
+    fn apply(&mut self, action: Action) -> Result<Option<Outcome>> {
+        self.view.pending = None;
+        match action {
+            Action::None => {}
+            Action::Quit => return Ok(Some(Outcome::Cancelled)),
+            Action::Select => {
+                if let Some(entry) = self.selected_entry() {
+                    let content = self.data.storage.load_content(entry.id)?;
+                    return Ok(Some(Outcome::Selected(content)));
+                }
+            }
+            Action::Move(delta) => self.move_selection(delta),
+            Action::JumpTop => self.jump_to_start(),
+            Action::JumpBottom => self.jump_to_end(),
+            Action::Pending(key) => {
+                self.view.pending = Some(key);
+                if key == 'd' && self.selected_entry().is_some() {
+                    self.view.set_status("Press d again to delete".to_string(), StatusLevel::Warning);
+                }
+            }
+            Action::EnterSearch => self.view.mode = Mode::Search,
+            Action::ExitSearch => self.view.mode = Mode::Normal,
+            Action::SearchInput(c) => {
+                self.view.query.push(c);
+                self.update_filter();
+                self.load_preview();
+            }
+            Action::SearchBackspace => {
+                self.view.query.pop();
+                self.update_filter();
+                self.load_preview();
+                // Exit search mode if query is empty
+                if self.view.query.is_empty() {
+                    self.view.mode = Mode::Normal;
+                }
+            }
+            Action::Delete => self.delete_selected()?,
+            Action::Undo => self.undo_delete()?,
+            Action::TogglePin => self.toggle_pin_selected()?,
+            Action::FocusPreview => {
+                self.load_preview_content();
+                self.view.focus = Focus::Preview;
+            }
+            Action::FocusList => {
+                self.view.focus = Focus::List;
+                self.view.preview_lines.clear();
+                self.view.preview_scroll = 0;
+            }
+            Action::Scroll(lines) => self.scroll_preview(lines),
+            Action::ScrollPage(pages) => {
+                self.scroll_preview(pages.saturating_mul(self.view.preview_height as isize));
+            }
+            Action::ScrollTop => self.view.preview_scroll = 0,
+            Action::ScrollBottom => self.view.preview_scroll = self.view.max_preview_scroll(),
+        }
+        Ok(None)
+    }
+
+    /// Scroll the preview by `lines`, within its bounds.
+    fn scroll_preview(&mut self, lines: isize) {
+        let view = &mut self.view;
+        view.preview_scroll = view.preview_scroll.saturating_add_signed(lines).min(view.max_preview_scroll());
+    }
+
     pub fn run(&mut self) -> Result<Option<String>> {
         // Setup terminal
         let mut stdout = stdout();
@@ -316,14 +397,10 @@ impl Picker {
                     continue;
                 }
 
-                // Handle mode-specific input
-                let result = match self.view.mode {
-                    Mode::Normal => self.handle_normal_mode(key)?,
-                    Mode::Search => self.handle_search_mode(key)?,
-                };
-
-                if let Some(action) = result {
-                    return Ok(action);
+                match self.handle_key(key)? {
+                    Some(Outcome::Selected(content)) => return Ok(Some(content)),
+                    Some(Outcome::Cancelled) => return Ok(None),
+                    None => {}
                 }
             }
 
@@ -407,7 +484,7 @@ pub fn pick_and_paste(storage: Storage) -> Result<bool> {
 pub(super) mod tests {
     use super::*;
     use crate::storage::IngestPolicy;
-    use state::Focus;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use tempfile::TempDir;
 
     // Helper: Create a test storage with entries, oldest first
@@ -479,6 +556,46 @@ pub(super) mod tests {
         deleted.deleted_at = Instant::now() - UNDO_WINDOW - Duration::from_secs(1);
         picker.undo_delete().unwrap();
         assert_eq!(picker.data.storage.counts().unwrap().total, 1);
+    }
+
+    /// Press each key of `keys` as a plain character.
+    fn press(picker: &mut Picker, keys: &str) -> Option<Outcome> {
+        let mut outcome = None;
+        for c in keys.chars() {
+            let mods = if c.is_ascii_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+            outcome = picker.handle_key(KeyEvent::new(KeyCode::Char(c), mods)).unwrap();
+        }
+        outcome
+    }
+
+    #[test]
+    fn dd_deletes_and_u_restores() {
+        let (_temp, storage) = create_test_storage(&["keep", "gone"]);
+        let mut picker = Picker::new(storage).unwrap();
+        press(&mut picker, "d");
+        assert_eq!(previews(&picker), vec!["gone", "keep"], "one d deletes nothing");
+        press(&mut picker, "d");
+        assert_eq!(previews(&picker), vec!["keep"]);
+        press(&mut picker, "u");
+        assert_eq!(previews(&picker), vec!["gone", "keep"]);
+        assert_eq!(picker.data.storage.counts().unwrap().total, 2);
+    }
+
+    #[test]
+    fn slash_then_typing_filters_and_esc_keeps_query() {
+        let (_temp, storage) = create_test_storage(&["docker ps", "git log"]);
+        let mut picker = Picker::new(storage).unwrap();
+        press(&mut picker, "docker");
+        assert_eq!(picker.data.storage.counts().unwrap().total, 2, "typing in normal mode deletes nothing");
+        assert!(picker.view.query.is_empty());
+
+        press(&mut picker, "/dock");
+        assert_eq!(picker.view.mode, Mode::Search);
+        assert_eq!(previews(&picker), vec!["docker ps"]);
+        picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        assert_eq!(picker.view.mode, Mode::Normal);
+        assert_eq!(previews(&picker), vec!["docker ps"], "Esc leaves search mode, the filter stays");
+        assert_eq!(press(&mut picker, "q"), Some(Outcome::Cancelled));
     }
 
     // ======== Daemon auto-start Tests ========

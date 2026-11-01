@@ -46,8 +46,8 @@ impl Picker {
 
     fn render_search_box(&self, frame: &mut Frame, area: Rect) {
         let title = match self.view.mode {
-            Mode::Search => "Search (ESC to exit search)",
-            Mode::Normal => "Search (/ to search, type to filter)",
+            Mode::Search => "Search (Esc: stop typing, Enter: copy)",
+            Mode::Normal => "Search (/ to search)",
         };
 
         let border_color = match self.view.mode {
@@ -253,17 +253,14 @@ impl Picker {
 
     /// Key help for the status line, based on focus and mode
     pub(super) fn help_text(&self) -> String {
-        if self.view.focus == Focus::Preview {
-            "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  Tab/Esc/q:Back".to_string()
-        } else {
-            let mode_indicator = match self.view.mode {
-                Mode::Normal => "[NORMAL]",
-                Mode::Search => "[SEARCH]",
-            };
-            format!(
-                "{} j/k:Nav  /:Search  Tab:Preview  Enter:Paste  p:Pin  d:Del  u:Undo  q:Quit",
-                mode_indicator
-            )
+        match (self.view.mode, self.view.focus) {
+            (Mode::Search, _) => "[SEARCH] type to filter  ↑/↓:Nav  Enter:Copy  Esc:Done".to_string(),
+            (Mode::Normal, Focus::Preview) => {
+                "[PREVIEW] j/k:Scroll  PgUp/Dn:Page  g/G:Top/Bottom  Tab/Esc/q:Back".to_string()
+            }
+            (Mode::Normal, Focus::List) => {
+                "[NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit".to_string()
+            }
         }
     }
 
@@ -376,6 +373,17 @@ mod tests {
         let mut picker = Picker::new(storage).unwrap();
         picker.view.set_status("★ Pinned".to_string(), StatusLevel::Success);
         assert_eq!(picker.status_duration(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn help_shows_slash_search_and_dd_delete() {
+        let (_temp, storage) = create_test_storage(&["a"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let help = picker.help_text();
+        assert!(help.contains("/:Search") && help.contains("dd:Del"), "{help}");
+        picker.view.mode = Mode::Search;
+        let help = picker.help_text();
+        assert!(help.contains("[SEARCH]") && help.contains("Esc"), "{help}");
     }
 
     #[test]
