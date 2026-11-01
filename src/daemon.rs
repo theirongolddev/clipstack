@@ -1,9 +1,10 @@
 use crate::clipboard::Clipboard;
+use crate::perms;
 use crate::storage::Storage;
 use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,8 +75,8 @@ impl Daemon {
 
         // Acquire exclusive lock - fails if another daemon is running.
         // Open without truncating so a failed attempt can't wipe the running
-        // daemon's PID.
-        let mut lock_file = OpenOptions::new()
+        // daemon's PID. Created 0600 (an existing file keeps its mode).
+        let mut lock_file = perms::private_file_options()
             .read(true)
             .write(true)
             .create(true)
@@ -225,5 +226,15 @@ mod tests {
 
         daemon.stop();
         assert!(!handle.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_lock_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let _daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+
+        let meta = std::fs::metadata(dir.path().join("clipstack.lock")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 }
