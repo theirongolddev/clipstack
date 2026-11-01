@@ -1,5 +1,6 @@
 use crate::clipboard::Clipboard;
 use crate::perms;
+use std::os::unix::fs::PermissionsExt;
 use crate::storage::Storage;
 use crate::util;
 use anyhow::{Context, Result};
@@ -74,15 +75,7 @@ impl Daemon {
         };
 
         // Acquire exclusive lock - fails if another daemon is running.
-        // Open without truncating so a failed attempt can't wipe the running
-        // daemon's PID. Created 0600 (an existing file keeps its mode).
-        let mut lock_file = perms::private_file_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("Failed to create lock file: {:?}", lock_path))?;
+        let mut lock_file = open_lock_file(&lock_path)?;
         lock_file
             .try_lock_exclusive()
             .context("Daemon already running (lock file is held)")?;
@@ -172,6 +165,25 @@ impl Daemon {
     }
 }
 
+/// Open (or create) the daemon lock file without truncating, so a failed
+/// attempt can't wipe the running daemon's PID. The file is made 0600 even if
+/// an older version created it world-readable.
+fn open_lock_file(lock_path: &Path) -> Result<File> {
+    let file = perms::private_file_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .with_context(|| format!("Failed to create lock file: {:?}", lock_path))?;
+    let mut permissions = file.metadata()?.permissions();
+    if permissions.mode() & 0o777 != perms::FILE_MODE {
+        permissions.set_mode(perms::FILE_MODE);
+        file.set_permissions(permissions)?;
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,11 +242,22 @@ mod tests {
 
     #[test]
     fn test_lock_file_is_0600() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let _daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
 
         let meta = std::fs::metadata(dir.path().join("clipstack.lock")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_open_lock_file_tightens_existing_world_readable_file() {
+        let dir = TempDir::new().unwrap();
+        let lock = dir.path().join("clipstack.lock");
+        std::fs::write(&lock, "").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _file = open_lock_file(&lock).unwrap();
+
+        let meta = std::fs::metadata(&lock).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 }
