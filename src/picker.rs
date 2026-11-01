@@ -1181,7 +1181,7 @@ pub fn pick_and_paste(storage: Storage) -> Result<bool> {
     match picker.run() {
         Ok(Some(content)) => {
             // Content was selected
-            Clipboard::copy(&content)?;
+            Clipboard::system().copy(&content)?;
             eprintln!("Copied {} bytes to clipboard", content.len());
             Ok(true)
         }

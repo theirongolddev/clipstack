@@ -92,7 +92,7 @@ impl Daemon {
 
         while self.running.load(Ordering::SeqCst) {
             // Check regular clipboard (Ctrl+C copies only)
-            self.check_and_save(Clipboard::paste(), &mut last_clipboard_hash, "clipboard");
+            self.check_and_save(Clipboard::system().paste_text(), &mut last_clipboard_hash, "clipboard");
 
             if last_expire.elapsed() >= EXPIRE_INTERVAL {
                 last_expire = Instant::now();

@@ -2,6 +2,7 @@
 
 use super::query::{ENTRY_COLUMNS, entry_from_row};
 use super::{ClipEntry, Source, Storage};
+use crate::clipboard::PASSWORD_HINT_MIME;
 use crate::util;
 use anyhow::Result;
 use regex::RegexSet;
@@ -122,9 +123,6 @@ pub enum SkipReason {
     IgnoredPattern { index: usize },
     TooLarge { size: usize, limit: usize },
 }
-
-/// Offer mime type that password managers set on secrets.
-pub const PASSWORD_HINT_MIME: &str = "x-kde-passwordManagerHint";
 
 /// Why `content` must not be saved, or `None`. Pure; checks run in order:
 /// empty, password-manager hint, size, ignore patterns (only on content

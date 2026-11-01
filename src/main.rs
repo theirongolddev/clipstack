@@ -143,7 +143,7 @@ fn main() -> Result<()> {
             let mut content = String::new();
             io::stdin().read_to_string(&mut content)?;
 
-            clipboard::Clipboard::copy(&content)?;
+            clipboard::Clipboard::system().copy(&content)?;
             match storage.ingest(&content, Source::Copy, &[])? {
                 IngestOutcome::Skipped(reason) => eprintln!(
                     "Copied {} bytes (not saved to history: {})",
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
         }
 
         Some(Commands::Paste) => {
-            let content = clipboard::Clipboard::paste()?;
+            let content = clipboard::Clipboard::system().paste_text()?;
             io::stdout().write_all(content.as_bytes())?;
         }
 
@@ -598,7 +598,7 @@ fn serve_clipboard(storage: storage::Storage, port: u16) -> Result<()> {
                 // Save to storage and clipboard
                 match storage.ingest(&content, Source::Remote, &[]) {
                     Ok(outcome) => {
-                        if let Err(e) = clipboard::Clipboard::copy(&content) {
+                        if let Err(e) = clipboard::Clipboard::system().copy(&content) {
                             eprintln!("Warning: couldn't copy to system clipboard: {}", e);
                         }
                         match outcome {

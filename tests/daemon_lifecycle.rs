@@ -25,7 +25,7 @@ fn harness_isolates_runtime_dir() {
         "daemon should have called tests/fakes/wl-paste"
     );
     let log = std::fs::read_to_string(&calls).unwrap();
-    assert!(log.lines().any(|l| l == "--no-newline"), "calls: {log:?}");
+    assert!(log.lines().any(|l| l == "--no-newline --type text"), "calls: {log:?}");
 
     // Storage went to --storage-dir, not $XDG_DATA_HOME/clipd
     assert!(env.storage_dir.is_dir());
