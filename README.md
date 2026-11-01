@@ -13,6 +13,7 @@ Built for developers who live in the terminal and want a clipboard manager that 
 - **Remote Clipboard**: Copy from SSH sessions to your local clipboard with `rcopy`, and paste from it with `rpaste` (opt-in), over a forwarded Unix socket
 - **Scripting**: `get` an entry by position, id or alias, `list --json`, `search --json` over the full-content index, and stable exit codes
 - **Named Snippets**: `clipstack alias 3 sig` pins an entry as `@sig`; `clipstack get @sig` prints it
+- **Images**: PNG copies (screenshots) are saved too, up to `max_image_bytes`; `get` writes them back as PNG, `get --copy` and the picker put them back on the clipboard as `image/png`
 - **Secret Filtering**: Password-manager copies are never saved; built-in patterns skip private keys and API tokens; add your own regexes in the config file
 - **Retention and Size Caps**: Optionally expire old entries and cap entry and total size
 
@@ -112,7 +113,10 @@ cp target/release/clipstack ~/.cargo/bin/
 | `clipstack copy` | Copy stdin to clipboard |
 | `clipstack paste` | Paste clipboard contents to stdout |
 | `clipstack list [-c N] [--json] [--pinned]` | List the last N entries, newest first (default: 10); `--json` prints a JSON array, `--pinned` only pinned entries |
-| `clipstack get REF [--copy]` | Print one entry's content exactly as stored, no newline added; `--copy` also puts it on the clipboard and makes it the newest entry. `REF` is `N` (position, 1 = newest), `id:ID` or `@alias` |
+| `clipstack get REF [--copy \| --paste \| --image-path]` | Print one entry's content exactly as stored, no newline added (an image's PNG bytes, refused on a terminal); `--copy` also puts it on the clipboard and makes it the newest entry (an image is copied as `image/png` and not printed); `--paste` copies it, then pastes it into the window that had focus like `pick --paste`; `--image-path` prints the path of the image's PNG file (see [Images](#images)). `REF` is `N` (position, 1 = newest), `id:ID` or `@alias` |
+| `clipstack pin REF` / `clipstack unpin REF` | Pin an entry, or unpin it (which removes its alias) |
+| `clipstack delete REF` | Delete one entry |
+| `clipstack edit REF` | Edit a text entry in `$VISUAL` / `$EDITOR`; a changed result is saved as a new entry and copied (as the picker's `e`) |
 | `clipstack search QUERY... [-c N] [--json]` | Entries containing every word, pinned first, then newest (default: 10 matches); exits 1 when nothing matches |
 | `clipstack alias REF NAME` | Name an entry `@NAME`, pinning it if needed |
 | `clipstack alias --remove REF` | Remove an entry's alias; it stays pinned |
@@ -165,6 +169,15 @@ clipstack search docker compose
 clipstack alias 1 sig
 clipstack get @sig
 
+# Pin, unpin, delete or edit an entry
+clipstack pin 3
+clipstack unpin @sig
+clipstack delete id:42
+clipstack edit 1
+
+# Save the newest entry, a screenshot, as a file
+clipstack get 1 > shot.png
+
 # Use custom max entries limit
 clipstack --max-entries 500 daemon
 
@@ -185,9 +198,9 @@ clipstack status
 
 ### Scripting
 
-`get`, `list --json`, `search --json` and `alias` are meant for scripts. Their output and exit codes are stable.
+`get`, `list --json`, `search --json`, `alias`, `pin`, `unpin`, `delete` and `edit` are meant for scripts. Their output and exit codes are stable.
 
-**Entry references.** `get` and `alias` take a `REF`:
+**Entry references.** `get`, `alias`, `pin`, `unpin`, `delete` and `edit` take a `REF`:
 
 | Form | Means |
 |------|-------|
@@ -202,7 +215,7 @@ Positions shift as you copy; use `id:ID` or an alias to keep referring to the sa
 ```json
 [{"position":1,"id":42,"created_at":1761998400000,"last_used":1762001234567,"size":118,
   "preview":"git log --oneline | head","pinned":true,"alias":"gl","source":"watch",
-  "mime":"text/plain;charset=utf-8"}]
+  "mime":"text/plain;charset=utf-8","kind":"text","width":null,"height":null}]
 ```
 
 | Field | Meaning |
@@ -210,11 +223,13 @@ Positions shift as you copy; use `id:ID` or an alias to keep referring to the sa
 | `position` | Position in the full history, newest first (`get N` prints this entry). With `--pinned` and in search results it is still the position in the whole history |
 | `id` | Entry id (`get id:ID`) |
 | `created_at`, `last_used` | Unix time in milliseconds: first saved, and last copied (the sort key) |
-| `size` | Content size in bytes |
-| `preview` | First 100 characters, control characters replaced by spaces |
+| `size` | Content size in bytes (for an image, of the PNG) |
+| `preview` | First 100 characters, control characters replaced by spaces; `Image · WxH` for an image |
 | `pinned`, `alias` | Pin state, and the alias or `null` |
 | `source` | How it was saved: `watch`, `poll`, `copy`, `remote`, `picker`, `edit`, `import` or `unknown` |
-| `mime` | The text type it was copied as |
+| `mime` | The text type it was copied as; `image/png` for an image |
+| `kind` | `text` or `image` |
+| `width`, `height` | An image's size in pixels; `null` for text |
 
 An empty history prints `[]` and exits 0; a search with no match prints `[]` and exits 1. `search` lists pinned entries first, then the newest.
 
@@ -223,8 +238,8 @@ An empty history prints `[]` and exits 0; a search with no match prints `[]` and
 | Code | Meaning |
 |------|---------|
 | 0 | OK |
-| 1 | Not found or no match (like grep): `get` with no such entry, `search` with no match (silent), `alias` with the name taken or 25 entries already pinned; also any failure not listed below |
-| 2 | Usage error: bad arguments, an invalid `REF` or alias name, an empty search, `serve` |
+| 1 | Not found or no match (like grep): no entry for `REF`, `search` with no match (silent), `alias` with the name taken, `alias` or `pin` with 25 entries already pinned, `get --image-path` of a text entry, `edit` of an image; also any failure not listed below |
+| 2 | Usage error: bad arguments, an invalid `REF` or alias name, an empty search, `get` of an image to a terminal, `serve` |
 | 3 | Daemon or socket unavailable (`rcopy` and `rpaste`; no `clipstack` command needs the daemon) |
 | 4 | Storage error: database locked past the 5 s busy timeout, damaged (`check`), or written by a newer ClipStack |
 | 5 | Config file error |
@@ -245,6 +260,16 @@ clipstack list --pinned --json -c 25 | jq -r '.[] | "\(.alias // "-")\t\(.previe
 # Branch on whether something is in the history
 if clipstack search "BEGIN CERTIFICATE" >/dev/null; then echo "a certificate is in the history"; fi
 ```
+
+### Images
+
+When the clipboard offers a PNG and no text (a screenshot tool, "Copy image" in a browser), the daemon saves the PNG as an image entry. When both are offered, the text is saved. Only `image/png` is kept; the size comes from the PNG header, which is checked (an offer that isn't a PNG is skipped). Images up to `max_image_bytes` (8 MiB by default, and never more than `max_total_bytes`) are saved; they count towards `max_entries` and `max_total_bytes` like text, can be pinned and named, and are skipped when a password manager marks the copy secret. They are not searchable.
+
+- `clipstack get REF > file.png` writes the PNG. It refuses to write to a terminal (exit 2).
+- `clipstack get REF --copy` (and Enter in the picker) puts it back on the clipboard as `image/png`.
+- `clipstack get REF --image-path` writes the PNG to `$XDG_RUNTIME_DIR/clipstack-images/<id>.png` (directory `0700`, file `0600`, written to a temporary file and renamed) unless it is already there, and prints that path, for programs that show images from files. The files are removed with their entries (`delete`, `clear`, expiry, pruning; at the latest when the daemon next checks, once a minute), and the runtime directory is emptied at logout.
+- The picker shows an image as `Image · WxH` and describes it in the preview pane; it doesn't draw it. `e` on an image says it can't be edited.
+- `export` writes an image with `"kind":"image"`, `width`, `height` and the PNG as standard base64 in `image_base64` (its `content` is empty); `check` verifies that each image is a PNG of the recorded size.
 
 ### Shell Completions
 
@@ -299,11 +324,11 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `/` | Enter search mode |
 | `p` | Toggle pin on selected entry (★); unpinning removes its alias |
 | `P` | Name the selected entry `@name` (pins it); see the alias prompt below |
-| `e` | Edit the selected entry in `$VISUAL` / `$EDITOR` (else `vi`); saving a change copies the new text, adds it to the history and exits |
+| `e` | Edit the selected entry in `$VISUAL` / `$EDITOR` (else `vi`); saving a change copies the new text, adds it to the history and exits. Images can't be edited |
 | `dd` | Delete selected entry (a single `d` only arms it) |
 | `u` | Undo delete (5 second window) |
 | `Tab` | Enter preview scroll mode |
-| `Enter` | Copy selected entry to clipboard and exit |
+| `Enter` | Copy selected entry to clipboard and exit (an image is copied as `image/png`) |
 | `Esc` / `q` / `Ctrl+C` | Exit without copying |
 
 **Search Mode** (after `/`):
@@ -317,7 +342,7 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 | `Esc` | Leave search mode; the filter stays (Backspace it away, or `/` to edit) |
 | `Ctrl+C` | Exit without copying |
 
-**Editing with `e`.** The picker hands the terminal to your editor with the entry in `$XDG_RUNTIME_DIR/clipstack-edit-<pid>-<id>.txt` (mode `0600`, never in `/tmp`), and deletes the file when the editor exits. `$VISUAL` or `$EDITOR` is run by `sh`, so `EDITOR="code --wait"` works. If you save a change, the new text becomes a new entry (the original stays) and is copied. If the editor exits non-zero, or the text is unchanged or blank, you are back in the picker with nothing copied. A final newline the editor adds to text that had none is dropped.
+**Editing with `e`** (and `clipstack edit REF`, which works the same way from the shell). The picker hands the terminal to your editor with the entry in `$XDG_RUNTIME_DIR/clipstack-edit-<pid>-<id>.txt` (mode `0600`, never in `/tmp`), and deletes the file when the editor exits. `$VISUAL` or `$EDITOR` is run by `sh`, so `EDITOR="code --wait"` works. If you save a change, the new text becomes a new entry (the original stays) and is copied. If the editor exits non-zero, or the text is unchanged or blank, you are back in the picker with nothing copied. A final newline the editor adds to text that had none is dropped.
 
 **Alias prompt** (after `P`; it replaces the search box):
 | Key | Action |
@@ -367,7 +392,7 @@ There is no cap on how many entries are searched, and nothing is read from disk 
 
 Pin frequently-used text to protect it from automatic pruning:
 
-- Press `p` to toggle pin status on selected entry
+- Press `p` to toggle pin status on selected entry, or run `clipstack pin REF` / `clipstack unpin REF`
 - Pinned entries show a `★` indicator
 - Pinned entries always appear at the top of the list (most recently used first)
 - Maximum 25 pinned entries allowed
@@ -394,6 +419,7 @@ Either way, copies a password manager marks as secret (the `x-kde-passwordManage
 
 ```
 [watch] saved id:42 (118 bytes)
+[watch] saved image id:43 (48211 bytes)
 [watch] skipped sensitive
 [watch] skipped: matches ignore_patterns[0]
 ```
@@ -611,6 +637,7 @@ The first command of the new version imports the old store automatically:
 | Max pinned | 25 | Pinned entries are exempt from every limit below |
 | Retention | off | `retention_days` in the config file: unpinned entries last used longer ago are deleted at open, on each copy and once a minute in the daemon |
 | Max entry size | 10 MiB | `max_entry_bytes` (up to 64 MiB). Larger copies still reach the clipboard but aren't saved |
+| Max image size | 8 MiB | `max_image_bytes` (up to 64 MiB, and never more than `max_total_bytes`): larger PNG images aren't saved |
 | Total size | 256 MiB | `max_total_bytes`: unpinned content above this total is deleted, oldest first |
 | Search window | 256 K characters | Full-content search covers the first 262,144 characters of each entry |
 | Preview | 100 characters | Shown in lists |
@@ -620,7 +647,7 @@ The first command of the new version imports the old store automatically:
 - **Private permissions**: storage dir `0700`, database files `0600`; existing stores are tightened on open
 - **Transactions**: every change (save, pin, delete, prune) is one SQLite transaction in WAL mode, so a crash or power loss leaves the history as it was before or after the change, never in between
 - **Concurrent processes**: the daemon, its watch hook, the picker and the CLI each open the database; writers wait up to 5 seconds for each other and readers never block writers, so concurrent changes are never lost
-- **Integrity check**: `clipstack check` runs SQLite's integrity check and the search index's consistency check; `clipstack check --repair` rebuilds a damaged search index from the entries
+- **Integrity check**: `clipstack check` runs SQLite's integrity check and the search index's consistency check, and checks that every image entry holds a PNG of its recorded size; `clipstack check --repair` rebuilds a damaged search index from the entries
 - **Duplicate detection**: identical content is deduplicated by SHA256 hash
 - **Secret filtering**: copies that match the built-in secret patterns or your `ignore_patterns` are never written to the database
 
@@ -635,7 +662,7 @@ The directory is treated as ClipStack's own: it is created if missing and chmod'
 
 ### Inspecting Storage
 
-`clipstack export` writes one JSON object per entry, oldest first, with the fields `id`, `created_at`, `last_used` (Unix ms), `size`, `pinned`, `alias`, `source`, `mime` and `content`:
+`clipstack export` writes one JSON object per entry, oldest first, with the fields `id`, `created_at`, `last_used` (Unix ms), `size`, `pinned`, `alias`, `source`, `mime`, `kind` and `content`; image entries also have `width`, `height` and `image_base64` (see [Images](#images)):
 
 ```bash
 # The 5 most recent entries, without their content
@@ -680,6 +707,9 @@ retention_days = 0
 
 # Copies larger than this still reach the clipboard but aren't saved (1 byte to 64 MiB).
 max_entry_bytes = 10485760   # 10 MiB
+
+# PNG images larger than this aren't saved (1 byte to 64 MiB; max_total_bytes caps it too).
+max_image_bytes = 8388608    # 8 MiB
 
 # Unpinned content above this total is deleted, oldest first (at least max_entry_bytes).
 max_total_bytes = 268435456  # 256 MiB
@@ -801,6 +831,8 @@ This helps diagnose issues with:
 │  ├── copy/paste    → clipboard.rs (wl-copy/wl-paste wrapper)   │
 │  ├── get/search    → storage/ (by position, id:ID, @alias; FTS)│
 │  ├── alias         → Name (and pin) an entry                   │
+│  ├── pin/unpin     → Pin state; delete or edit an entry        │
+│  ├── get images    → PNG to stdout, --copy, --image-path files │
 │  ├── pick          → picker/ (TUI with ratatui); --paste: wtype│
 │  ├── daemon        → daemon/ (capture, socket, PID lock file)  │
 │  ├── __watch-hook  → Run by wl-paste --watch per selection     │
@@ -834,9 +866,9 @@ This helps diagnose issues with:
 │  └── actions.rs    → Edit in $EDITOR, wtype paste keys         │
 ├─────────────────────────────────────────────────────────────────┤
 │  External                                                       │
-│  ├── wl-copy       → Write to Wayland clipboard                │
-│  ├── wl-paste      → Read from Wayland clipboard               │
-│  └── wtype         → Optional: paste keys for pick --paste     │
+│  ├── wl-copy       → Write to Wayland clipboard (text, PNG)    │
+│  ├── wl-paste      → Read from Wayland clipboard (text, PNG)   │
+│  └── wtype         → Optional: paste keys for pick/get --paste │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -917,7 +949,7 @@ ClipStack handles various content types and edge cases gracefully:
 **Edge Cases**
 - Empty clipboard: Silently ignored, no error entries created
 - Whitespace-only content: Saved with sanitized preview
-- Binary content: Treated as text; non-UTF-8 bytes may cause errors
+- Binary content: PNG images are saved as images (see [Images](#images)); other binary offers are not saved
 - Very large entries: Saved up to `max_entry_bytes` (10 MiB by default); larger copies reach the clipboard but aren't saved
 - Control characters: Stripped from preview display, preserved in content
 
@@ -1060,7 +1092,9 @@ clipstack/
 │   │   ├── mod.rs       # Main loop, runtime dir, lock file, periodic expiry
 │   │   ├── capture.rs   # wl-paste --watch supervisor, watch hook, polling fallback
 │   │   └── socket.rs    # Unix socket server (PUSH/PULL/PING)
+│   ├── image_cache.rs   # get --image-path files in $XDG_RUNTIME_DIR/clipstack-images
 │   ├── perms.rs         # Private (0700/0600) storage permissions
+│   ├── png.rs           # PNG signature and IHDR check (width, height)
 │   ├── picker/          # TUI history picker
 │   │   ├── mod.rs       # Picker: actions, event loop, terminal setup and suspend
 │   │   ├── actions.rs   # Edit in $EDITOR, wtype paste keys
@@ -1083,6 +1117,7 @@ clipstack/
 │   ├── daemon_lifecycle.rs  # Daemon start/stop, shutdown, status and serve stub tests
 │   ├── migration_cli.rs     # Import, config, export and check CLI tests
 │   ├── cli_scripting.rs     # get, list/search --json, alias and exit code tests
+│   ├── cli_entries.rs       # pin/unpin/delete/edit, get --paste and image get tests
 │   ├── watch_capture.rs     # Watch hook, watch capture and polling fallback tests
 │   ├── socket_protocol.rs   # Socket PUSH/PULL/PING, timeouts and stale-socket tests
 │   ├── fakes/           # Fake wl-paste/wl-copy/wtype (never touch the real clipboard or type keys)

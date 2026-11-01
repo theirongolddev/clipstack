@@ -1079,7 +1079,10 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 ### Step 5: Images, entry commands and the omarchy-shell overlay
 
-> **Implementation status:** in progress.
+> **Implementation status:** 5.1-5.3 done (bbb1402..1f8d870, docs in the commit after): schema v2 and PNG storage,
+> daemon image capture, `pin`/`unpin`/`delete`/`edit`, `get --paste`/`--image-path`,
+> images in `get` and the picker. 5.4 (overlay plugin) and 5.5 (desktop integration)
+> pending.
 
 Goal: a Maccy-style clipboard overlay inside omarchy-shell (Quickshell), backed by
 the `clipstack` CLI, with image history. Design: concept C "Reader" (list on the

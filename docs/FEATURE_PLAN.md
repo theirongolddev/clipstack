@@ -1721,6 +1721,18 @@ fn detect_content_type(content: &str) -> ContentType {
 
 ## Feature 14: Image Clipboard Support
 
+> **Done for PNG in IMPROVEMENT_PLAN Step 5 (5.1-5.3).** Schema v2 stores a PNG in the
+> `entries.image` BLOB column (`kind = 'image'`, `width`, `height` from the IHDR,
+> parsed by hand in `src/png.rs`; no `image` crate), deduplicated by hash, capped by
+> `[storage] max_image_bytes`. The daemon saves offers of only `image/png` in watch
+> and poll mode (text wins when both are offered). `get` writes the PNG, `get --copy`
+> and the picker copy it back as `image/png`, `get --image-path` caches it in
+> `$XDG_RUNTIME_DIR/clipstack-images/`. Not done, and not planned for now: other
+> formats (JPEG, BMP), terminal image rendering (sixel/kitty; the picker shows
+> `Image · WxH` and a text description) and thumbnails (the omarchy-shell overlay
+> shows the PNG file itself). The `blobs` table and `ClipContent` enum below were not
+> needed.
+
 ### Problem
 ClipStack only handles text. Users copying screenshots/images have no history.
 
@@ -1841,7 +1853,7 @@ image = "0.25"
 13. Content type indicators
 
 ## Future (Phase 5)
-14. Image clipboard support
+14. Image clipboard support (done for PNG, IMPROVEMENT_PLAN Step 5)
 
 ---
 
@@ -1903,7 +1915,7 @@ Capture `ratatui::buffer::Buffer` state for key UI scenarios:
 - Document all config options in one place
 
 ### Clipboard Backend Abstraction
-- Partly addressed: `src/clipboard.rs` now has a `Clipboard` struct (IMPROVEMENT_PLAN Step 2) that holds the wl-paste/wl-copy binaries, so tests and the daemon can swap them; a trait over it is still open
+- Partly addressed: `src/clipboard.rs` now has a `Clipboard` struct (IMPROVEMENT_PLAN Step 2) that holds the wl-paste/wl-copy binaries, so tests and the daemon can swap them, with `paste_bytes`/`copy_bytes(mime)` for images (Step 5); a trait over it is still open
 - Define a `ClipboardBackend` trait even if only Wayland is supported initially
 - This makes X11/macOS support non-invasive later:
 ```rust
