@@ -22,6 +22,14 @@ use std::fmt;
 pub enum StorageError {
     /// The database was written by a newer ClipStack.
     NewerSchema { found: i64, supported: i64 },
+    /// No entry with this id
+    NotFound { id: EntryId },
+    /// Pinning would exceed `MAX_PINNED`
+    PinLimit { max: usize },
+    /// Another entry already has this alias
+    AliasTaken(String),
+    /// Not `^[a-z0-9][a-z0-9_-]{0,31}$`
+    InvalidAlias(String),
 }
 
 impl fmt::Display for StorageError {
@@ -31,6 +39,18 @@ impl fmt::Display for StorageError {
                 f,
                 "database schema version {found} is newer than this clipstack supports \
                  ({supported}); upgrade clipstack"
+            ),
+            StorageError::NotFound { id } => write!(f, "Entry id:{id} not found"),
+            StorageError::PinLimit { max } => {
+                write!(f, "Maximum pinned entries ({max}) reached. Unpin something first.")
+            }
+            StorageError::AliasTaken(alias) => {
+                write!(f, "Alias @{alias} is already used by another entry")
+            }
+            StorageError::InvalidAlias(alias) => write!(
+                f,
+                "Invalid alias {alias:?}: use 1-32 characters from a-z, 0-9, '_' and '-', \
+                 starting with a letter or digit"
             ),
         }
     }
@@ -55,6 +75,29 @@ pub const DEFAULT_MAX_ENTRIES: usize = 100;
 pub const ABSOLUTE_MAX_ENTRIES: usize = 10_000;
 /// Most pinned entries, so the pin list stays a short list.
 pub const MAX_PINNED: usize = 25;
+
+/// Longest alias, in characters.
+pub const MAX_ALIAS_LEN: usize = 32;
+
+/// `^[a-z0-9][a-z0-9_-]{0,31}$`: safe after `@` in a shell word.
+pub fn is_valid_alias(alias: &str) -> bool {
+    let mut chars = alias.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && alias.len() <= MAX_ALIAS_LEN
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// History totals for `stats`/`status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counts {
+    pub total: usize,
+    pub pinned: usize,
+    /// Content bytes, pinned included
+    pub total_bytes: u64,
+    /// Smallest and largest `last_used`
+    pub oldest: Option<i64>,
+    pub newest: Option<i64>,
+}
 
 /// One history entry, without its content (`load_content` reads that).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -198,6 +241,83 @@ impl Storage {
         &self.policy
     }
 
+    /// Flip an entry's pin; returns the new state. Unpinning clears the alias.
+    pub fn toggle_pin(&self, id: EntryId) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pinned = pinned_state(&tx, id)?.ok_or(StorageError::NotFound { id })?;
+        write_pin(&tx, id, !pinned)?;
+        tx.commit()?;
+        Ok(!pinned)
+    }
+
+    /// Pin or unpin (unpinning clears the alias). A missing id is a no-op,
+    /// so undoing a change to an entry deleted meanwhile does nothing.
+    pub fn set_pinned(&self, id: EntryId, pinned: bool) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match pinned_state(&tx, id)? {
+            Some(current) if current != pinned => write_pin(&tx, id, pinned)?,
+            _ => {}
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Set (pinning the entry if needed) or remove an alias. Removing keeps
+    /// the pin.
+    pub fn set_alias(&self, id: EntryId, alias: Option<&str>) -> Result<()> {
+        if let Some(name) = alias.filter(|a| !is_valid_alias(a)) {
+            return Err(StorageError::InvalidAlias(name.to_string()).into());
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pinned = pinned_state(&tx, id)?.ok_or(StorageError::NotFound { id })?;
+        match alias {
+            Some(name) => {
+                if !pinned {
+                    check_pin_room(&tx)?;
+                }
+                let result = tx
+                    .prepare_cached("UPDATE entries SET pinned = 1, alias = ?2 WHERE id = ?1")?
+                    .execute(rusqlite::params![id, name]);
+                match result {
+                    Err(e) if is_unique_violation(&e) => {
+                        return Err(StorageError::AliasTaken(name.to_string()).into());
+                    }
+                    other => {
+                        other?;
+                    }
+                }
+            }
+            None => {
+                tx.prepare_cached("UPDATE entries SET alias = NULL WHERE id = ?1")?.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete one entry; false if it didn't exist.
+    pub fn delete_entry(&self, id: EntryId) -> Result<bool> {
+        let conn = self.conn();
+        let deleted = conn.prepare_cached("DELETE FROM entries WHERE id = ?1")?.execute([id])? > 0;
+        if deleted {
+            scrub_deleted(&conn);
+        }
+        Ok(deleted)
+    }
+
+    /// Delete every entry, pinned ones too; settings are kept. Returns the count.
+    pub fn clear(&self) -> Result<usize> {
+        let conn = self.conn();
+        let deleted = conn.execute("DELETE FROM entries", [])?;
+        if deleted > 0 {
+            scrub_deleted(&conn);
+        }
+        Ok(deleted)
+    }
+
     /// The connection. A panic while it was held can't leave SQLite in a bad
     /// state (transactions roll back on drop), so a poisoned lock is reused.
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -209,6 +329,41 @@ impl Storage {
     pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
         f(&self.conn())
     }
+}
+
+/// An entry's pin state, or `None` if it doesn't exist.
+fn pinned_state(conn: &Connection, id: EntryId) -> Result<Option<bool>> {
+    Ok(conn
+        .prepare_cached("SELECT pinned FROM entries WHERE id = ?1")?
+        .query_row([id], |r| r.get(0))
+        .optional()?)
+}
+
+fn check_pin_room(conn: &Connection) -> Result<()> {
+    let pinned: i64 = conn
+        .prepare_cached("SELECT count(*) FROM entries WHERE pinned = 1")?
+        .query_row([], |r| r.get(0))?;
+    if usize::try_from(pinned)? >= MAX_PINNED {
+        return Err(StorageError::PinLimit { max: MAX_PINNED }.into());
+    }
+    Ok(())
+}
+
+/// Pin (checking `MAX_PINNED`) or unpin and clear the alias.
+fn write_pin(conn: &Connection, id: EntryId, pinned: bool) -> Result<()> {
+    if pinned {
+        check_pin_room(conn)?;
+        conn.prepare_cached("UPDATE entries SET pinned = 1 WHERE id = ?1")?.execute([id])?;
+    } else {
+        conn.prepare_cached("UPDATE entries SET pinned = 0, alias = NULL WHERE id = ?1")?
+            .execute([id])?;
+    }
+    Ok(())
+}
+
+fn is_unique_violation(err: &rusqlite::Error) -> bool {
+    matches!(err, rusqlite::Error::SqliteFailure(e, _)
+        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
 }
 
 /// `settings` key of the saved history length.
@@ -352,6 +507,244 @@ mod tests {
         let storage = open(&dir, None);
         assert!(storage.limit_is_saved());
         assert_eq!(storage.max_entries(), 42);
+    }
+
+    fn add(storage: &Storage, content: &str, at: i64) -> ClipEntry {
+        match storage.ingest_at(content, Source::Copy, &[], at).unwrap() {
+            ingest::IngestOutcome::Inserted(e) | ingest::IngestOutcome::Bumped(e) => e,
+            other => panic!("not saved: {other:?}"),
+        }
+    }
+
+    fn storage_error(err: &anyhow::Error) -> Option<&StorageError> {
+        err.downcast_ref::<StorageError>()
+    }
+
+    #[test]
+    fn test_toggle_pin() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "test content", 1);
+        assert!(!entry.pinned);
+
+        assert!(storage.toggle_pin(entry.id).unwrap());
+        assert!(storage.get(entry.id).unwrap().unwrap().pinned, "persisted");
+        assert!(!storage.toggle_pin(entry.id).unwrap());
+        assert!(!storage.get(entry.id).unwrap().unwrap().pinned);
+    }
+
+    #[test]
+    fn test_toggle_pin_nonexistent() {
+        let (storage, _dir) = test_storage();
+        let err = storage.toggle_pin(999).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::NotFound { id: 999 }));
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn toggle_pin_respects_max_pinned() {
+        let (storage, _dir) = test_storage();
+        let ids: Vec<EntryId> = (0..MAX_PINNED)
+            .map(|i| {
+                let e = add(&storage, &format!("content {i}"), i as i64);
+                assert!(storage.toggle_pin(e.id).unwrap());
+                e.id
+            })
+            .collect();
+        let extra = add(&storage, "extra", 100);
+
+        let err = storage.toggle_pin(extra.id).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::PinLimit { max: MAX_PINNED }));
+        assert!(err.to_string().contains("Maximum pinned"), "{err}");
+        let err = storage.set_pinned(extra.id, true).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::PinLimit { max: MAX_PINNED }));
+        assert_eq!(storage.counts().unwrap().pinned, MAX_PINNED);
+
+        // Unpinning one frees a slot
+        assert!(!storage.toggle_pin(ids[0]).unwrap());
+        assert!(storage.toggle_pin(extra.id).unwrap());
+        // Re-pinning an already pinned entry is not a new pin
+        storage.set_pinned(extra.id, true).unwrap();
+    }
+
+    #[test]
+    fn test_set_pinned() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "test content", 1);
+        storage.set_pinned(entry.id, true).unwrap();
+        assert!(storage.get(entry.id).unwrap().unwrap().pinned);
+        storage.set_pinned(entry.id, false).unwrap();
+        assert!(!storage.get(entry.id).unwrap().unwrap().pinned);
+        // A missing id is a no-op (picker undo of a since-deleted entry)
+        storage.set_pinned(999, true).unwrap();
+    }
+
+    #[test]
+    fn test_pinned_count() {
+        let (storage, _dir) = test_storage();
+        assert_eq!(storage.counts().unwrap().pinned, 0);
+        let one = add(&storage, "one", 1);
+        let two = add(&storage, "two", 2);
+        add(&storage, "three", 3);
+        storage.toggle_pin(one.id).unwrap();
+        storage.toggle_pin(two.id).unwrap();
+        assert_eq!(storage.counts().unwrap().pinned, 2);
+        storage.toggle_pin(one.id).unwrap();
+
+        let counts = storage.counts().unwrap();
+        assert_eq!(
+            counts,
+            Counts { total: 3, pinned: 1, total_bytes: 11, oldest: Some(1), newest: Some(3) }
+        );
+        storage.clear().unwrap();
+        assert_eq!(
+            storage.counts().unwrap(),
+            Counts { total: 0, pinned: 0, total_bytes: 0, oldest: None, newest: None }
+        );
+    }
+
+    #[test]
+    fn set_alias_validates_name() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "addr", 1);
+        let long = "a".repeat(33);
+        for bad in ["", "Sig", "-sig", "_sig", "s g", "sig!", "é", long.as_str()] {
+            let err = storage.set_alias(entry.id, Some(bad)).unwrap_err();
+            assert_eq!(
+                storage_error(&err),
+                Some(&StorageError::InvalidAlias(bad.to_string())),
+                "{bad:?}"
+            );
+        }
+        let max = "a".repeat(32);
+        for good in ["sig", "0", "my-addr_2", max.as_str()] {
+            storage.set_alias(entry.id, Some(good)).unwrap();
+            assert_eq!(storage.by_alias(good).unwrap().map(|e| e.id), Some(entry.id));
+        }
+        let err = storage.set_alias(999, Some("ok")).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::NotFound { id: 999 }));
+    }
+
+    #[test]
+    fn alias_is_unique() {
+        let (storage, _dir) = test_storage();
+        let a = add(&storage, "a", 1);
+        let b = add(&storage, "b", 2);
+        storage.set_alias(a.id, Some("sig")).unwrap();
+        storage.set_alias(a.id, Some("sig")).unwrap(); // same entry again is fine
+
+        let err = storage.set_alias(b.id, Some("sig")).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::AliasTaken("sig".to_string())));
+        assert_eq!(storage.by_alias("sig").unwrap().map(|e| e.id), Some(a.id));
+        assert!(!storage.get(b.id).unwrap().unwrap().pinned, "failed alias doesn't pin");
+    }
+
+    #[test]
+    fn set_alias_pins_entry() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "addr", 1);
+        storage.set_alias(entry.id, Some("home")).unwrap();
+        let got = storage.get(entry.id).unwrap().unwrap();
+        assert!(got.pinned);
+        assert_eq!(got.alias.as_deref(), Some("home"));
+
+        // Removing the alias keeps the pin
+        storage.set_alias(entry.id, None).unwrap();
+        let got = storage.get(entry.id).unwrap().unwrap();
+        assert!(got.pinned);
+        assert_eq!(got.alias, None);
+        assert_eq!(storage.by_alias("home").unwrap(), None);
+    }
+
+    #[test]
+    fn set_alias_respects_max_pinned() {
+        let (storage, _dir) = test_storage();
+        for i in 0..MAX_PINNED {
+            let e = add(&storage, &format!("p{i}"), i as i64);
+            storage.set_pinned(e.id, true).unwrap();
+        }
+        let extra = add(&storage, "extra", 100);
+        let err = storage.set_alias(extra.id, Some("x")).unwrap_err();
+        assert_eq!(storage_error(&err), Some(&StorageError::PinLimit { max: MAX_PINNED }));
+    }
+
+    #[test]
+    fn unpin_clears_alias() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "addr", 1);
+        storage.set_alias(entry.id, Some("home")).unwrap();
+        assert!(!storage.toggle_pin(entry.id).unwrap());
+        assert_eq!(storage.get(entry.id).unwrap().unwrap().alias, None);
+
+        storage.set_alias(entry.id, Some("home")).unwrap();
+        storage.set_pinned(entry.id, false).unwrap();
+        assert_eq!(storage.get(entry.id).unwrap().unwrap().alias, None);
+        assert_eq!(storage.by_alias("home").unwrap(), None);
+    }
+
+    #[test]
+    fn test_delete_entry() {
+        let (storage, _dir) = test_storage();
+        let entry = add(&storage, "to delete", 1);
+        assert!(storage.delete_entry(entry.id).unwrap());
+        assert_eq!(storage.get(entry.id).unwrap(), None);
+        assert_eq!(entry_count(&storage), 0);
+        // Deleting a missing entry is not an error
+        assert!(!storage.delete_entry(entry.id).unwrap());
+    }
+
+    #[test]
+    fn clear_removes_all() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = open(&dir, Some(42));
+        add(&storage, "one", 1);
+        let two = add(&storage, "two", 2);
+        storage.set_alias(two.id, Some("two")).unwrap();
+
+        assert_eq!(storage.clear().unwrap(), 2, "pinned entries too");
+        assert_eq!(entry_count(&storage), 0);
+        assert_eq!(storage.clear().unwrap(), 0);
+        // The saved limit survives a clear
+        assert_eq!(open(&dir, None).max_entries(), 42);
+    }
+
+    /// Every file SQLite keeps for the database, as one byte string.
+    fn db_file_bytes(storage: &Storage) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = storage.db_path().as_os_str().to_owned();
+            path.push(suffix);
+            if let Ok(b) = std::fs::read(&path) {
+                bytes.extend(b);
+            }
+        }
+        bytes
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn deleted_secret_not_in_db_files() {
+        // One connection, so nothing blocks the TRUNCATE checkpoint.
+        let (storage, _dir) = test_storage();
+        add(&storage, "keep this ordinary text", 1);
+
+        let small = "SMALLSECRET-7f3a9c1e";
+        // Large enough for overflow pages
+        let large = format!("LARGESECRET-b42d {}", "q".repeat(20_000));
+        let small_entry = add(&storage, small, 2);
+        add(&storage, &large, 3);
+        let bytes = db_file_bytes(&storage);
+        assert!(contains(&bytes, small) && contains(&bytes, "LARGESECRET-b42d"), "sanity: stored");
+
+        assert!(storage.delete_entry(small_entry.id).unwrap());
+        assert!(!contains(&db_file_bytes(&storage), small), "deleted entry left plaintext");
+
+        storage.clear().unwrap();
+        let bytes = db_file_bytes(&storage);
+        assert!(!contains(&bytes, "LARGESECRET-b42d"), "cleared entry left plaintext");
+        assert!(!contains(&bytes, "ordinary text"));
     }
 
     #[test]
