@@ -197,6 +197,7 @@ dependencies = [
  "ratatui",
  "regex",
  "rusqlite",
+ "rustix 1.1.3",
  "serde",
  "serde_json",
  "sha2",

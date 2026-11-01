@@ -5,7 +5,7 @@ use crate::util;
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,16 +23,14 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Get the default path to the daemon lock file
-    pub fn lock_file_path() -> PathBuf {
-        dirs::runtime_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("clipstack.lock")
+    /// The daemon lock file: `<runtime dir>/clipstack.lock`.
+    pub fn lock_file_path() -> Result<PathBuf> {
+        Ok(runtime_dir()?.join("clipstack.lock"))
     }
 
     /// Check if daemon is currently running by testing the lock file
     pub fn is_running() -> bool {
-        lock_is_held(&Self::lock_file_path())
+        Self::lock_file_path().is_ok_and(|path| lock_is_held(&path))
     }
 
     /// Read the PID recorded in a lock file
@@ -42,16 +40,13 @@ impl Daemon {
 
     /// PID of the running daemon, if one holds the global lock
     pub fn running_pid() -> Option<u32> {
-        if Self::is_running() {
-            Self::read_pid(&Self::lock_file_path())
-        } else {
-            None
-        }
+        let path = Self::lock_file_path().ok()?;
+        if lock_is_held(&path) { Self::read_pid(&path) } else { None }
     }
 
     /// A daemon saving into `storage`, holding the global lock file.
     pub fn new(storage: Storage) -> Result<Self> {
-        Self::with_lock_path(storage, &Self::lock_file_path())
+        Self::with_lock_path(storage, &Self::lock_file_path()?)
     }
 
     /// A daemon holding the lock at `lock_path` (tests use a temp path).
@@ -157,6 +152,48 @@ impl Daemon {
     pub fn stop_handle(&self) -> Arc<AtomicBool> {
         self.running.clone()
     }
+}
+
+/// The private runtime dir for the lock and socket: `$XDG_RUNTIME_DIR`, else
+/// `/tmp/clipstack-<uid>` (created 0700; it must be a real directory owned by
+/// us with no group/other access, or another user could pre-create it).
+pub fn runtime_dir() -> Result<PathBuf> {
+    runtime_dir_from(std::env::var_os("XDG_RUNTIME_DIR"), Path::new("/tmp"))
+}
+
+/// `runtime_dir` with the environment and `/tmp` injected for tests. An
+/// empty or relative `XDG_RUNTIME_DIR` is ignored, as the XDG spec says.
+fn runtime_dir_from(xdg: Option<std::ffi::OsString>, tmp: &Path) -> Result<PathBuf> {
+    if let Some(dir) = xdg.map(PathBuf::from).filter(|p| p.is_absolute()) {
+        return Ok(dir);
+    }
+    let uid = current_uid();
+    let dir = tmp.join(format!("clipstack-{uid}"));
+    match std::fs::DirBuilder::new().mode(perms::DIR_MODE).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(anyhow::Error::new(e).context(format!("Failed to create {}", dir.display())));
+        }
+        _ => {}
+    }
+    // symlink_metadata: a symlink planted at the path is rejected, not followed
+    let meta = std::fs::symlink_metadata(&dir)
+        .with_context(|| format!("Failed to inspect {}", dir.display()))?;
+    if !meta.is_dir() {
+        anyhow::bail!("runtime dir {} is not a directory (a symlink?)", dir.display());
+    }
+    if meta.uid() != uid {
+        anyhow::bail!("runtime dir {} is owned by uid {}, not {uid}", dir.display(), meta.uid());
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        anyhow::bail!("runtime dir {} has mode {mode:04o}; it must be 0700", dir.display());
+    }
+    Ok(dir)
+}
+
+/// Our real uid.
+fn current_uid() -> u32 {
+    rustix::process::getuid().as_raw()
 }
 
 /// Whether some process holds the exclusive lock on `lock_path`. The lock is
@@ -289,6 +326,49 @@ mod tests {
 
         let meta = std::fs::metadata(dir.path().join("clipstack.lock")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn runtime_dir_prefers_xdg() {
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("run-user");
+        assert_eq!(runtime_dir_from(Some(xdg.clone().into()), tmp.path()).unwrap(), xdg);
+        // Unset, empty or relative XDG_RUNTIME_DIR falls back to /tmp/clipstack-<uid>
+        let fallback = tmp.path().join(format!("clipstack-{}", current_uid()));
+        for bad in [None, Some("".into()), Some("relative/dir".into())] {
+            assert_eq!(runtime_dir_from(bad, tmp.path()).unwrap(), fallback);
+        }
+    }
+
+    #[test]
+    fn fallback_dir_created_0700() {
+        let tmp = TempDir::new().unwrap();
+        let dir = runtime_dir_from(None, tmp.path()).unwrap();
+        assert_eq!(dir, tmp.path().join(format!("clipstack-{}", current_uid())));
+        let meta = std::fs::symlink_metadata(&dir).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        // A second call reuses it
+        assert_eq!(runtime_dir_from(None, tmp.path()).unwrap(), dir);
+    }
+
+    #[test]
+    fn rejects_fallback_with_wrong_mode_or_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(format!("clipstack-{}", current_uid()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = runtime_dir_from(None, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("0755"), "{err}");
+
+        let tmp = TempDir::new().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, tmp.path().join(format!("clipstack-{}", current_uid())))
+            .unwrap();
+        let err = runtime_dir_from(None, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
     }
 
     #[test]
