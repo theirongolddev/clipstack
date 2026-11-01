@@ -408,13 +408,22 @@ fn resolve_max_entries(cli: Option<u32>, env: Option<&str>) -> (Option<usize>, L
 }
 
 /// Check if required dependencies (wl-clipboard) are installed
-fn check_dependencies() -> Result<()> {
-    // Check for wl-paste
-    let wl_paste_check = Command::new("which").arg("wl-paste").output();
+/// The first executable file named `name` in the `PATH`-style list `path`.
+/// Empty entries are skipped (not taken as the working dir).
+fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
 
-    match wl_paste_check {
-        Ok(output) if output.status.success() => Ok(()),
-        _ => {
+fn check_dependencies() -> Result<()> {
+    // Look wl-paste up on PATH ourselves: `which` isn't installed everywhere
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match find_in_path("wl-paste", &path) {
+        Some(_) => Ok(()),
+        None => {
             eprintln!("Error: wl-clipboard not found");
             eprintln!();
             eprintln!("ClipStack requires wl-clipboard for Wayland clipboard access.");
@@ -644,6 +653,26 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_in_path_finds_executables_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("tool"), "not executable").unwrap();
+        std::fs::write(b.join("tool"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(b.join("tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir(a.join("dir-tool")).unwrap();
+        std::fs::set_permissions(a.join("dir-tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path = std::env::join_paths(["", "/nonexistent", a.to_str().unwrap(), b.to_str().unwrap()]).unwrap();
+        assert_eq!(find_in_path("tool", &path), Some(b.join("tool")));
+        assert_eq!(find_in_path("dir-tool", &path), None, "directories don't count");
+        assert_eq!(find_in_path("missing", &path), None);
+        assert_eq!(find_in_path("tool", std::ffi::OsStr::new("")), None);
+    }
 
     #[test]
     fn test_resolve_limit_prefers_cli_over_env() {

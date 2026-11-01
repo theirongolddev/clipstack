@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const CLIPBOARD_TROUBLESHOOT: &str = "\
 Troubleshooting:
-  • Is wl-clipboard installed? (which wl-paste)
+  • Is wl-clipboard installed? (command -v wl-paste)
   • Are you in a Wayland session? (echo $WAYLAND_DISPLAY)
   • Is your compositor running?";
 
