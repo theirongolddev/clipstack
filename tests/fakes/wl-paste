@@ -12,9 +12,12 @@
 #                nil | clear                  run CMD with empty stdin
 #   watch.pid  PID of the running --watch fake
 #
-# Supported: --version, --list-types, [--no-newline] [--type text],
+# Supported: --version, --list-types, [--no-newline] [--type text|image/png],
 # --type text --watch CMD...  FAKE_WATCH_UNSUPPORTED=1 makes --watch fail
-# like a compositor without the data-control protocol.
+# like a compositor without the data-control protocol. Like the real
+# wl-paste, pasting fails with "not available as requested type" when
+# `types` offers no matching type (text: text/*, UTF8_STRING, STRING, TEXT);
+# image/png is written byte for byte.
 
 if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
     echo "fake wl-paste: FAKE_CLIP_DIR is not set to a directory" >&2
@@ -48,11 +51,15 @@ esac
 all="$*"
 no_newline=0
 watch=0
+type=text
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-newline) no_newline=1; shift ;;
         --type)
-            [ "${2:-}" = text ] || unsupported "$all"
+            case "${2:-}" in
+                text|image/png) type=$2 ;;
+                *) unsupported "$all" ;;
+            esac
             shift 2
             ;;
         --watch) shift; watch=1; break ;;
@@ -82,5 +89,15 @@ if [ "$watch" -eq 1 ]; then
 fi
 
 [ -f "$dir/content" ] || no_selection
+if [ -f "$dir/types" ]; then
+    case $type in
+        text) pattern='^(text/.*|UTF8_STRING|STRING|TEXT)$' ;;
+        *) pattern="^$type\$" ;;
+    esac
+    if ! grep -Eq "$pattern" "$dir/types"; then
+        echo "Clipboard content is not available as requested type \"$type\"" >&2
+        exit 1
+    fi
+fi
 cat "$dir/content"
-[ "$no_newline" -eq 1 ] || echo
+[ "$no_newline" -eq 1 ] || [ "$type" != text ] || echo

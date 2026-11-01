@@ -95,6 +95,44 @@ fn fake_clipboard_roundtrip() {
 
 }
 
+#[test]
+fn fake_clipboard_handles_binary_png() {
+    let env = TestEnv::new();
+    let png = common::test_png(2, 3, b"\x00\xff binary");
+
+    // wl-copy --type image/png stores the bytes as they are and offers only that type
+    let mut copy = env.fake_cmd("wl-copy");
+    copy.args(["--type", "image/png"]).stdin(Stdio::piped());
+    let mut child = copy.spawn().unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), &png).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(std::fs::read(env.fake_clip_dir.join("content")).unwrap(), png);
+    let mut types = env.fake_cmd("wl-paste");
+    types.arg("--list-types");
+    assert_eq!(stdout(&output(types)), "image/png\n");
+
+    let mut paste = env.fake_cmd("wl-paste");
+    paste.args(["--no-newline", "--type", "image/png"]);
+    let out = output(paste);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, png);
+
+    // No text type offered: --type text fails like the real wl-paste
+    let mut paste = env.fake_cmd("wl-paste");
+    paste.args(["--no-newline", "--type", "text"]);
+    let out = output(paste);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not available as requested type"), "{out:?}");
+
+    // ...and a text selection is not available as image/png
+    env.set_clipboard("words", TEXT_TYPES);
+    let mut paste = env.fake_cmd("wl-paste");
+    paste.args(["--no-newline", "--type", "image/png"]);
+    let out = output(paste);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not available as requested type"), "{out:?}");
+}
+
 const TEXT_TYPES: &[&str] = &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 
 /// What `clipstack __watch-hook` did with `input` under `CLIPBOARD_STATE=state`.

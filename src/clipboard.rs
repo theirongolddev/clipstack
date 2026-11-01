@@ -70,11 +70,21 @@ impl Clipboard {
 
     /// Put `content` on the clipboard with wl-copy.
     pub fn copy(&self, content: &str) -> Result<()> {
-        self.run_copy(content).map_err(tool_failure)
+        self.run_copy(content.as_bytes(), None).map_err(tool_failure)
     }
 
-    fn run_copy(&self, content: &str) -> Result<()> {
-        let mut child = Command::new(&self.copy_bin)
+    /// Put `bytes` on the clipboard offered as `mime` (`wl-copy --type MIME`).
+    #[allow(dead_code)] // TEMP: called by the `get` image commit
+    pub fn copy_bytes(&self, bytes: &[u8], mime: &str) -> Result<()> {
+        self.run_copy(bytes, Some(mime)).map_err(tool_failure)
+    }
+
+    fn run_copy(&self, content: &[u8], mime: Option<&str>) -> Result<()> {
+        let mut cmd = Command::new(&self.copy_bin);
+        if let Some(mime) = mime {
+            cmd.args(["--type", mime]);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             // Inherited, not piped: wl-copy forks to serve the selection, and
@@ -85,7 +95,7 @@ impl Clipboard {
 
         {
             let mut stdin = child.stdin.take().context("Failed to get wl-copy stdin")?;
-            stdin.write_all(content.as_bytes()).context("Failed to write to wl-copy stdin")?;
+            stdin.write_all(content).context("Failed to write to wl-copy stdin")?;
             // Dropping stdin sends EOF
         }
 
@@ -118,6 +128,28 @@ impl Clipboard {
         String::from_utf8(output.stdout).context("Clipboard content is not valid UTF-8")
     }
 
+    /// The selection as `mime` (`wl-paste --no-newline --type MIME`), as raw
+    /// bytes. No selection, or one no longer offered as `mime`, is empty.
+    #[allow(dead_code)] // TEMP: called by the daemon capture commit
+    pub fn paste_bytes(&self, mime: &str) -> Result<Vec<u8>> {
+        self.run_paste_bytes(mime).map_err(tool_failure)
+    }
+
+    fn run_paste_bytes(&self, mime: &str) -> Result<Vec<u8>> {
+        let mut cmd = Command::new(&self.paste_bin);
+        cmd.args(["--no-newline", "--type", mime]);
+        let output = run_with_timeout(cmd, PASTE_TIMEOUT)
+            .with_context(|| format!("Failed to run wl-paste.\n{CLIPBOARD_TROUBLESHOOT}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_no_text(&stderr) {
+                return Ok(Vec::new());
+            }
+            anyhow::bail!("wl-paste --type {mime} failed: {}", stderr.trim());
+        }
+        Ok(output.stdout)
+    }
+
     /// The mime types the current selection is offered as
     /// (`wl-paste --list-types`); empty when there is no selection. Gives up
     /// after 1 s, so a stuck source client can't stall capture.
@@ -145,7 +177,7 @@ impl Clipboard {
     }
 }
 
-/// wl-paste's messages for "nothing to paste as text".
+/// wl-paste's messages for "nothing to paste" (as text, or as the requested type).
 fn is_no_text(stderr: &str) -> bool {
     stderr.contains("No selection") || stderr.contains("not available as requested type")
 }
@@ -315,6 +347,52 @@ mod tests {
         };
         assert!(missing.copy("x").is_err());
         assert!(missing.paste_text().is_err());
+    }
+
+    #[test]
+    fn paste_bytes_returns_binary_of_the_given_type() {
+        let dir = TempDir::new().unwrap();
+        let args = dir.path().join("args");
+        let clipboard = fake_clipboard(
+            dir.path(),
+            &format!("echo \"$*\" > '{}'\nprintf '\\211PNG\\000\\377\\n'", args.display()),
+            "exit 1",
+        );
+        assert_eq!(clipboard.paste_bytes("image/png").unwrap(), b"\x89PNG\x00\xff\n");
+        assert_eq!(std::fs::read_to_string(args).unwrap(), "--no-newline --type image/png\n");
+
+        let gone = fake_clipboard(
+            dir.path(),
+            "echo 'Clipboard content is not available as requested type \"image/png\"' >&2; exit 1",
+            "exit 1",
+        );
+        assert_eq!(gone.paste_bytes("image/png").unwrap(), b"", "the selection changed meanwhile");
+        let broken = fake_clipboard(dir.path(), "echo 'Failed to connect' >&2; exit 1", "exit 1");
+        let err = broken.paste_bytes("image/png").unwrap_err();
+        assert!(err.chain().any(|c| c.is::<ClipboardError>()) || err.is::<ClipboardError>(), "{err:#}");
+    }
+
+    #[test]
+    fn copy_bytes_offers_the_given_type() {
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("copied");
+        let args = dir.path().join("args");
+        let clipboard = fake_clipboard(
+            dir.path(),
+            "exit 1",
+            &format!("echo \"$*\" > '{}'; cat > '{}'", args.display(), out.display()),
+        );
+        let png = b"\x89PNG\r\n\x1a\n\x00\xff";
+        clipboard.copy_bytes(png, "image/png").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), png);
+        assert_eq!(std::fs::read_to_string(&args).unwrap(), "--type image/png\n");
+
+        // Plain copy passes no type, as before
+        clipboard.copy("text").unwrap();
+        assert_eq!(std::fs::read_to_string(&args).unwrap(), "\n");
+
+        let failing = fake_clipboard(dir.path(), "exit 1", "cat > /dev/null; exit 3");
+        assert!(failing.copy_bytes(png, "image/png").is_err());
     }
 
     // These tests overwrite the user's real desktop clipboard, so `--ignored`

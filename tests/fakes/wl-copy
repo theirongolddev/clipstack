@@ -3,7 +3,8 @@
 # It never execs the real wl-copy, so a test cannot write the real clipboard.
 # The text (arguments, else stdin) goes to $FAKE_CLIP_DIR/content and the
 # offered mime types to $FAKE_CLIP_DIR/types; --sensitive adds the
-# password-manager hint like wl-copy 2.3. Calls are logged to
+# password-manager hint like wl-copy 2.3. --type MIME stores stdin byte for
+# byte (binary is fine) and offers only MIME. Calls are logged to
 # $FAKE_CLIP_DIR/wl-copy.calls. See the fake wl-paste for the state layout.
 
 if [ -z "${FAKE_CLIP_DIR:-}" ] || [ ! -d "$FAKE_CLIP_DIR" ]; then
@@ -17,6 +18,12 @@ sensitive=0
 if [ "${1:-}" = --sensitive ]; then
     sensitive=1
     shift
+fi
+mime=
+if [ "${1:-}" = --type ]; then
+    [ -n "${2:-}" ] || { echo "fake wl-copy: --type needs a mime type" >&2; exit 2; }
+    mime=$2
+    shift 2
 fi
 case "${1:-}" in
     -*)
@@ -35,7 +42,11 @@ else
     cat > "$content_tmp"
 fi
 {
-    printf 'text/plain;charset=utf-8\ntext/plain\nUTF8_STRING\nTEXT\nSTRING\n'
+    if [ -n "$mime" ]; then
+        printf '%s\n' "$mime"
+    else
+        printf 'text/plain;charset=utf-8\ntext/plain\nUTF8_STRING\nTEXT\nSTRING\n'
+    fi
     [ "$sensitive" -eq 0 ] || printf 'x-kde-passwordManagerHint\n'
 } > "$types_tmp"
 mv "$types_tmp" "$dir/types"
