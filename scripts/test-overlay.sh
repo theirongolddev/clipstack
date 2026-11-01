@@ -3,7 +3,9 @@
 #   1. node unit tests for Logic.js (omarchy/clipstack/tests/*.test.mjs)
 #   2. qmllint on every QML file, failing on any warning
 #   3. omarchy plugin validate on the manifest (skipped without omarchy)
-#   4. headless interaction checks of Store.qml/CliCall.qml
+#   4. scripts/install-omarchy-plugin.sh against fake omarchy commands
+#      (tests/install-plugin.test.sh)
+#   5. headless interaction checks of Store.qml/CliCall.qml
 #      (tests/behaviour/shell.qml against tests/fake-clipstack)
 #
 # --render [DIR] also draws the four design states (browse, search, image,
@@ -24,7 +26,7 @@ while (($#)); do
       if [[ ${2:-} != "" && ${2:0:1} != "-" ]]; then render_dir=$2; shift; fi
       ;;
     -h|--help)
-      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -55,10 +57,13 @@ fi
 
 step "omarchy plugin validate"
 if command -v omarchy >/dev/null; then
-  omarchy plugin validate "$plugin" || fail "omarchy plugin validate"
+  if omarchy plugin validate "$plugin"; then echo "ok"; else fail "omarchy plugin validate"; fi
 else
   echo "skipped: omarchy is not installed"
 fi
+
+step "install script (fake omarchy)"
+"$plugin/tests/install-plugin.test.sh" || fail "install script tests"
 
 # Copies the plugin and a harness shell.qml into a fresh Quickshell config
 # (it only imports from inside its config dir) and runs it headless against
