@@ -323,9 +323,15 @@ fn poll_skips_password_hint_types() {
     wait_for_polls(&env, 3);
     assert!(env.export().is_empty(), "a password-manager secret was saved");
 
-    // The secret was read once, not on every poll
-    let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
-    assert_eq!(calls.lines().filter(|l| *l == "--list-types").count(), 1, "{calls}");
+    // The secret's types were listed once, not on every poll (polls of the
+    // empty clipboard before it was set list types too, to look for images)
+    let list_calls = || {
+        let calls = std::fs::read_to_string(env.fake_clip_dir.join("wl-paste.calls")).unwrap();
+        calls.lines().filter(|l| *l == "--list-types").count()
+    };
+    let before = list_calls();
+    wait_for_polls(&env, 3);
+    assert_eq!(list_calls(), before, "types are listed on every poll");
 
     env.set_clipboard("ordinary", TEXT_TYPES);
     assert_eq!(env.wait_for_entries(1)[0]["content"], "ordinary");
@@ -339,4 +345,114 @@ fn poll_passes_mime_types_to_ingest() {
     let entries = env.wait_for_entries(1);
     assert_eq!(entries[0]["mime"], "text/html");
     assert_eq!(entries[0]["source"], "poll");
+}
+
+// ======== images (5.2) ========
+
+/// Put `png` on the fake clipboard offered as `types`.
+fn set_clipboard_bytes(env: &TestEnv, png: &[u8], types: &[&str]) {
+    std::fs::write(env.fake_clip_dir.join("content"), png).unwrap();
+    std::fs::write(env.fake_clip_dir.join("types"), format!("{}\n", types.join("\n"))).unwrap();
+}
+
+fn decode_image(entry: &serde_json::Value) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(entry["image_base64"].as_str().unwrap()).unwrap()
+}
+
+#[test]
+fn hook_saves_png_when_no_text_type_is_offered() {
+    let env = TestEnv::new();
+    let png = common::test_png(32, 16, b"screenshot");
+    set_clipboard_bytes(&env, &png, &["image/png"]);
+    // wl-paste --type text --watch runs the hook with CLIPBOARD_STATE=nil
+    // for an offer that has no text type
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    let entries = env.export();
+    assert_eq!(entries.len(), 1, "{}", hook.stderr);
+    assert_eq!(entries[0]["kind"], "image");
+    assert_eq!(entries[0]["source"], "watch");
+    assert_eq!((entries[0]["width"].as_u64(), entries[0]["height"].as_u64()), (Some(32), Some(16)));
+    assert_eq!(decode_image(&entries[0]), png);
+    assert!(hook.stderr.contains("saved image id:"), "{}", hook.stderr);
+
+    // The same image again bumps it
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.stderr.contains("bumped"), "{}", hook.stderr);
+    assert_eq!(env.export().len(), 1);
+}
+
+#[test]
+fn hook_prefers_text_and_skips_sensitive_or_bad_images() {
+    let env = TestEnv::new();
+    let png = common::test_png(4, 4, b"");
+    // Both offered: the text path saves the text; a nil event saves nothing
+    set_clipboard_bytes(&env, &png, &["image/png", "text/plain;charset=utf-8"]);
+    let hook = run_hook(&env, Some("data"), b"caption text");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.status.success(), "{}", hook.stderr);
+    let entries = env.export();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["kind"], "text");
+    assert_eq!(entries[0]["content"], "caption text");
+
+    set_clipboard_bytes(&env, &png, &["image/png", HINT]);
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.stderr.contains("skipped: marked sensitive"), "{}", hook.stderr);
+
+    set_clipboard_bytes(&env, b"GIF89a, not a png", &["image/png"]);
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.stderr.contains("skipped: not a PNG"), "{}", hook.stderr);
+
+    env.write_config("[storage]\nmax_image_bytes = 10\n");
+    set_clipboard_bytes(&env, &png, &["image/png"]);
+    let hook = run_hook(&env, Some("nil"), b"");
+    assert!(hook.stderr.contains("max_image_bytes is 10"), "{}", hook.stderr);
+
+    // Other image types are not stored, nor is an explicit clear
+    std::fs::remove_file(env.config_home.join("clipstack/config.toml")).unwrap();
+    set_clipboard_bytes(&env, &png, &["image/jpeg"]);
+    run_hook(&env, Some("nil"), b"");
+    set_clipboard_bytes(&env, &png, &["image/png"]);
+    run_hook(&env, Some("clear"), b"");
+    assert_eq!(env.export().len(), 1);
+}
+
+#[test]
+fn daemon_watch_captures_image() {
+    let mut env = TestEnv::new();
+    env.start_daemon();
+    env.wait_for_watch_pid(Duration::from_secs(5)).expect("daemon should run wl-paste --watch");
+    let png = common::test_png(8, 6, b"watched");
+    set_clipboard_bytes(&env, &png, &["image/png"]);
+    env.watch_event("nil");
+    let entries = env.wait_for_entries(1);
+    assert_eq!(entries[0]["kind"], "image");
+    assert_eq!(decode_image(&entries[0]), png);
+}
+
+#[test]
+fn poll_captures_image_once() {
+    let mut env = TestEnv::new();
+    start_polling_daemon(&mut env);
+    let png = common::test_png(5, 5, b"polled");
+    set_clipboard_bytes(&env, &png, &["image/png"]);
+    let entries = env.wait_for_entries(1);
+    assert_eq!(entries[0]["kind"], "image");
+    assert_eq!(entries[0]["source"], "poll");
+    assert_eq!(decode_image(&entries[0]), png);
+
+    // Later polls see the same image and leave the entry alone
+    wait_for_polls(&env, 3);
+    let again = env.export();
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0]["last_used"], entries[0]["last_used"], "not bumped on every poll");
+
+    // Text wins when both are offered
+    set_clipboard_bytes(&env, b"poll text", &["text/plain", "image/png"]);
+    let entries = env.wait_for_entries(2);
+    assert_eq!(entries[1]["kind"], "text");
+    assert_eq!(entries[1]["content"], "poll text");
 }

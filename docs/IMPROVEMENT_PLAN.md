@@ -1146,6 +1146,11 @@ created as v1 and migrated, so the migration runs everywhere.
 - Daemon (watch and poll): after `list_types()`, if no text type is offered
   (`text/plain*`, `UTF8_STRING`, `STRING`, `TEXT`) and `image/png` is, fetch the PNG
   and call `ingest_image`. Text keeps priority whenever both are offered.
+  *As built:* any `text/*` type counts as text (so `text/html` alone also wins over
+  a PNG). The watch hook runs under `wl-paste --type text --watch`, which reports an
+  offer with no text type as `CLIPBOARD_STATE=nil`; on `nil` the hook lists the
+  types and fetches the PNG. Poll mode lists types whenever the text read is empty
+  and re-reads the PNG on each such poll, saving it only when its hash changes.
 - `tests/fakes` wl-paste/wl-copy learn `--type image/png` with binary payloads.
 
 #### 5.3 CLI

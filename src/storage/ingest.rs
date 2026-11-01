@@ -89,7 +89,7 @@ impl IngestPolicy {
         self.max_total_bytes
     }
 
-    #[allow(dead_code)] // TEMP: read by the daemon capture commit
+    #[cfg(test)]
     pub fn max_image_bytes(&self) -> usize {
         self.max_image_bytes
     }
@@ -253,7 +253,6 @@ impl Storage {
 
     /// Save a PNG image: the image counterpart of `ingest` (same bump,
     /// caps and retention; `max_image_bytes` instead of `max_entry_bytes`).
-    #[allow(dead_code)] // TEMP: called by the daemon capture commit
     pub fn ingest_image(&self, png: &[u8], source: Source, mime_types: &[String]) -> Result<IngestOutcome> {
         self.ingest_image_at(png, source, mime_types, now_ms())
     }

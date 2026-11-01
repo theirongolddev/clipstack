@@ -2,8 +2,8 @@
 //! __watch-hook`, so wl-paste starts the hook once per new selection; the
 //! `Supervisor` restarts the watcher or falls back to the `Poller`.
 
-use crate::clipboard::Clipboard;
-use crate::storage::{IngestOutcome, Source, Storage};
+use crate::clipboard::{self, Clipboard};
+use crate::storage::{IngestOutcome, Kind, Source, Storage};
 use crate::util;
 use anyhow::Result;
 use serde::Deserialize;
@@ -27,11 +27,13 @@ pub enum CaptureMode {
     Poll,
 }
 
-/// Handle one selection from `wl-paste --watch`: `state` is
-/// `CLIPBOARD_STATE` and `input` the selection's text. Never fails on bad
-/// input (it is logged, without content), so the caller can always exit 0
-/// and wl-paste keeps running; stdin is always read to the end, so the
-/// source client never sees EPIPE.
+/// Handle one selection from `wl-paste --type text --watch`: `state` is
+/// `CLIPBOARD_STATE` and `input` the selection's text. wl-paste runs the
+/// hook with `nil` both for an empty clipboard and for an offer with no text
+/// type, so on `nil` an offer of only `image/png` is fetched and saved as an
+/// image. Never fails on bad input (it is logged, without content), so the
+/// caller can always exit 0 and wl-paste keeps running; stdin is always read
+/// to the end, so the source client never sees EPIPE.
 pub fn run_hook(
     storage: &Storage,
     clipboard: &Clipboard,
@@ -40,7 +42,21 @@ pub fn run_hook(
 ) -> Result<()> {
     match state {
         None | Some("data") => {}
-        Some("nil" | "clear") => {
+        Some("nil") => {
+            drain(input)?;
+            let types = clipboard.list_types().unwrap_or_else(|e| {
+                eprintln!("[watch] could not list offer types: {e:#}");
+                Vec::new()
+            });
+            if clipboard::offers_only_png_image(&types) {
+                let png = clipboard.paste_bytes(crate::png::MIME)?;
+                if !png.is_empty() {
+                    log_outcome("watch", storage, &storage.ingest_image(&png, Source::Watch, &types)?);
+                }
+            }
+            return Ok(());
+        }
+        Some("clear") => {
             drain(input)?;
             return Ok(());
         }
@@ -81,11 +97,23 @@ pub fn run_hook(
 /// One log line per ingest, never with the content.
 pub fn log_outcome(tag: &str, storage: &Storage, outcome: &IngestOutcome) {
     match outcome {
-        IngestOutcome::Inserted(entry) => eprintln!("[{tag}] saved id:{} ({} bytes)", entry.id, entry.size),
-        IngestOutcome::Bumped(entry) => eprintln!("[{tag}] bumped id:{} ({} bytes)", entry.id, entry.size),
+        IngestOutcome::Inserted(entry) => {
+            eprintln!("[{tag}] saved {}id:{} ({} bytes)", image_label(entry.kind), entry.id, entry.size);
+        }
+        IngestOutcome::Bumped(entry) => {
+            eprintln!("[{tag}] bumped {}id:{} ({} bytes)", image_label(entry.kind), entry.id, entry.size);
+        }
         IngestOutcome::Skipped(reason) => {
             eprintln!("[{tag}] skipped: {}", storage.policy().describe_skip(reason));
         }
+    }
+}
+
+/// `"image "` for an image entry, so a log line says what was saved.
+fn image_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Image => "image ",
+        Kind::Text => "",
     }
 }
 
@@ -362,8 +390,41 @@ impl Poller {
         }
         self.last_poll = Some(now);
         // No selection, or none as text, reads as ""; errors are retried next tick
-        if let Ok(content) = clipboard.paste_text() {
-            self.observe(storage, &content, || clipboard.list_types().unwrap_or_default());
+        match clipboard.paste_text() {
+            Ok(content) if !content.is_empty() => {
+                self.observe(storage, &content, || clipboard.list_types().unwrap_or_default());
+            }
+            Ok(_) => self.poll_image(storage, clipboard),
+            Err(_) => {}
+        }
+    }
+
+    /// No text on the clipboard: save an offer of only `image/png`. The PNG
+    /// is read on every such poll (there is no cheaper change signal), but
+    /// saved only when its hash differs from the last poll's.
+    fn poll_image(&mut self, storage: &Storage, clipboard: &Clipboard) {
+        let Ok(types) = clipboard.list_types() else {
+            return;
+        };
+        if !clipboard::offers_only_png_image(&types) {
+            return;
+        }
+        let Ok(png) = clipboard.paste_bytes(crate::png::MIME) else {
+            return;
+        };
+        if png.is_empty() {
+            return;
+        }
+        let hash = util::compute_image_hash(&png);
+        if self.last_hash.as_ref() == Some(&hash) {
+            return;
+        }
+        match storage.ingest_image(&png, Source::Poll, &types) {
+            Ok(outcome) => {
+                self.last_hash = Some(hash);
+                log_outcome("poll", storage, &outcome);
+            }
+            Err(e) => eprintln!("[poll] error saving image (retrying next poll): {e:#}"),
         }
     }
 

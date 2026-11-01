@@ -22,6 +22,20 @@ pub fn is_sensitive_offer(types: &[String]) -> bool {
     types.iter().any(|t| t == PASSWORD_HINT_MIME)
 }
 
+/// Whether an offer includes a text type (`text/*`, `UTF8_STRING`,
+/// `STRING`, `TEXT`): text is captured in preference to an image.
+pub fn offers_text(types: &[String]) -> bool {
+    types
+        .iter()
+        .any(|t| t.starts_with("text/") || matches!(t.as_str(), "UTF8_STRING" | "STRING" | "TEXT"))
+}
+
+/// Whether an offer is a PNG image and nothing that reads as text: the only
+/// offers the daemon saves as an image.
+pub fn offers_only_png_image(types: &[String]) -> bool {
+    !offers_text(types) && types.iter().any(|t| t == crate::png::MIME)
+}
+
 /// wl-copy or wl-paste failed (exit code 6). It wraps the underlying error
 /// without changing its message or cause chain, so it only marks the error.
 #[derive(Debug)]
@@ -130,7 +144,6 @@ impl Clipboard {
 
     /// The selection as `mime` (`wl-paste --no-newline --type MIME`), as raw
     /// bytes. No selection, or one no longer offered as `mime`, is empty.
-    #[allow(dead_code)] // TEMP: called by the daemon capture commit
     pub fn paste_bytes(&self, mime: &str) -> Result<Vec<u8>> {
         self.run_paste_bytes(mime).map_err(tool_failure)
     }
@@ -258,6 +271,20 @@ mod tests {
             paste_bin: fake_bin(dir, "wl-paste", paste_body),
             copy_bin: fake_bin(dir, "wl-copy", copy_body),
         }
+    }
+
+    #[test]
+    fn text_types_win_over_png() {
+        let types = |list: &[&str]| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert!(offers_only_png_image(&types(&["image/png"])));
+        assert!(offers_only_png_image(&types(&["image/png", PASSWORD_HINT_MIME])));
+        for text in ["text/plain", "text/html", "UTF8_STRING", "STRING", "TEXT"] {
+            assert!(offers_text(&types(&[text])), "{text}");
+            assert!(!offers_only_png_image(&types(&["image/png", text])), "{text}");
+        }
+        assert!(!offers_only_png_image(&types(&["image/jpeg"])));
+        assert!(!offers_only_png_image(&[]));
+        assert!(!offers_text(&types(&["image/png", "application/x-text"])));
     }
 
     #[test]
