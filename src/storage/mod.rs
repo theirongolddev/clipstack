@@ -9,7 +9,10 @@
 
 #[warn(dead_code)] // json is the live storage until 1-12: keep its lint on
 pub mod json;
+mod ingest;
 mod schema;
+
+pub use ingest::{DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestPolicy};
 
 use std::fmt;
 
