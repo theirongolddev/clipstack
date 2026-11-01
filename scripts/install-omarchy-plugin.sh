@@ -10,7 +10,8 @@ set -euo pipefail
 id=solsystemlabs.clipstack
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 src=$root/omarchy/clipstack
-plugins=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins
+# omarchy-shell reads user plugins from here, whatever XDG_CONFIG_HOME says
+plugins=$HOME/.config/omarchy/plugins
 dest=$plugins/$id
 
 usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -26,6 +27,16 @@ esac
 if ! command -v omarchy >/dev/null; then
   echo "omarchy not found: this installs an omarchy-shell plugin" >&2
   exit 1
+fi
+
+# omarchy's plugin commands need OMARCHY_PATH, which only session and login
+# shells set; take it from omarchy's own bootstrap (in a subshell, so its
+# PATH changes stay out of this script)
+if [[ -z ${OMARCHY_PATH:-} ]]; then
+  bootstrap=/usr/share/omarchy/default/bash/env-bootstrap
+  OMARCHY_PATH=
+  [[ -r $bootstrap ]] && OMARCHY_PATH=$(bash -c '. "$1" >/dev/null 2>&1; printf %s "$OMARCHY_PATH"' _ "$bootstrap")
+  export OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
 fi
 
 if ((uninstall)); then
@@ -48,4 +59,12 @@ fi
 mkdir -p "$plugins"
 ln -sfn "$src" "$dest"
 echo "linked $dest -> $src"
+
+# The shell learns about a new plugin folder only on a rescan, which runs
+# in the background (as `omarchy plugin add` does it)
+omarchy-shell shell rescanPlugins >/dev/null
+for ((attempt = 0; attempt < 40; attempt++)); do
+  omarchy plugin list --json | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null && break
+  sleep 0.05
+done
 omarchy plugin enable "$id"

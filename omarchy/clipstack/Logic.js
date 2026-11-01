@@ -199,7 +199,16 @@ var Key = {
 var Mod = { Shift: 0x02000000, Ctrl: 0x04000000, Alt: 0x08000000, Meta: 0x10000000, Keypad: 0x20000000 };
 
 // The overlay action for a key press, or "" to let the search field have it.
-function keyAction(key, modifiers, searching) {
+// A held key repeats movement and delete, never the one-shot actions: the
+// Enter that saves an alias must not go on to paste once the search field
+// has focus again.
+function keyAction(key, modifiers, searching, autoRepeat) {
+  var action = keyActionFor(key, modifiers, searching);
+  if (autoRepeat && (actionClosesOverlay(action) || action === "alias")) return "";
+  return action;
+}
+
+function keyActionFor(key, modifiers, searching) {
   var mods = modifiers & (Mod.Shift | Mod.Ctrl | Mod.Alt | Mod.Meta);
   if (mods === 0) {
     switch (key) {
@@ -449,6 +458,16 @@ function footerText(total, pinned) {
   return total + (total === 1 ? " clip" : " clips") + " · " + pinned + " pinned";
 }
 
+// ------------------------------------------------------------------ paths
+
+// file:// URL of an absolute path; each segment is percent-encoded, so a
+// space, # or % in the runtime dir still names the file.
+function fileUrl(path) {
+  path = String(path || "");
+  if (path === "") return "";
+  return "file://" + path.split("/").map(encodeURIComponent).join("/");
+}
+
 // ------------------------------------------------------------------ commands
 
 // Every command is an argv array; user input is always its own element.
@@ -488,11 +507,11 @@ function actionClosesOverlay(action) {
   return action === "paste" || action === "copy" || action === "edit";
 }
 
-// "" on success, else one line for the footer status. `search` exits 1 on
-// no match, which is not an error.
+// "" on success, else one line for the footer status. `search` exits 1
+// silently on no match, which is not an error; exit 1 with a message is.
 function commandError(kind, exitCode, stdout, stderr) {
   if (exitCode === 0) return "";
-  if (kind === "search" && exitCode === 1) return "";
+  if (kind === "search" && exitCode === 1 && String(stderr || "").trim() === "") return "";
   var lines = String(stderr || "").split("\n");
   var last = "";
   for (var i = 0; i < lines.length; i++) {

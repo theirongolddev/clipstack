@@ -61,7 +61,7 @@ Rectangle {
       readonly property real inset: Math.max(0, (box.lineHeight - metrics.height) / 2)
 
       width: ListView.view.width
-      height: Math.max(box.lineHeight, code.contentHeight + 2 * line.inset)
+      height: Math.max(box.lineHeight, (line.rich ? richCode : code).contentHeight + 2 * line.inset)
 
       Rectangle {
         anchors.fill: parent
@@ -92,8 +92,26 @@ Rectangle {
         x: box.gutter
         y: line.inset
         width: parent.width - box.gutter - 16
+        visible: !line.rich
         wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-        textFormat: line.rich ? Text.RichText : Text.PlainText
+        textFormat: Text.PlainText
+        text: line.rich ? "" : line.shown
+        font.family: box.c.mono
+        font.pixelSize: box.fontSize
+        color: box.c.codeText
+      }
+
+      // Tinted or marked lines as escaped rich text, in a Text of its own:
+      // one Text switching textFormat can briefly read the raw line as
+      // markup (and load an <img> it names).
+      Text {
+        id: richCode
+        x: code.x
+        y: code.y
+        width: code.width
+        visible: line.rich
+        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        textFormat: Text.RichText
         text: line.rich
           ? "<span style=\"white-space:pre-wrap\">" + Logic.codeHtml(line.shown, box.ov.query, box.tint, {
               keyword: box.c.accent,
@@ -101,10 +119,9 @@ Rectangle {
               mark: line.hit ? box.c.markCodeLine : box.c.markCode,
               markText: box.c.searchText
             }) + "</span>"
-          : line.shown
-        font.family: box.c.mono
-        font.pixelSize: box.fontSize
-        color: box.c.codeText
+          : ""
+        font: code.font
+        color: code.color
       }
     }
 

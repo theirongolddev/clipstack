@@ -76,19 +76,36 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       x: row.image ? thumb.x + thumb.width + 10 : 10
       width: tail.x - 10 - x
-      textFormat: row.marked ? Text.RichText : Text.PlainText
+      visible: !row.marked
+      textFormat: Text.PlainText
+      text: row.label
+      elide: Text.ElideRight
+      wrapMode: Text.NoWrap
+      maximumLineCount: 1
+      font.family: row.mono ? row.c.mono : row.c.sans
+      font.pixelSize: row.mono ? 12 : 13
+      color: row.selected ? row.c.rowTextSelected : row.c.rowText
+    }
+
+    // Query hits marked in escaped rich text. A Text of its own: one Text
+    // switching textFormat can briefly read the raw clip text as markup
+    // (and load an <img> it names).
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      x: mainText.x
+      width: mainText.width
+      visible: row.marked
+      textFormat: Text.RichText
       text: row.marked
         ? Logic.highlightHtml(elider.elidedText, row.ov.query,
             "<span style=\"background-color:" + (row.selected ? row.c.markSelected : row.c.mark)
               + ";color:" + row.c.rowTextSelected + "\">", "</span>")
-        : row.label
-      elide: Text.ElideRight
+        : ""
       wrapMode: Text.NoWrap
       maximumLineCount: 1
-      clip: row.marked
-      font.family: row.mono ? row.c.mono : row.c.sans
-      font.pixelSize: row.mono ? 12 : 13
-      color: row.selected ? row.c.rowTextSelected : row.c.rowText
+      clip: true
+      font: mainText.font
+      color: mainText.color
     }
 
     Item {

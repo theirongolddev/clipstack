@@ -193,6 +193,16 @@ test("keyAction: Esc clears a search first, then closes", () => {
   assert.equal(L.keyAction(K.Escape, 0, false), "close");
 });
 
+test("keyAction ignores key repeat for actions that close the overlay", () => {
+  // Holding Enter to save an alias must not paste once focus is back in search
+  assert.equal(L.keyAction(K.Return, 0, false, true), "");
+  assert.equal(L.keyAction(K.Return, SHIFT, false, true), "");
+  assert.equal(L.keyAction(K.E, CTRL, false, true), "");
+  assert.equal(L.keyAction(K.A, CTRL, false, true), "");
+  assert.equal(L.keyAction(K.Down, 0, false, true), "down");
+  assert.equal(L.keyAction(K.Backspace, CTRL, false, true), "delete");
+});
+
 test("keyAction leaves typing and unknown chords to the search field", () => {
   assert.equal(L.keyAction(K.J, 0, false), "");
   assert.equal(L.keyAction(K.P, SHIFT, false), "");
@@ -356,6 +366,12 @@ test("argv builders put user input in its own argument", () => {
   assert.deepEqual(j(L.imagePathArgv("cs", 7)), ["cs", "get", "id:7", "--image-path"]);
 });
 
+test("fileUrl percent-encodes each path segment", () => {
+  assert.equal(L.fileUrl("/run/user/1000/clipstack-images/6.png"), "file:///run/user/1000/clipstack-images/6.png");
+  assert.equal(L.fileUrl("/tmp/a b#1 %20?x/ü.png"), "file:///tmp/a%20b%231%20%2520%3Fx/%C3%BC.png");
+  assert.equal(L.fileUrl(""), "");
+});
+
 test("actionArgv builds each entry action", () => {
   const e = { id: 7, pinned: false };
   assert.deepEqual(j(L.actionArgv("cs", "paste", e)), ["cs", "get", "id:7", "--paste"]);
@@ -384,6 +400,14 @@ test("commandError: success, search no-match and failures", () => {
   assert.equal(L.commandError("pin", 1, "", "warning: x\nno entry for id:9\n"), "no entry for id:9");
   assert.equal(L.commandError("delete", 4, "", ""), "clipstack delete failed (exit 4)");
   assert.equal(L.commandError("list", 127, "", ""), "clipstack list failed (exit 127)");
+});
+
+test("commandError: search exit 1 with a message is a failure, not a no-match", () => {
+  // Exit 1 is also "any failure not listed" (README exit codes); a no-match
+  // is silent
+  assert.equal(L.commandError("search", 1, "", "Error: Failed to create storage dir: \"/x\"\n\nCaused by:\n    No such file\n"),
+               "Failed to create storage dir: \"/x\"");
+  assert.equal(L.commandError("search", 1, "[]\n", "\n"), "");
 });
 
 test("commandError takes the Error: line clipstack prints, not its causes", () => {

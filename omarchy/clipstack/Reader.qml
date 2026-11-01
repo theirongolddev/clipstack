@@ -124,7 +124,7 @@ Item {
           onTextEdited: reader.ov.setQuery(search.text)
 
           Keys.onPressed: function (event) {
-            var action = Logic.keyAction(event.key, event.modifiers, search.text !== "");
+            var action = Logic.keyAction(event.key, event.modifiers, search.text !== "", event.isAutoRepeat);
             if (action === "") return;
             event.accepted = true;
             switch (action) {
