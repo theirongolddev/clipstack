@@ -193,6 +193,16 @@ test("keyAction: Esc clears a search first, then closes", () => {
   assert.equal(L.keyAction(K.Escape, 0, false), "close");
 });
 
+test("keyAction ignores key repeat for actions that close the overlay", () => {
+  // Holding Enter to save an alias must not paste once focus is back in search
+  assert.equal(L.keyAction(K.Return, 0, false, true), "");
+  assert.equal(L.keyAction(K.Return, SHIFT, false, true), "");
+  assert.equal(L.keyAction(K.E, CTRL, false, true), "");
+  assert.equal(L.keyAction(K.A, CTRL, false, true), "");
+  assert.equal(L.keyAction(K.Down, 0, false, true), "down");
+  assert.equal(L.keyAction(K.Backspace, CTRL, false, true), "delete");
+});
+
 test("keyAction leaves typing and unknown chords to the search field", () => {
   assert.equal(L.keyAction(K.J, 0, false), "");
   assert.equal(L.keyAction(K.P, SHIFT, false), "");

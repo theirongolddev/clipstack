@@ -199,7 +199,16 @@ var Key = {
 var Mod = { Shift: 0x02000000, Ctrl: 0x04000000, Alt: 0x08000000, Meta: 0x10000000, Keypad: 0x20000000 };
 
 // The overlay action for a key press, or "" to let the search field have it.
-function keyAction(key, modifiers, searching) {
+// A held key repeats movement and delete, never the one-shot actions: the
+// Enter that saves an alias must not go on to paste once the search field
+// has focus again.
+function keyAction(key, modifiers, searching, autoRepeat) {
+  var action = keyActionFor(key, modifiers, searching);
+  if (autoRepeat && (actionClosesOverlay(action) || action === "alias")) return "";
+  return action;
+}
+
+function keyActionFor(key, modifiers, searching) {
   var mods = modifiers & (Mod.Shift | Mod.Ctrl | Mod.Alt | Mod.Meta);
   if (mods === 0) {
     switch (key) {
