@@ -1,5 +1,6 @@
 use crate::util;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -55,11 +56,17 @@ impl Storage {
 
         let storage = Self { base_dir, max_entries };
 
-        // Clean up any orphaned temp files from interrupted operations
-        storage.cleanup_temp_files()?;
+        {
+            // Hold the index lock so cleanup can't delete another process's
+            // in-flight temp file and pruning can't race other writers
+            let _lock = storage.lock_index()?;
 
-        // Sync to stored index (prunes if needs)
-        storage.sync_max_entries()?;
+            // Clean up any orphaned temp files from interrupted operations
+            storage.cleanup_temp_files()?;
+
+            // Sync to stored index (prunes if needs)
+            storage.sync_max_entries()?;
+        }
 
         Ok(storage)
     }
@@ -200,6 +207,23 @@ impl Storage {
         Ok(())
     }
 
+    /// Take the cross-process index lock (blocking). Every read-modify-write
+    /// of the index happens under it so concurrent daemon/picker/serve
+    /// processes can't lose each other's updates. Released when dropped.
+    fn lock_index(&self) -> Result<fs::File> {
+        let path = self.base_dir.join("index.lock");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("Failed to open index lock: {:?}", path))?;
+        file.lock_exclusive()
+            .with_context(|| format!("Failed to lock index: {:?}", path))?;
+        Ok(file)
+    }
+
     pub fn base_dir(&self) -> &PathBuf {
         &self.base_dir
     }
@@ -246,13 +270,15 @@ impl Storage {
         }
     }
 
-    pub fn save_index(&self, index: &ClipIndex) -> Result<()> {
+    /// Write the index. Callers must hold `lock_index()`.
+    fn save_index(&self, index: &ClipIndex) -> Result<()> {
         let path = self.index_path();
         let data = serde_json::to_string_pretty(index)?;
         self.atomic_write(&path, data.as_bytes())
     }
 
     pub fn save_entry(&self, content: &str) -> Result<ClipEntry> {
+        let _lock = self.lock_index()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -324,6 +350,7 @@ impl Storage {
     }
 
     pub fn delete_entry(&self, id: &str) -> Result<()> {
+        let _lock = self.lock_index()?;
         let mut index = self.load_index()?;
         index.entries.retain(|e| e.id != id);
         self.save_index(&index)?;
@@ -338,6 +365,7 @@ impl Storage {
     /// Toggle pin status of an entry.
     /// Returns new pinned state, or error if at pin limit.
     pub fn toggle_pin(&self, id: &str) -> Result<bool> {
+        let _lock = self.lock_index()?;
         let mut index = self.load_index()?;
 
         // Count pinned before mutable borrow to satisfy borrow checker
@@ -366,6 +394,7 @@ impl Storage {
 
     /// Explicitly set pin status (used for undo restore)
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        let _lock = self.lock_index()?;
         let mut index = self.load_index()?;
 
         // Count pinned before mutable borrow to satisfy borrow checker
@@ -390,6 +419,7 @@ impl Storage {
     }
 
     pub fn clear(&self) -> Result<()> {
+        let _lock = self.lock_index()?;
         let index = self.load_index()?;
         for entry in &index.entries {
             let path = self.content_path(&entry.id);
@@ -404,6 +434,7 @@ impl Storage {
     /// Attempt to recover from corrupted storage.
     /// Rebuilds index from existing content files.
     pub fn attempt_recovery(&self) -> Result<usize> {
+        let _lock = self.lock_index()?;
         eprintln!("[recovery] Starting storage recovery...");
 
         let index_path = self.index_path();
@@ -1148,9 +1179,7 @@ mod tests {
         for i in 0..10 {
             let storage = Arc::clone(&storage);
             handles.push(thread::spawn(move || {
-                // Add small sleep to avoid timestamp collisions
-                thread::sleep(std::time::Duration::from_millis(i * 5));
-                let _ = storage.save_entry(&format!("thread {} content", i));
+                storage.save_entry(&format!("thread {} content", i)).unwrap();
             }));
         }
 
@@ -1158,15 +1187,9 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // Atomic writes prevent corruption, but race conditions may cause
-        // some entries to be overwritten. The key is that the index is valid.
+        // Atomic writes prevent torn files; the index lock prevents lost updates
         let index = storage.load_index().unwrap();
-
-        // Should have at least some entries (not zero from total corruption)
-        assert!(
-            !index.entries.is_empty(),
-            "Index should have entries, not be empty from corruption"
-        );
+        assert_eq!(index.entries.len(), 10, "no concurrent save may be lost");
 
         // Verify index is valid JSON (not corrupted/truncated)
         let json = serde_json::to_string(&index).unwrap();
@@ -1186,6 +1209,36 @@ mod tests {
                 "Content should be valid thread content"
             );
         }
+    }
+
+    #[test]
+    fn test_concurrent_writers_lose_no_updates() {
+        use std::thread;
+
+        // Separate Storage handles model separate processes (daemon, picker,
+        // serve) doing read-modify-write on the same index.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_path_buf();
+        Storage::with_defaults(base.clone()).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let base = base.clone();
+                thread::spawn(move || {
+                    let storage = Storage::open(base, None).unwrap();
+                    for i in 0..10 {
+                        storage.save_entry(&format!("writer {} item {}", t, i)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let storage = Storage::open(base, None).unwrap();
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries.len(), 80, "every concurrent save must survive");
     }
 
     // ==================== Pin functionality tests ====================
