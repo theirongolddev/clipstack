@@ -221,7 +221,8 @@ fn stale_socket_replaced() {
     let mut env = TestEnv::new();
     // A socket file nobody listens on, as left by a crashed daemon
     drop(UnixListener::bind(env.socket_path()).unwrap());
-    assert!(UnixStream::connect(env.socket_path()).is_err());
+    // A test thread forking right now keeps the listener open until its exec
+    assert!(wait_until(Duration::from_secs(2), || UnixStream::connect(env.socket_path()).is_err()));
     start(&mut env, "");
     assert!(request(&env, &Request::Ping).meta("version").is_some());
 }
