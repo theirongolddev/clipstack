@@ -732,7 +732,7 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 ```ini
 [Unit]
 Description=ClipStack clipboard history daemon
-Documentation=https://github.com/<owner>/clipstack#running-the-daemon
+Documentation=https://github.com/theirongolddev/clipstack#running-the-daemon
 PartOf=graphical-session.target
 After=graphical-session.target
 

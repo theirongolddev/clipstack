@@ -190,5 +190,21 @@ wait "$DAEMON_PID" && log_pass "Daemon exits 0 on SIGTERM" || log_fail "daemon e
 [[ ! -e "/proc/$WATCH_PID" ]] && log_pass "Watch child stopped with the daemon" ||
     log_fail "watch child $WATCH_PID still running"
 
+# --- systemd unit ----------------------------------------------------------------
+UNIT="$ROOT/systemd/clipstack.service"
+[[ -f "$UNIT" ]] || log_fail "missing $UNIT"
+if command -v systemd-analyze >/dev/null; then
+    # verify checks that ExecStart exists: %h is the isolated HOME here
+    mkdir -p "$HOME/.cargo/bin"
+    ln -sf "$CLIPSTACK" "$HOME/.cargo/bin/clipstack"
+    # verify also loads the user's other units; only our unit's lines count
+    out="$(systemd-analyze --user verify "$UNIT" 2>&1 || true)"
+    ours="$(printf '%s\n' "$out" | grep -F 'clipstack.service' || true)"
+    [[ -z "$ours" ]] && log_pass "systemd-analyze --user verify accepts clipstack.service" ||
+        log_fail "systemd-analyze --user verify: $ours"
+else
+    log_skip "systemd-analyze verify (systemd-analyze not installed)"
+fi
+
 echo
 echo -e "${GREEN}All daemon E2E tests passed${NC}"

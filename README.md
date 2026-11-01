@@ -300,7 +300,7 @@ The daemon stops cleanly on SIGINT, SIGTERM and SIGHUP: Ctrl+C, `clipstack kill`
 ```bash
 # Install the service file
 mkdir -p ~/.config/systemd/user
-cp systemd/clipd.service ~/.config/systemd/user/clipstack.service
+cp systemd/clipstack.service ~/.config/systemd/user/clipstack.service
 
 # Enable and start
 systemctl --user enable clipstack.service
@@ -826,7 +826,7 @@ clipstack/
 ├── scripts/
 │   └── rcopy            # Remote copy helper script
 └── systemd/
-    └── clipd.service    # Systemd user service file
+    └── clipstack.service # Systemd user service file
 ```
 
 ## License
