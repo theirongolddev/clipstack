@@ -162,7 +162,7 @@ test("escapeHtml escapes quotes and keeps spaces", () => {
 
 const K = { Up: 0x01000013, Down: 0x01000015, PageUp: 0x01000016, PageDown: 0x01000017,
             Home: 0x01000010, End: 0x01000011, Return: 0x01000004, Enter: 0x01000005,
-            Escape: 0x01000000, Backspace: 0x01000003, J: 0x4a, K: 0x4b, P: 0x50, A: 0x41,
+            Escape: 0x01000000, Backspace: 0x01000003, Delete: 0x01000007, J: 0x4a, K: 0x4b, P: 0x50, A: 0x41,
             E: 0x45, X: 0x58 };
 const SHIFT = 0x02000000, CTRL = 0x04000000, ALT = 0x08000000, KEYPAD = 0x20000000;
 
@@ -185,7 +185,7 @@ test("keyAction maps the entry actions", () => {
   assert.equal(L.keyAction(K.P, CTRL, false), "pin");
   assert.equal(L.keyAction(K.A, CTRL, false), "alias");
   assert.equal(L.keyAction(K.E, CTRL, false), "edit");
-  assert.equal(L.keyAction(K.Backspace, CTRL, false), "delete");
+  assert.equal(L.keyAction(K.Delete, CTRL, false), "delete");
 });
 
 test("keyAction: Esc clears a search first, then closes", () => {
@@ -200,13 +200,17 @@ test("keyAction ignores key repeat for actions that close the overlay", () => {
   assert.equal(L.keyAction(K.E, CTRL, false, true), "");
   assert.equal(L.keyAction(K.A, CTRL, false, true), "");
   assert.equal(L.keyAction(K.Down, 0, false, true), "down");
-  assert.equal(L.keyAction(K.Backspace, CTRL, false, true), "delete");
+  assert.equal(L.keyAction(K.Delete, CTRL, false, true), "delete");
 });
 
 test("keyAction leaves typing and unknown chords to the search field", () => {
   assert.equal(L.keyAction(K.J, 0, false), "");
   assert.equal(L.keyAction(K.P, SHIFT, false), "");
   assert.equal(L.keyAction(K.Backspace, 0, true), "");
+  // Ctrl+Backspace deletes a word in the search field; plain Delete too
+  assert.equal(L.keyAction(K.Backspace, CTRL, true), "");
+  assert.equal(L.keyAction(K.Backspace, CTRL, false), "");
+  assert.equal(L.keyAction(K.Delete, 0, true), "");
   assert.equal(L.keyAction(K.X, CTRL, false), "");
   assert.equal(L.keyAction(K.P, CTRL | ALT, false), "");
   assert.equal(L.keyAction(K.Return, CTRL, false), "");

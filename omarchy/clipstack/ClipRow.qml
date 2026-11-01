@@ -57,6 +57,7 @@ Item {
 
     Thumb {
       id: thumb
+      c: row.c
       visible: row.image
       x: 10
       anchors.verticalCenter: parent.verticalCenter
@@ -154,7 +155,7 @@ Item {
           textFormat: Text.PlainText
           font.family: row.c.mono
           font.pixelSize: 11
-          color: row.c.accent
+          color: row.c.accentText
         }
       }
 

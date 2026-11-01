@@ -192,6 +192,7 @@ function highlightHtml(text, query, open, close) {
 // Qt::Key and Qt::KeyboardModifier values, so this file needs no Qt.
 var Key = {
   Escape: 0x01000000, Backspace: 0x01000003, Return: 0x01000004, Enter: 0x01000005,
+  Delete: 0x01000007,
   Home: 0x01000010, End: 0x01000011, Up: 0x01000013, Down: 0x01000015,
   PageUp: 0x01000016, PageDown: 0x01000017,
   A: 0x41, E: 0x45, J: 0x4a, K: 0x4b, P: 0x50,
@@ -233,7 +234,8 @@ function keyActionFor(key, modifiers, searching) {
       case Key.P: return "pin";
       case Key.A: return "alias";
       case Key.E: return "edit";
-      case Key.Backspace: return "delete";
+      // Ctrl+Backspace stays with the search field (delete a word)
+      case Key.Delete: return "delete";
     }
   }
   return "";

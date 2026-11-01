@@ -168,7 +168,7 @@ Item {
           textFormat: Text.PlainText
           font.family: reader.c.sans
           font.pixelSize: 12
-          color: reader.ov.searching ? reader.c.accent : reader.c.muted
+          color: reader.ov.searching ? reader.c.accentText : reader.c.muted
         }
       }
 
@@ -360,24 +360,27 @@ Item {
         visible: !reader.ov.aliasOpen
         spacing: 8
 
-        ActionButton {
-          c: reader.c
-          label: "Paste"
-          keyHint: "⏎"
-          variant: "primary"
-          onActivated: reader.ov.act("paste")
+        // Right-justified: Delete set apart on the left, Paste at the far right
+        Item {
+          Layout.fillWidth: true
         }
         ActionButton {
           c: reader.c
-          label: "Copy"
-          keyHint: "⇧⏎"
-          onActivated: reader.ov.act("copy")
+          label: "Delete"
+          keyHint: "⌃⌦"
+          variant: "danger"
+          onActivated: reader.ov.act("delete")
+        }
+        Item {
+          // with the row spacing on both sides, a 24px gap
+          implicitWidth: 8
         }
         ActionButton {
           c: reader.c
-          label: reader.entry && reader.entry.pinned ? "Unpin" : "Pin"
-          keyHint: "⌃P"
-          onActivated: reader.ov.act("pin")
+          visible: !reader.image
+          label: "Edit"
+          keyHint: "⌃E"
+          onActivated: reader.ov.act("edit")
         }
         ActionButton {
           c: reader.c
@@ -387,20 +390,22 @@ Item {
         }
         ActionButton {
           c: reader.c
-          visible: !reader.image
-          label: "Edit"
-          keyHint: "⌃E"
-          onActivated: reader.ov.act("edit")
-        }
-        Item {
-          Layout.fillWidth: true
+          label: reader.entry && reader.entry.pinned ? "Unpin" : "Pin"
+          keyHint: "⌃P"
+          onActivated: reader.ov.act("pin")
         }
         ActionButton {
           c: reader.c
-          label: "Delete"
-          keyHint: "⌃⌫"
-          variant: "danger"
-          onActivated: reader.ov.act("delete")
+          label: "Copy"
+          keyHint: "⇧⏎"
+          onActivated: reader.ov.act("copy")
+        }
+        ActionButton {
+          c: reader.c
+          label: "Paste"
+          keyHint: "⏎"
+          variant: "primary"
+          onActivated: reader.ov.act("paste")
         }
       }
     }

@@ -6,6 +6,7 @@ import QtQuick.Effects
 Item {
   id: thumb
 
+  required property Colors c
   property string source: ""
 
   implicitWidth: 34
@@ -16,8 +17,8 @@ Item {
     radius: 4
     gradient: Gradient {
       orientation: Gradient.Horizontal
-      GradientStop { position: 0; color: "#2E3A55" }
-      GradientStop { position: 1; color: "#1E2638" }
+      GradientStop { position: 0; color: thumb.c.thumbA }
+      GradientStop { position: 1; color: thumb.c.thumbB }
     }
   }
 

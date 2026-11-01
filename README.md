@@ -527,7 +527,7 @@ for_window [app_id="clipstack-picker"] floating enable, resize set 800 600
 
 ## Omarchy Overlay
 
-On [Omarchy](https://omarchy.org), ClipStack also comes as an omarchy-shell overlay plugin (`omarchy/clipstack/`): a Maccy-style panel with the history on the left and the full entry on the right. Open it, type to filter, press Enter, and the entry is pasted into the window you were in. Pinned entries come first, then Today, Yesterday and Earlier; while you search, one Matches group with the query marked in each row. Text previews show line numbers (the first 2000 lines); images show a thumbnail in the list and the whole image fitted to the preview.
+On [Omarchy](https://omarchy.org), ClipStack also comes as an omarchy-shell overlay plugin (`omarchy/clipstack/`): a Maccy-style panel with the history on the left and the full entry on the right. Open it, type to filter, press Enter, and the entry is pasted into the window you were in. Pinned entries come first, then Today, Yesterday and Earlier; while you search, one Matches group with the query marked in each row. Text previews show line numbers (the first 2000 lines); images show a thumbnail in the list and the whole image fitted to the preview. It takes its colours from your omarchy theme (the same menu colours as omarchy's own pickers) and changes with it when you switch themes.
 
 The overlay never reads the clipboard or the history itself: every list, search, preview and action runs the `clipstack` CLI (`list --json`, `search --json`, `get`, `get --image-path`, `get --paste`, `get --copy`, `pin`, `unpin`, `alias`, `delete`, `edit`), so the daemon stays the only thing that captures copies. If a command fails, its error shows in the panel's footer. The terminal picker (`clipstack pick`) stays for other desktops and SSH sessions.
 
@@ -550,10 +550,10 @@ It works from any shell (it finds `OMARCHY_PATH` itself when the session hasn't 
 | `Ctrl+P` | Pin or unpin (unpinning removes the alias) |
 | `Ctrl+A` | Name the entry: an inline prompt checks the alias as you type (`a-z`, `0-9`, `_`, `-`, up to 32, starting with a letter or digit) and says when another entry has it; `Enter` saves, `Esc` cancels |
 | `Ctrl+E` | Edit a text entry in your editor (`omarchy-launch-tui ... clipstack edit`; the overlay closes) |
-| `Ctrl+Backspace` | Delete the entry |
+| `Ctrl+Delete` | Delete the entry (`Ctrl+Backspace` deletes a word in the search field) |
 | `Esc` | Clear the search; a second `Esc` closes |
 
-Every action is also a button showing its key. Click selects a row, double-click pastes it.
+Every action is also a button showing its key, in a row at the bottom right of the preview: Delete set apart, then Edit, Alias, Pin, Copy and Paste at the far right. Click selects a row, double-click pastes it.
 
 ## Remote Clipboard (SSH)
 
@@ -1094,11 +1094,12 @@ for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
 
 # Omarchy overlay: Logic.js node tests, qmllint, omarchy plugin validate, the
 # install script against fake omarchy commands, and headless interaction checks
-# (needs quickshell); --render also draws its four states into a temp dir
+# (needs quickshell and omarchy's shell Commons); --render also draws its four
+# states in the current theme and in flexoki-light into a temp dir
 scripts/test-overlay.sh --render
 ```
 
-The overlay checks run against `omarchy/clipstack/tests/fake-clipstack`, a stand-in CLI with canned entries (set `CLIPSTACK_BIN` to point the overlay at it), and the install script against fake `omarchy` and `omarchy-shell` commands in a temp `HOME`, so they never touch the real history, `~/.config` or the running shell.
+The overlay checks run against `omarchy/clipstack/tests/fake-clipstack`, a stand-in CLI with canned entries (set `CLIPSTACK_BIN` to point the overlay at it), in a temp `HOME` holding a copy of the theme under test (`OVERLAY_THEMES` picks other theme dirs), and the install script against fake `omarchy` and `omarchy-shell` commands in a temp `HOME`, so they never touch the real history, `~/.config` or the running shell.
 
 Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; every shell suite sources `tests/lib.sh` and calls `isolate_env`. The shell suites build old-format stores and check the import through `clipstack export | jq`. `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy`/`wtype` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
 
