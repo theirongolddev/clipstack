@@ -537,7 +537,7 @@ scripts/install-omarchy-plugin.sh              # link to ~/.config/omarchy/plugi
 scripts/install-omarchy-plugin.sh --uninstall  # disable and remove the link
 ```
 
-The script refuses to replace anything at that path that isn't a symlink. To open the overlay from a key, bind `omarchy-shell shell toggle solsystemlabs.clipstack '{}'`.
+It works from any shell (it finds `OMARCHY_PATH` itself when the session hasn't set it) and has the running shell rescan its plugins before enabling. The script refuses to replace anything at that path that isn't a symlink. To open the overlay from a key, bind `omarchy-shell shell toggle solsystemlabs.clipstack '{}'`.
 
 | Key | Action |
 |-----|--------|
@@ -1091,12 +1091,13 @@ CLIPSTACK_REAL_CLIPBOARD_TESTS=1 cargo test -- --ignored test_copy_and_paste tes
 cargo build --release
 for t in tests/e2e_*.sh tests/integration/*.sh; do bash "$t" || break; done
 
-# Omarchy overlay: Logic.js node tests, qmllint, omarchy plugin validate;
-# --render also draws its four states headless (needs quickshell) into a temp dir
+# Omarchy overlay: Logic.js node tests, qmllint, omarchy plugin validate, the
+# install script against fake omarchy commands, and headless interaction checks
+# (needs quickshell); --render also draws its four states into a temp dir
 scripts/test-overlay.sh --render
 ```
 
-The overlay checks run against `omarchy/clipstack/tests/fake-clipstack`, a stand-in CLI with canned entries (set `CLIPSTACK_BIN` to point the overlay at it), so they never touch the real history or the running shell.
+The overlay checks run against `omarchy/clipstack/tests/fake-clipstack`, a stand-in CLI with canned entries (set `CLIPSTACK_BIN` to point the overlay at it), and the install script against fake `omarchy` and `omarchy-shell` commands in a temp `HOME`, so they never touch the real history, `~/.config` or the running shell.
 
 Tests that run the `clipstack` binary are isolated from your real clipboard, history and daemon. Rust tests use `TestEnv` in `tests/common/mod.rs`; every shell suite sources `tests/lib.sh` and calls `isolate_env`. The shell suites build old-format stores and check the import through `clipstack export | jq`. `TestEnv` and `isolate_env` point `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `HOME` at a temp directory, put the fake `wl-paste`/`wl-copy`/`wtype` in `tests/fakes/` first on `PATH`, unset `WAYLAND_DISPLAY`, and only ever kill processes they started themselves.
 
@@ -1161,12 +1162,12 @@ clipstack/
 │   ├── e2e_*.sh         # Shell end-to-end suites (e2e_daemon.sh: capture, socket, unit; e2e_remote.sh: rcopy, rpaste)
 │   └── integration/     # Shell integration suites
 ├── omarchy/clipstack/    # omarchy-shell overlay plugin (QML; Logic.js holds the pure logic)
-│   └── tests/           # node tests for Logic.js, fake-clipstack, headless render harness
+│   └── tests/           # node tests for Logic.js, fake-clipstack, install script test, headless interaction and render harnesses
 ├── scripts/
 │   ├── rcopy            # Remote copy over the forwarded daemon socket
 │   ├── rpaste           # Remote paste (needs allow_pull = true)
 │   ├── install-omarchy-plugin.sh  # Link and enable the overlay plugin (--uninstall)
-│   └── test-overlay.sh  # Overlay checks: node tests, qmllint, plugin validate, --render
+│   └── test-overlay.sh  # Overlay checks: node tests, qmllint, plugin validate, install script, interaction checks, --render
 └── systemd/
     └── clipstack.service # Systemd user service file
 ```
