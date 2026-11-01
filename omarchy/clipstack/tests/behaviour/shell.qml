@@ -7,7 +7,9 @@ import "plugin"
 // tests/fake-clipstack: request ordering, selection, reopening, repeated
 // actions. scripts/test-overlay.sh copies the plugin next to this file and
 // runs it with QT_QPA_PLATFORM=offscreen; it prints one "CHECK ok|FAIL"
-// line per check and "CHECKS DONE" at the end. Never the live shell.
+// line per check and "CHECKS DONE" at the end; test-overlay.sh also fails
+// on any QML warning, such as rich text trying to load an <img> from clip
+// text. Never the live shell.
 ShellRoot {
   id: shellRoot
 
@@ -26,10 +28,11 @@ ShellRoot {
     return -1;
   }
 
-  // Runs sh -c SCRIPT (with $1 = the fake dir) and hands stdout to then()
-  function sh(script, then) {
+  // Runs sh -c SCRIPT (with $1 = the fake dir, then ARGS) and hands stdout
+  // to then()
+  function sh(script, then, args) {
     shProc.then = then || null;
-    shProc.command = ["sh", "-c", script, "sh", shellRoot.fakeDir];
+    shProc.command = ["sh", "-c", script, "sh", shellRoot.fakeDir].concat(args || []);
     shProc.running = true;
   }
 
@@ -48,6 +51,21 @@ ShellRoot {
 
   Store {
     id: store
+  }
+
+  // The card on screen for the later steps, so rows and preview lines are
+  // really drawn (earlier steps check the Store alone)
+  property bool showCard: false
+  FloatingWindow {
+    implicitWidth: 1040
+    implicitHeight: 620
+
+    Loader {
+      active: shellRoot.showCard
+      sourceComponent: Reader {
+        ov: store
+      }
+    }
   }
 
   Image {
@@ -156,6 +174,31 @@ ShellRoot {
         // The fake dir's name has a space, # and % in it (test-overlay.sh)
         shellRoot.check("the image loads from its path", probe.status === Image.Ready,
           "status " + probe.status + " for " + probe.source);
+        // Clip text that is markup: drawn as rich text, it would load images.
+        // A prose first line, so the preview is not tinted as code and its
+        // lines turn rich only when the query marks them.
+        const img = "<img src=\"injected.png\">";
+        const content = "Notes in bold\r\n" + img + " bold <b>x</b> &amp;\n";
+        const entry = { id: 10, created_at: 0, last_used: 0, size: content.length, kind: "text",
+          preview: img + " bold <b>x</b> &amp;", pinned: false, alias: null };
+        shellRoot.sh("printf %s \"$2\" >\"$1/content/10\" && jq --argjson e \"$3\" '. + [$e]' \"$1/entries.json\""
+          + " >\"$1/e.tmp\" && mv \"$1/e.tmp\" \"$1/entries.json\"", null, [content, JSON.stringify(entry)]);
+      }],
+      [300, function () {
+        store.close();
+        shellRoot.showCard = true;
+        store.open("{}");
+      }],
+      [600, function () {
+        store.select(shellRoot.rowIndex(10));
+      }],
+      [600, function () {
+        store.setQuery("bold");
+      }],
+      [600, function () {
+        shellRoot.check("markup in a clip matches as text", store.rows.length === 1 && store.rows[0].id === 10,
+          JSON.stringify(store.rows.map(function (r) { return r.id; })));
+        store.setQuery("");
       }],
     ];
     stepTimer.interval = 1;
