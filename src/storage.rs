@@ -414,7 +414,13 @@ impl Storage {
                 }
 
                 if let Ok(content) = fs::read_to_string(&path) {
-                    let timestamp: i64 = id.parse().unwrap_or(0);
+                    // IDs are "{millis}" (legacy) or "{millis}_{suffix}"
+                    let timestamp: i64 = id
+                        .split('_')
+                        .next()
+                        .and_then(|ms| ms.parse().ok())
+                        .unwrap_or(0);
+
                     let hash = util::compute_hash_string(&content);
                     let preview: String = content
                         .chars()
@@ -955,6 +961,25 @@ mod tests {
         let index = storage.load_index().unwrap();
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].id, entry_id);
+    }
+
+    #[test]
+    fn test_recovery_parses_timestamp_from_suffixed_id() {
+        let dir = TempDir::new().unwrap();
+        let base_dir = dir.path().to_path_buf();
+        fs::create_dir_all(&base_dir).unwrap();
+
+        // Current ID format: {millis}_{suffix}
+        fs::write(base_dir.join("1736789123456_042.txt"), "newer").unwrap();
+        fs::write(base_dir.join("1736789000000_007.txt"), "older").unwrap();
+
+        let storage = Storage::with_defaults(base_dir).unwrap();
+        assert_eq!(storage.attempt_recovery().unwrap(), 2);
+
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries[0].timestamp, 1736789123456);
+        assert_eq!(index.entries[0].id, "1736789123456_042");
+        assert_eq!(index.entries[1].timestamp, 1736789000000);
     }
 
     #[test]
