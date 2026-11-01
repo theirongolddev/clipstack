@@ -1143,14 +1143,28 @@ fn daemon_spawn_args(storage_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
     ]
 }
 
+/// Program to auto-spawn as the daemon: the running executable, from
+/// `std::env::current_exe()`. Never a `clipstack` looked up on PATH, which
+/// could be a different (installed) version than the one running. `None`
+/// if the executable can't be resolved; the picker then runs without one.
+fn daemon_spawn_program(
+    current_exe: std::io::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    current_exe.ok()
+}
+
 /// Ensure daemon is running, silently spawning if needed
 fn ensure_daemon_running(storage_dir: &std::path::Path) {
     if Daemon::is_running() {
         return;
     }
 
+    let Some(program) = daemon_spawn_program(std::env::current_exe()) else {
+        return;
+    };
+
     // Silently spawn daemon
-    let _ = Command::new("clipstack")
+    let _ = Command::new(program)
         .args(daemon_spawn_args(storage_dir))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1254,6 +1268,20 @@ mod tests {
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         // No --max-entries: the daemon reuses the limit stored in the index
         assert_eq!(args, vec!["--storage-dir", "/custom/clips", "daemon"]);
+    }
+
+    #[test]
+    fn daemon_spawn_program_is_current_exe() {
+        let exe = std::path::PathBuf::from("/opt/clipstack-test/bin/clipstack");
+        assert_eq!(daemon_spawn_program(Ok(exe.clone())), Some(exe));
+
+        // The real call site: whatever binary is running (here, the test exe)
+        let current = std::env::current_exe().unwrap();
+        assert_eq!(daemon_spawn_program(std::env::current_exe()), Some(current));
+
+        // Never fall back to a `clipstack` from PATH
+        let err = std::io::Error::other("no /proc");
+        assert_eq!(daemon_spawn_program(Err(err)), None);
     }
 
     // ======== FilteredEntry Type Tests ========
