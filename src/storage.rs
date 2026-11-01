@@ -1,3 +1,4 @@
+use crate::perms;
 use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -48,7 +49,7 @@ pub struct Storage {
 impl Storage {
     /// Create storage with specified max entries
     pub fn new(base_dir: PathBuf, max_entries: usize) -> Result<Self> {
-        fs::create_dir_all(&base_dir)
+        perms::ensure_private_dir(&base_dir)
             .with_context(|| format!("Failed to create storage dir: {:?}", base_dir))?;
 
         // Clamp to valid range
@@ -179,8 +180,11 @@ impl Storage {
         let tmp_name = format!("{}.{}.tmp", std::process::id(), unique_id);
         let tmp_path = path.with_file_name(tmp_name);
 
-        // Step 1: Write to temporary file
-        let mut file = fs::File::create(&tmp_path)
+        // Step 1: Write to a private (0600) temporary file; rename keeps the mode
+        let mut file = perms::private_file_options()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
             .with_context(|| format!("Failed to create temp file: {:?}", tmp_path))?;
 
         file.write_all(data)
@@ -212,7 +216,7 @@ impl Storage {
     /// processes can't lose each other's updates. Released when dropped.
     fn lock_index(&self) -> Result<fs::File> {
         let path = self.base_dir.join("index.lock");
-        let file = fs::OpenOptions::new()
+        let file = perms::private_file_options()
             .read(true)
             .write(true)
             .create(true)
@@ -1436,5 +1440,29 @@ mod tests {
 
         assert_eq!(index.entries.len(), 1, "Should load old format");
         assert!(!index.entries[0].pinned, "Should default to false");
+    }
+
+    // ======== Permission Tests ========
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn test_new_storage_dir_is_0700() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("nested").join("clipd");
+        let _storage = Storage::with_defaults(base.clone()).unwrap();
+        assert_eq!(mode_of(&base), 0o700);
+    }
+
+    #[test]
+    fn test_saved_content_and_index_are_0600() {
+        let (storage, _dir) = test_storage();
+        let entry = storage.save_entry("secret token").unwrap();
+        assert_eq!(mode_of(&storage.content_path(&entry.id)), 0o600);
+        assert_eq!(mode_of(&storage.index_path()), 0o600);
+        assert_eq!(mode_of(&storage.base_dir().join("index.lock")), 0o600);
     }
 }
