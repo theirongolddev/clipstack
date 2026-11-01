@@ -81,9 +81,10 @@ impl Storage {
     }
 
     /// Entries containing every whitespace-separated token (case-insensitive),
-    /// pinned first, then by recency. Tokens of 3+ characters use the trigram
-    /// index (first 256 Ki characters of each entry); shorter ones a substring
-    /// scan. An empty query lists everything.
+    /// pinned first, then by recency. Both kinds of token see only the first
+    /// 256 Ki characters of each entry (`search_text`): tokens of 3+
+    /// characters use the trigram index, shorter ones a substring scan with
+    /// Unicode case folding. An empty query lists everything.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ClipEntry>> {
         let mut filters = Vec::new();
         let mut params: Vec<Value> = Vec::new();
@@ -94,9 +95,11 @@ impl Storage {
                 params.len()
             ));
         }
+        // Same window as the index (`search_text`), case folded in Rust on
+        // both sides so non-ASCII letters match too
         for token in query.split_whitespace().filter(|t| t.chars().count() < MIN_FTS_TOKEN_CHARS) {
-            params.push(Value::Text(token.to_string()));
-            filters.push(format!("instr(lower(content), lower(?{})) > 0", params.len()));
+            params.push(Value::Text(super::schema::fold(token)));
+            filters.push(format!("instr(fold(search_text), ?{}) > 0", params.len()));
         }
         let filter = if filters.is_empty() {
             String::new()
@@ -310,6 +313,26 @@ mod tests {
         assert_eq!(ids(storage.search("ab", 200).unwrap()), [abc, ab]);
         assert_eq!(ids(storage.search("ab yy", 200).unwrap()), [ab], "mixed short and FTS tokens");
         assert_eq!(ids(storage.search("x", 200).unwrap()), [ab]);
+    }
+
+    #[test]
+    fn short_tokens_fold_unicode_case() {
+        let (storage, _dir) = test_storage();
+        let upper = add(&storage, "GRÜN UND ÉTÉ", 1);
+        let lower = add(&storage, "grün und été", 2);
+        add(&storage, "gruen und ete", 3);
+        assert_eq!(ids(storage.search("ü", 200).unwrap()), [lower, upper]);
+        assert_eq!(ids(storage.search("É", 200).unwrap()), [lower, upper]);
+        assert_eq!(ids(storage.search("é", 200).unwrap()), [lower, upper]);
+        assert_eq!(ids(storage.search("Ün", 200).unwrap()), [lower, upper], "mixed case");
+    }
+
+    #[test]
+    fn short_tokens_only_scan_the_search_window() {
+        let (storage, _dir) = test_storage();
+        let inside = add(&storage, &format!("{}zq", "a".repeat(262_144 - 2)), 1);
+        add(&storage, &format!("{}zq", "b".repeat(262_144)), 2);
+        assert_eq!(ids(storage.search("zq", 200).unwrap()), [inside], "same window as FTS");
     }
 
     #[test]

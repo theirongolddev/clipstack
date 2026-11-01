@@ -346,7 +346,7 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 
 | Crate | Version / features | Why |
 |-------|--------------------|-----|
-| `rusqlite` | `0.41` (0.41.1), `features = ["bundled"]` | Bundled SQLite 3.54.1 is compiled with `SQLITE_ENABLE_FTS5`. `bundled` already implies `modern_sqlite`, and the default `cache` feature gives `prepare_cached`. MSRV is 1.89 |
+| `rusqlite` | `0.41` (0.41.1), `features = ["bundled", "functions"]` (`functions` for the `fold()` case-folding SQL function) | Bundled SQLite 3.54.1 is compiled with `SQLITE_ENABLE_FTS5`. `bundled` already implies `modern_sqlite`, and the default `cache` feature gives `prepare_cached`. MSRV is 1.89 |
 | `regex` | `1.13` | Ignore patterns. Linear-time matching, so a hostile pattern can't cause catastrophic backtracking |
 | `toml` | `1` (1.1.8), `default-features = false, features = ["std", "parse", "serde"]` | Config parsing. Writing TOML isn't needed |
 | `fs2` | removed in 1-13 | std `File::lock` / `try_lock` (stable since 1.89, `flock` on Linux, so it interoperates with an old daemon's fs2 lock) covers the daemon lock and the legacy import's `index.lock` |
@@ -467,8 +467,8 @@ impl Storage {
   ORDER BY e.pinned DESC, e.last_used DESC, e.id DESC
   LIMIT ?2
   ```
-  Short tokens, if any, are applied as an extra `AND instr(lower(e.content), lower(?)) > 0` per token.
-- When `fts_query` returns `None` (every token is shorter than 3 characters), use only the `instr` filter. Storage is capped (256 MiB default), so the scan is bounded.
+  Short tokens, if any, are applied as an extra `AND instr(fold(e.search_text), ?) > 0` per token, with the token folded by the same function in Rust. `fold` is a deterministic scalar function registered on every connection (`schema::register_fold`, Rust `to_lowercase`), because SQLite's `lower()` folds only ASCII. Scanning `search_text` keeps short tokens to the same 256 K-character window as the index.
+- When `fts_query` returns `None` (every token is shorter than 3 characters), use only the `instr` filter. Storage is capped (256 MiB default) and only the 256 K-character window is scanned, so the scan is bounded.
 - Ranking beyond recency belongs to the picker (FEATURE_PLAN Feature 1).
 
 **Config** (`src/config.rs`). Defaults, documented in README as a commented example:

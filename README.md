@@ -259,7 +259,7 @@ The picker uses vim-style modal navigation with multiple modes:
 The picker fuzzy-matches your query against each entry's 100-character preview, then asks the database for entries whose full content contains it:
 
 - Every word of the query must appear in the content (case-insensitive substring match, in any order)
-- Words of 3 or more characters use an FTS5 trigram index over the first 256 K characters (262,144) of each entry; shorter words are matched with a substring scan
+- Words of 3 or more characters use an FTS5 trigram index over the first 256 K characters (262,144) of each entry; shorter words are matched with a substring scan of the same 256 K characters, with full Unicode case folding (`ü` finds `Ü`, `é` finds `É`)
 - Up to 200 full-content matches are shown, after the preview matches, with a `[content]` indicator
 
 There is no cap on how many entries are searched, and nothing is read from disk file by file.

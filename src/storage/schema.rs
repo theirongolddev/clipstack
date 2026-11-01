@@ -81,8 +81,29 @@ pub fn open_connection(path: &Path) -> Result<Connection> {
     // Sorts and temp indexes stay in memory: no plaintext temp files
     conn.pragma_update(None, "temp_store", "MEMORY")?;
 
+    register_fold(&conn)?;
+
     apply_migrations(&mut conn).with_context(|| format!("Failed to migrate database: {path:?}"))?;
     Ok(conn)
+}
+
+/// SQL `fold(text)`: Rust's Unicode `to_lowercase`, so the short-token
+/// search folds case the same way for "É" as for "E" (SQLite's `lower()`
+/// only folds ASCII). The query side is folded with the same function.
+fn register_fold(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "fold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_INNOCUOUS,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| fold(&s))),
+    )?;
+    Ok(())
+}
+
+/// Case folding shared by the SQL `fold()` and the search query.
+pub(super) fn fold(text: &str) -> String {
+    text.to_lowercase()
 }
 
 /// `SQLITE_BUSY`/`SQLITE_LOCKED`: another connection holds the lock.
