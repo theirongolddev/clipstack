@@ -3,6 +3,8 @@
 #   1. node unit tests for Logic.js (omarchy/clipstack/tests/*.test.mjs)
 #   2. qmllint on every QML file, failing on any warning
 #   3. omarchy plugin validate on the manifest (skipped without omarchy)
+#   4. headless interaction checks of Store.qml/CliCall.qml
+#      (tests/behaviour/shell.qml against tests/fake-clipstack)
 #
 # --render [DIR] also draws the four design states (browse, search, image,
 # alias) headless with QT_QPA_PLATFORM=offscreen against
@@ -22,7 +24,7 @@ while (($#)); do
       if [[ ${2:-} != "" && ${2:0:1} != "-" ]]; then render_dir=$2; shift; fi
       ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -58,24 +60,49 @@ else
   echo "skipped: omarchy is not installed"
 fi
 
-if ((render)); then
-  step "headless render (fake clipstack)"
-  command -v quickshell >/dev/null || { fail "quickshell not found"; exit 1; }
+# Copies the plugin and a harness shell.qml into a fresh Quickshell config
+# (it only imports from inside its config dir) and runs it headless against
+# a fresh fake history. Prints the log path; extra env goes before the call.
+run_harness() {
+  local harness=$1 name=$2 dir
+  dir=$(mktemp -d "$work/$name.XXXX")
+  mkdir -p "$dir/config/plugin"
+  cp "$plugin"/*.qml "$plugin"/Logic.js "$dir/config/plugin/"
+  cp "$harness" "$dir/config/shell.qml"
+  # Seed the fake history first (it draws its PNG on first use)
+  CLIPSTACK_FAKE_DIR=$dir/fake "$plugin/tests/fake-clipstack" list --json >/dev/null
+  CLIPSTACK_BIN=$plugin/tests/fake-clipstack CLIPSTACK_FAKE_DIR=$dir/fake \
+    QT_QPA_PLATFORM=offscreen timeout 60 quickshell -p "$dir/config" >"$dir/quickshell.log" 2>&1 || true
+  echo "$dir/quickshell.log"
+}
+
+# Offscreen-platform notices (and the start failure the interaction checks
+# cause on purpose) are expected; any other warning is a bug
+qml_warnings() {
+  grep -E 'WARN|ERROR' "$1" |
+    grep -vE 'QT_QPA_PLATFORM|WAYLAND_DISPLAY|--- WARNING ---|actually running wayland|window masks|QList\("/nonexistent/'
+}
+
+if command -v quickshell >/dev/null; then
   work=$(mktemp -d)
   trap 'rm -r "$work"' EXIT
+
+  step "interaction checks (fake clipstack)"
+  log=$(run_harness "$plugin/tests/behaviour/shell.qml" behaviour)
+  grep -o 'CHECK .*' "$log" || true
+  if qml_warnings "$log"; then fail "QML warnings at runtime (log above)"; fi
+  grep -q 'CHECK FAIL' "$log" && fail "interaction checks"
+  grep -q 'CHECKS DONE' "$log" || { cat "$log"; fail "interaction checks did not finish"; }
+else
+  fail "quickshell not found (interaction checks)"
+fi
+
+if ((render)); then
+  step "headless render (fake clipstack)"
   [[ -n $render_dir ]] || render_dir=$(mktemp -d)
-  mkdir -p "$work/config/plugin" "$render_dir"
-  cp "$plugin"/*.qml "$plugin"/Logic.js "$work/config/plugin/"
-  cp "$plugin/tests/render/shell.qml" "$work/config/shell.qml"
-  log=$work/quickshell.log
-  # Seed the fake history first (it draws its PNG on first use)
-  CLIPSTACK_FAKE_DIR=$work/fake "$plugin/tests/fake-clipstack" list --json >/dev/null
-  CLIPSTACK_BIN=$plugin/tests/fake-clipstack CLIPSTACK_FAKE_DIR=$work/fake RENDER_OUT=$render_dir \
-    QT_QPA_PLATFORM=offscreen timeout 60 quickshell -p "$work/config" >"$log" 2>&1 || true
-  # Offscreen-platform notices are expected; any other warning is a bug
-  if grep -E 'WARN|ERROR' "$log" | grep -vE 'QT_QPA_PLATFORM|WAYLAND_DISPLAY|--- WARNING ---|actually running wayland|window masks' ; then
-    fail "QML warnings at runtime (log above)"
-  fi
+  mkdir -p "$render_dir"
+  log=$(RENDER_OUT=$render_dir run_harness "$plugin/tests/render/shell.qml" render)
+  if qml_warnings "$log"; then fail "QML warnings at runtime (log above)"; fi
   for name in C1-browse C2-search C3-image C4-alias C4-alias-taken; do
     [[ -s $render_dir/$name.png ]] || fail "no $name.png"
   done

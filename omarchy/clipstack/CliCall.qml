@@ -33,6 +33,7 @@ Item {
   }
 
   function start(next) {
+    startFailTimer.stop();
     call.job = next;
     call.exited = false;
     call.outDone = false;
@@ -40,6 +41,11 @@ Item {
     call.exitCode = 0;
     proc.command = next.argv;
     proc.running = true;
+  }
+
+  // Starts the job deliver() reserved, outside the Process's own signals
+  function launch() {
+    if (call.job !== null && !call.exited && !proc.running) call.start(call.job);
   }
 
   function settle() {
@@ -54,17 +60,22 @@ Item {
   function deliver() {
     settleTimer.stop();
     startFailTimer.stop();
-    var done = call.job;
+    var done = { tag: call.job.tag, exitCode: call.exitCode };
     var stdout = out.text;
     var stderr = err.text;
     var stale = call.latestOnly && call.queue.length > 0;
-    call.job = null;
-    if (!stale) call.finished(done.tag, call.exitCode, stdout, stderr);
+    // The next queued run is reserved as the job before anyone hears about
+    // this one, so a run() from a finished handler queues behind it instead
+    // of starting a second command on the same Process
     if (call.queue.length > 0) {
-      const next = call.queue[0];
+      call.job = call.queue[0];
       call.queue = call.queue.slice(1);
-      Qt.callLater(function () { call.start(next); });
+      Qt.callLater(call.launch);
+    } else {
+      call.job = null;
     }
+    call.exited = false;
+    if (!stale) call.finished(done.tag, done.exitCode, stdout, stderr);
   }
 
   Process {
@@ -100,7 +111,7 @@ Item {
     id: startFailTimer
     interval: 300
     onTriggered: {
-      if (call.job === null || call.exited) return;
+      if (call.job === null || call.exited || proc.running) return;
       call.exitCode = 127;
       call.exited = true;
       call.outDone = true;

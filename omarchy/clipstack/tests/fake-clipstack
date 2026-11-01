@@ -6,8 +6,9 @@
 #
 # State lives in $CLIPSTACK_FAKE_DIR (default $XDG_RUNTIME_DIR/clipstack-fake)
 # and is seeded on first use; delete the dir to start over. Every call is
-# appended to calls.log there. CLIPSTACK_FAKE_FAIL=<command> makes that
-# command fail with exit 4 and an "Error:" line, to test the status line.
+# appended to calls.log there. CLIPSTACK_FAKE_FAIL=<command> (or a file
+# named `fail` there holding the command) makes that command fail with exit 4
+# and an "Error:" line, to test the status line.
 set -euo pipefail
 
 dir=${CLIPSTACK_FAKE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/clipstack-fake}
@@ -90,7 +91,9 @@ EOF
 
 cmd=${1:-}
 shift || true
-if [[ -n ${CLIPSTACK_FAKE_FAIL:-} && $CLIPSTACK_FAKE_FAIL == "$cmd" ]]; then
+fail=${CLIPSTACK_FAKE_FAIL:-}
+[[ -n $fail || ! -f $dir/fail ]] || fail=$(<"$dir/fail")
+if [[ -n $fail && $fail == "$cmd" ]]; then
   die 4 "cannot open the history: database is locked"
 fi
 
