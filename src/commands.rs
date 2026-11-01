@@ -739,9 +739,20 @@ fn socket_state(path: &Path, daemon_running: bool) -> String {
 
 /// `completions <shell>`.
 pub fn completions(shell: Shell) {
-    let mut cmd = Cli::command();
+    let mut cmd = completion_command(Cli::command());
     let name = cmd.get_name().to_string();
     generate(shell, &mut cmd, name, &mut io::stdout());
+}
+
+/// `cli` without its hidden subcommands (`serve`, `recover`,
+/// `__watch-hook`), which clap_complete would offer anyway; the bash
+/// generator also panics on a name containing "__".
+fn completion_command(cli: clap::Command) -> clap::Command {
+    let mut cmd = clap::Command::new("clipstack").version(env!("CARGO_PKG_VERSION")).args(cli.get_arguments().cloned());
+    if let Some(about) = cli.get_about() {
+        cmd = cmd.about(about.clone());
+    }
+    cmd.subcommands(cli.get_subcommands().filter(|sub| !sub.is_hide_set()).cloned())
 }
 
 fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {

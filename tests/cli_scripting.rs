@@ -481,3 +481,16 @@ fn pick_without_paste_never_runs_wtype() {
     std::thread::sleep(std::time::Duration::from_millis(400));
     assert!(!env.fake_clip_dir.join("wtype.calls").exists());
 }
+
+#[test]
+fn completions_generate_for_every_shell() {
+    let env = TestEnv::new();
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = run(&env, &["completions", shell], None);
+        assert_eq!(code(&out), 0, "{shell}: {}", stderr(&out));
+        assert!(stdout(&out).contains("alias"), "{shell} completions lack subcommands");
+        for hidden in ["watch-hook", "serve", "recover"] {
+            assert!(!stdout(&out).contains(hidden), "{shell} completions offer the hidden {hidden}");
+        }
+    }
+}
