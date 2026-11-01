@@ -10,7 +10,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-TEST_DIR=$(mktemp -d)
+# Temp XDG dirs and HOME, fake wl-paste/wl-copy first on PATH, no WAYLAND_DISPLAY
+# shellcheck source=../lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+isolate_env
+
+TEST_DIR="$ISOLATED_ROOT/work"
+mkdir -p "$TEST_DIR"
 CLIPSTACK="./target/release/clipstack"
 
 log_pass() { echo -e "${GREEN}✓${NC} $1"; }
@@ -19,7 +25,7 @@ log_info() { echo -e "${YELLOW}→${NC} $1"; }
 
 FAILED=0
 
-cleanup() { rm -rf "$TEST_DIR"; }
+# cleanup (tests/lib.sh) stops only tracked PIDs and removes the temp root
 trap cleanup EXIT
 
 # Helper to create test entries directly in storage
