@@ -36,6 +36,11 @@ Item {
     ? Logic.validateAlias(root.aliasInput, root.allEntries, root.selected.id)
     : Logic.validateAlias("", [], -1)
 
+  // An entry action in flight: "running", then "refreshing" until the list
+  // shows its result. Other actions wait, so a key repeat never acts on a
+  // row that is already gone or changed.
+  property string pendingAction: ""
+
   property string status: ""       // last error, shown in the footer
   property bool statusWhileClosed: false
 
@@ -50,6 +55,7 @@ Item {
     root.aliasInput = "";
     if (!root.statusWhileClosed) root.status = "";
     root.statusWhileClosed = false;
+    root.pendingAction = "";
     // The last session may have closed on a search: show the history as
     // last listed until the fresh list arrives
     root.resetSelection = true;
@@ -107,6 +113,7 @@ Item {
       : Logic.selectionAfterRefresh(root.rows, prevId, prevIndex);
     root.resetSelection = false;
     root.loaded = true;
+    if (root.pendingAction === "refreshing" && !listCall.busy) root.pendingAction = "";
   }
 
   function report(error) {
@@ -173,7 +180,7 @@ Item {
 
   function act(action) {
     var e = root.selected;
-    if (!e) return;
+    if (!e || root.pendingAction !== "") return;
     if (action === "alias") {
       root.aliasInput = e.alias;
       root.aliasOpen = true;
@@ -191,17 +198,22 @@ Item {
       handoff.restart();
       return;
     }
+    root.runAction(argv, action);
+  }
+
+  function runAction(argv, action) {
+    root.pendingAction = "running";
     actionCall.run(argv, action);
   }
 
   function saveAlias() {
     var e = root.selected;
     var check = root.aliasCheck;
-    if (!e || !check.valid) return;
+    if (!e || !check.valid || root.pendingAction !== "") return;
     root.cancelAlias();
     if (check.state === "current") return;
     root.status = "";
-    actionCall.run(Logic.actionArgv(root.bin, "alias", e, check.name), "alias");
+    root.runAction(Logic.actionArgv(root.bin, "alias", e, check.name), "alias");
   }
 
   function cancelAlias() {
@@ -244,7 +256,7 @@ Item {
       // The editor runs in a terminal for as long as it is open, so it is
       // started detached; paste and copy report errors like any action.
       if (job.action === "edit") Quickshell.execDetached(job.argv);
-      else actionCall.run(job.argv, job.action);
+      else root.runAction(job.argv, job.action);
     }
   }
 
@@ -304,7 +316,13 @@ Item {
     latestOnly: false
     onFinished: function (tag, exitCode, stdout, stderr) {
       root.report(Logic.commandError(tag, exitCode, stdout, stderr));
-      if (root.opened) root.refresh();
+      if (actionCall.busy) return; // another action follows
+      if (root.opened) {
+        root.pendingAction = "refreshing";
+        root.refresh();
+      } else {
+        root.pendingAction = "";
+      }
     }
   }
 }

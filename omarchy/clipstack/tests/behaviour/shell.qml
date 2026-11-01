@@ -108,6 +108,22 @@ ShellRoot {
         shellRoot.check("reopening never shows the last session's matches", groups.indexOf("MATCHES") < 0,
           JSON.stringify(groups));
       }],
+      [800, function () {
+        shellRoot.sh(": > \"$1/calls.log\"");
+        store.select(shellRoot.rowIndex(3));
+        // Key repeat: the second press comes before the refresh
+        store.act("delete");
+        store.act("delete");
+      }],
+      [1000, function () {
+        shellRoot.check("a repeated delete does not fail on the deleted entry", store.status === "", store.status);
+        shellRoot.check("the deleted entry is gone", shellRoot.rowIndex(3) < 0, "id 3 still listed");
+        shellRoot.check("the selection moves to a neighbour", store.selected !== null, "nothing selected");
+        shellRoot.sh("cat \"$1/calls.log\"", function (log) {
+          const deletes = log.split("\n").filter(function (l) { return /^delete /.test(l); }).length;
+          shellRoot.check("one delete per entry", deletes === 1, deletes + " deletes");
+        });
+      }],
     ];
     stepTimer.interval = 1;
     stepTimer.start();
