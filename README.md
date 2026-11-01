@@ -269,16 +269,16 @@ clipstack completions powershell >> $PROFILE
 Launch with `clipstack` or `clipstack pick`:
 
 ```
-┌─Search (/ to search)────────────────────────────────┐
-│                                                     │
-└─────────────────────────────────────────────────────┘
-┌─History (5/5) - 1 pinned─────┐┌─Preview─────5m─1.2KB──┐
-│> ★ 14:32 [  1.2KB] function  ││const example = () => │
-│    14:30 [   45B] hello worl ││  return "hello";     │
-│    14:28 [  256B] {"type":"j ││};                    │
-│    14:25 [   12B] quick text ││                      │
-│    14:20 [  3.1KB] import Re ││                      │
-└──────────────────────────────┘└──────────────────────┘
+┌─Search (/ to search)─────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌─History (5/5) - 1 pinned─────┐┌─Preview - 1.2KB - 5m ago─┐
+│> ★   5m [1.2KB] function     ││const example = () => {   │
+│     12m [  45B] hello world  ││  return "hello";         │
+│      2h [ 256B] {"type":"jso ││};                        │
+│      3h [  12B] quick text   ││                          │
+│     40d [3.1KB] import React ││                          │
+└──────────────────────────────┘└──────────────────────────┘
 [NORMAL] j/k:Nav  /:Search  Tab:Preview  Enter:Copy  p:Pin  dd:Del  u:Undo  q:Quit
 ```
 
@@ -328,7 +328,7 @@ The picker uses vim-style modal navigation. In normal mode every letter is a com
 - Matched characters highlighted in **yellow** during fuzzy search
 - `[content]` indicator for matches found in full content (not just preview)
 - Scrollbar shows position in long lists
-- Relative timestamps (e.g., "5m ago", "2h ago")
+- A fixed-width age column (`  5s`, ` 12m`, `  3h`, ` 40d`, capped at `999d`), so the rows stay aligned
 - Entry size displayed in human-readable format (e.g., "1.2KB")
 - Status messages for actions (delete confirmation, undo countdown)
 - Preview shows `[+N lines, Tab to scroll]` for truncated content

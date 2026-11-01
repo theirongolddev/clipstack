@@ -6,7 +6,7 @@ mod legacy;
 mod query;
 mod schema;
 
-pub use ingest::{DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestOutcome, IngestPolicy};
+pub use ingest::{DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_TOTAL_BYTES, IngestOutcome, IngestPolicy, now_ms};
 
 use std::fmt;
 

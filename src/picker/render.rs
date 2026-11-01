@@ -4,6 +4,7 @@ use super::Picker;
 use super::data::UNDO_WINDOW;
 use super::search::{MatchLocation, highlight_matches};
 use super::state::{Focus, Mode, StatusLevel};
+use super::text;
 use crate::util;
 use ratatui::{
     Frame,
@@ -75,6 +76,7 @@ impl Picker {
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect) {
         let query = &self.view.query;
+        let now = crate::storage::now_ms();
         let items: Vec<ListItem> = self
             .search
             .filtered
@@ -82,7 +84,7 @@ impl Picker {
             .enumerate()
             .map(|(filtered_pos, &idx)| {
                 let entry = &self.data.entries[idx];
-                let time = util::format_relative_time(entry.last_used);
+                let age = text::format_compact_age(entry.last_used, now);
                 let size = util::format_size(entry.size);
 
                 // Check if this is a content match (not preview match)
@@ -107,7 +109,7 @@ impl Picker {
 
                 let mut spans = vec![
                     pin_indicator,
-                    Span::styled(format!("{:>3} ", time), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{age} "), Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("[{:>5}] ", size), Style::default().fg(Color::Cyan)),
                 ];
 
@@ -392,6 +394,23 @@ mod tests {
         let shown = picker.view.preview_height as usize;
         assert!(lines > shown);
         assert!(rows[3].contains(&format!("+{} lines", lines - shown)), "{}", rows[3]);
+    }
+
+    #[test]
+    fn list_time_column_aligned() {
+        let (_temp, storage) = create_test_storage(&["a", "b", "c", "d", "e"]);
+        let mut picker = Picker::new(storage).unwrap();
+        let now = crate::storage::now_ms();
+        for (entry, age_s) in picker.data.entries.iter_mut().zip([5, 12 * 60, 3 * 3600, 40 * 86400, 0]) {
+            entry.last_used = now - age_s * 1000;
+        }
+        picker.data.entries[4].last_used = 1; // 1970: capped
+        let rows = draw(&mut picker, 120);
+        let list: Vec<&String> = rows[4..9].iter().collect();
+        let columns: Vec<usize> = list.iter().map(|r| r.chars().position(|c| c == '[').unwrap()).collect();
+        assert!(columns.iter().all(|&c| c == columns[0]), "size column moves: {list:#?}");
+        let ages: Vec<String> = list.iter().map(|r| r.chars().skip(columns[0] - 5).take(4).collect()).collect();
+        assert_eq!(ages, ["  5s", " 12m", "  3h", " 40d", "999d"]);
     }
 
     #[test]

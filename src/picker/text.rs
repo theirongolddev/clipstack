@@ -37,6 +37,19 @@ pub fn wrap_to_width(content: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// Age as exactly 4 columns, right-aligned: `  5s`, ` 12m`, `  3h`,
+/// ` 40d`, capped at `999d`; a future time (clock skew) is `  0s`.
+pub fn format_compact_age(ts_ms: i64, now_ms: i64) -> String {
+    let secs = now_ms.saturating_sub(ts_ms).max(0) / 1000;
+    let (n, unit) = match secs {
+        0..=59 => (secs, 's'),
+        60..=3599 => (secs / 60, 'm'),
+        3600..=86_399 => (secs / 3600, 'h'),
+        _ => ((secs / 86_400).min(999), 'd'),
+    };
+    format!("{n:>3}{unit}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +64,43 @@ mod tests {
         assert_eq!(wrap_to_width("\tabcdef", 6), ["    ab", "cdef"]);
         assert!(wrap_to_width("", 4).is_empty());
         assert_eq!(wrap_to_width("abc", 0), ["a", "b", "c"], "a zero width still makes progress");
+    }
+
+    const SEC: i64 = 1000;
+    const NOW: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn compact_age_units_and_width_4() {
+        let cases = [
+            (0, "  0s"),
+            (5 * SEC, "  5s"),
+            (59 * SEC, " 59s"),
+            (60 * SEC, "  1m"),
+            (12 * 60 * SEC, " 12m"),
+            (3 * 3600 * SEC, "  3h"),
+            (23 * 3600 * SEC, " 23h"),
+            (40 * 86400 * SEC, " 40d"),
+            (365 * 86400 * SEC, "365d"),
+        ];
+        for (age, want) in cases {
+            let got = format_compact_age(NOW - age, NOW);
+            assert_eq!(got, want, "age {age} ms");
+            assert_eq!(got.chars().count(), 4);
+        }
+    }
+
+    #[test]
+    fn caps_at_999d() {
+        assert_eq!(format_compact_age(NOW - 999 * 86400 * SEC, NOW), "999d");
+        assert_eq!(format_compact_age(NOW - 5000 * 86400 * SEC, NOW), "999d");
+        assert_eq!(format_compact_age(1, NOW), "999d", "an import dated 1970");
+        assert_eq!(format_compact_age(i64::MIN, NOW), "999d", "no overflow");
+    }
+
+    #[test]
+    fn future_clamps_to_0s() {
+        assert_eq!(format_compact_age(NOW + 3600 * SEC, NOW), "  0s");
+        assert_eq!(format_compact_age(i64::MAX, NOW), "  0s");
     }
 
     #[test]
