@@ -398,7 +398,7 @@ Item {
         ActionButton {
           c: reader.c
           label: "Delete"
-          keyHint: "⌃⌫"
+          keyHint: "⌃⌦"
           variant: "danger"
           onActivated: reader.ov.act("delete")
         }

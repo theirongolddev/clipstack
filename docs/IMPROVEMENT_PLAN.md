@@ -1203,7 +1203,8 @@ evicted by `max_entries` or `max_total_bytes`).
   `get id:N --copy` (overlay closes, as picking does in Maccy); Ctrl+P `pin`/`unpin`;
   Ctrl+A inline alias prompt (`alias`, validates `[a-z0-9_-]{1,32}` with a letter or
   digit first, as the CLI does, live, and flags a name another entry has); Ctrl+E `omarchy-launch-tui --app-id=org.omarchy.clipstack clipstack edit id:N`
-  (overlay closes); Ctrl+Backspace `delete`. An action waits until the list shows
+  (overlay closes); Ctrl+Delete `delete` (Ctrl+Backspace stays with the search field and
+  deletes a word). An action waits until the list shows
   the previous one's result, and a held key never repeats paste, copy, edit or
   alias (holding Enter to save an alias must not then paste). Keys typed ahead
   of the rows wait for them: Enter right after typing acts on the search's top

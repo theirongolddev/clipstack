@@ -549,7 +549,7 @@ It works from any shell (it finds `OMARCHY_PATH` itself when the session hasn't 
 | `Ctrl+P` | Pin or unpin (unpinning removes the alias) |
 | `Ctrl+A` | Name the entry: an inline prompt checks the alias as you type (`a-z`, `0-9`, `_`, `-`, up to 32, starting with a letter or digit) and says when another entry has it; `Enter` saves, `Esc` cancels |
 | `Ctrl+E` | Edit a text entry in your editor (`omarchy-launch-tui ... clipstack edit`; the overlay closes) |
-| `Ctrl+Backspace` | Delete the entry |
+| `Ctrl+Delete` | Delete the entry (`Ctrl+Backspace` deletes a word in the search field) |
 | `Esc` | Clear the search; a second `Esc` closes |
 
 Every action is also a button showing its key. Click selects a row, double-click pastes it.
