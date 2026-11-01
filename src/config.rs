@@ -4,9 +4,6 @@
 //! `--config` file is an error. Invalid values are config errors (exit 5 in
 //! Step 3), and messages name the bad key or pattern.
 
-// No caller until commit 1-12 loads the config in main; removed there.
-#![allow(dead_code)]
-
 use crate::storage::IngestPolicy;
 use anyhow::Result;
 use serde::Deserialize;

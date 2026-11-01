@@ -1,16 +1,20 @@
 use crate::clipboard::Clipboard;
 use crate::perms;
-use std::os::unix::fs::PermissionsExt;
-use crate::storage::json::Storage;
+use crate::storage::{IngestOutcome, Source, Storage};
 use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// How often a running daemon applies retention and the size caps, so
+/// entries age out without a new copy or command.
+const EXPIRE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct Daemon {
     storage: Storage,
@@ -38,7 +42,6 @@ impl Daemon {
         }
     }
 
-    /// `max_entries`: explicit limit, or `None` to reuse the stored limit
     /// Read the PID recorded in a lock file
     pub fn read_pid(lock_path: &Path) -> Option<u32> {
         std::fs::read_to_string(lock_path).ok()?.trim().parse().ok()
@@ -53,29 +56,15 @@ impl Daemon {
         }
     }
 
-    pub fn new(storage_dir: Option<PathBuf>, max_entries: Option<usize>) -> Result<Self> {
-        Self::new_with_lock(storage_dir, max_entries, false)
+    /// A daemon saving into `storage`, holding the global lock file.
+    pub fn new(storage: Storage) -> Result<Self> {
+        Self::with_lock_path(storage, &Self::lock_file_path())
     }
 
-    /// Create daemon with option to use local lock file (for tests)
-    pub fn new_with_lock(
-        storage_dir: Option<PathBuf>,
-        max_entries: Option<usize>,
-        use_local_lock: bool,
-    ) -> Result<Self> {
-        let base_dir = storage_dir.unwrap_or_else(Storage::default_dir);
-        let storage = Storage::open(base_dir.clone(), max_entries)?;
-
-        // Use storage-local lock file only when explicitly requested (for tests),
-        // otherwise use global lock file path
-        let lock_path = if use_local_lock {
-            base_dir.join("clipstack.lock")
-        } else {
-            Self::lock_file_path()
-        };
-
+    /// A daemon holding the lock at `lock_path` (tests use a temp path).
+    pub fn with_lock_path(storage: Storage, lock_path: &Path) -> Result<Self> {
         // Acquire exclusive lock - fails if another daemon is running.
-        let mut lock_file = open_lock_file(&lock_path)?;
+        let mut lock_file = open_lock_file(lock_path)?;
         lock_file
             .try_lock_exclusive()
             .context("Daemon already running (lock file is held)")?;
@@ -104,12 +93,20 @@ impl Daemon {
         self.running.store(true, Ordering::SeqCst);
 
         let mut last_clipboard_hash: Option<Vec<u8>> = None;
+        let mut last_expire = Instant::now();
 
         eprintln!("clipstack daemon started, monitoring clipboard...");
 
         while self.running.load(Ordering::SeqCst) {
             // Check regular clipboard (Ctrl+C copies only)
             self.check_and_save(Clipboard::paste(), &mut last_clipboard_hash, "clipboard");
+
+            if last_expire.elapsed() >= EXPIRE_INTERVAL {
+                last_expire = Instant::now();
+                if let Err(e) = self.storage.expire() {
+                    eprintln!("[storage] expiry failed: {e:#}");
+                }
+            }
 
             std::thread::sleep(self.poll_interval);
         }
@@ -131,8 +128,8 @@ impl Daemon {
                 if last_hash.as_ref() != Some(&hash) {
                     *last_hash = Some(hash);
 
-                    match self.storage.save_entry(&content) {
-                        Ok(entry) => {
+                    match self.storage.ingest(&content, Source::Poll, &[]) {
+                        Ok(IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry)) => {
                             // Use chars().take() for safe Unicode truncation
                             let preview: String = entry.preview.chars().take(40).collect();
                             eprintln!(
@@ -141,6 +138,10 @@ impl Daemon {
                                 entry.size,
                                 preview
                             );
+                        }
+                        Ok(IngestOutcome::Skipped(reason)) => {
+                            let reason = self.storage.policy().describe_skip(&reason);
+                            eprintln!("[{source}] skipped: {reason}");
                         }
                         Err(e) => {
                             eprintln!("[{}] Error saving entry: {}", source, e);
@@ -187,20 +188,27 @@ fn open_lock_file(lock_path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{IngestPolicy, ListOrder};
     use tempfile::TempDir;
+
+    /// A daemon on a temp store with its lock in the same temp dir.
+    fn test_daemon(dir: &TempDir) -> Result<Daemon> {
+        let storage = Storage::open(dir.path().to_path_buf(), Some(100), IngestPolicy::default())?;
+        Daemon::with_lock_path(storage, &dir.path().join("clipstack.lock"))
+    }
 
     #[test]
     fn test_daemon_creation() {
         let dir = TempDir::new().unwrap();
         // Use local lock file for test isolation
-        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+        let daemon = test_daemon(&dir).unwrap();
         assert!(!daemon.running.load(Ordering::SeqCst));
     }
 
     #[test]
     fn test_lock_file_records_daemon_pid() {
         let dir = TempDir::new().unwrap();
-        let _daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+        let _daemon = test_daemon(&dir).unwrap();
 
         let pid = Daemon::read_pid(&dir.path().join("clipstack.lock"));
         assert_eq!(pid, Some(std::process::id()));
@@ -210,11 +218,26 @@ mod tests {
     fn test_second_daemon_fails_without_clobbering_pid() {
         let dir = TempDir::new().unwrap();
         let lock = dir.path().join("clipstack.lock");
-        let _first = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+        let _first = test_daemon(&dir).unwrap();
 
-        let second = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true);
+        let second = test_daemon(&dir);
         assert!(second.is_err(), "second daemon must not acquire the lock");
         assert_eq!(Daemon::read_pid(&lock), Some(std::process::id()));
+    }
+
+    #[test]
+    fn saves_new_clipboard_content_once_with_poll_source() {
+        let dir = TempDir::new().unwrap();
+        let daemon = test_daemon(&dir).unwrap();
+        let mut last = None;
+        daemon.check_and_save(Ok("copied text".to_string()), &mut last, "clipboard");
+        daemon.check_and_save(Ok("copied text".to_string()), &mut last, "clipboard");
+        daemon.check_and_save(Ok(String::new()), &mut last, "clipboard");
+
+        let entries = daemon.storage.list(ListOrder::Recency, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, Source::Poll);
+        assert_eq!(daemon.storage.load_content(entries[0].id).unwrap(), "copied text");
     }
 
     #[test]
@@ -230,7 +253,7 @@ mod tests {
     fn test_daemon_stop_handle() {
         let dir = TempDir::new().unwrap();
         // Use local lock file for test isolation
-        let daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+        let daemon = test_daemon(&dir).unwrap();
 
         let handle = daemon.stop_handle();
         daemon.running.store(true, Ordering::SeqCst);
@@ -243,7 +266,7 @@ mod tests {
     #[test]
     fn test_lock_file_is_0600() {
         let dir = TempDir::new().unwrap();
-        let _daemon = Daemon::new_with_lock(Some(dir.path().to_path_buf()), Some(100), true).unwrap();
+        let _daemon = test_daemon(&dir).unwrap();
 
         let meta = std::fs::metadata(dir.path().join("clipstack.lock")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);

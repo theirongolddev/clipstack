@@ -13,6 +13,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
+use storage::{IngestOutcome, ListOrder, Source};
 
 #[derive(Parser)]
 #[command(name = "clipstack")]
@@ -22,6 +23,10 @@ struct Cli {
     /// Custom storage directory
     #[arg(long, global = true)]
     storage_dir: Option<PathBuf>,
+
+    /// Config file (default: $XDG_CONFIG_HOME/clipstack/config.toml)
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
 
     /// Maximum entries to store (1-10000, default: 100)
     /// Can also be set via CLIPSTACK_MAX_ENTRIES environment variable
@@ -97,27 +102,40 @@ fn main() -> Result<()> {
         check_dependencies()?;
     }
 
-    // Determine max_entries: CLI > env > limit stored in index (> default)
+    // Determine max_entries: CLI > env > limit saved in the database (> default)
     let env_limit = std::env::var("CLIPSTACK_MAX_ENTRIES").ok();
     let (max_entries, limit_source) = resolve_max_entries(cli.max_entries, env_limit.as_deref());
 
-    let storage_dir = cli.storage_dir.unwrap_or_else(storage::json::Storage::default_dir);
-    let storage = storage::json::Storage::open(storage_dir, max_entries)?;
+    // The config is loaded (and its patterns compiled) before storage is opened
+    let (config, config_source) = config::Config::load(cli.config.as_deref())?;
+    let policy = config.ingest_policy()?;
+
+    let storage_dir = cli.storage_dir.unwrap_or_else(storage::Storage::default_dir);
+    if matches!(cli.command, None | Some(Commands::Pick)) {
+        // Default action: open picker (still on the JSON store until 1-12b)
+        picker::pick_and_paste(storage::json::Storage::open(storage_dir, max_entries)?)?;
+        return Ok(());
+    }
+    let storage = storage::Storage::open(storage_dir, max_entries, policy)?;
 
     match cli.command {
-        None | Some(Commands::Pick) => {
-            // Default action: open picker
-            picker::pick_and_paste(storage)?;
-        }
+        None | Some(Commands::Pick) => unreachable!("handled above"),
 
         Some(Commands::Copy) => {
             let mut content = String::new();
             io::stdin().read_to_string(&mut content)?;
 
             clipboard::Clipboard::copy(&content)?;
-            storage.save_entry(&content)?;
-
-            eprintln!("Copied {} bytes", content.len());
+            match storage.ingest(&content, Source::Copy, &[])? {
+                IngestOutcome::Skipped(reason) => eprintln!(
+                    "Copied {} bytes (not saved to history: {})",
+                    content.len(),
+                    storage.policy().describe_skip(&reason)
+                ),
+                IngestOutcome::Inserted(_) | IngestOutcome::Bumped(_) => {
+                    eprintln!("Copied {} bytes", content.len());
+                }
+            }
         }
 
         Some(Commands::Paste) => {
@@ -126,10 +144,11 @@ fn main() -> Result<()> {
         }
 
         Some(Commands::List { count }) => {
-            let index = storage.load_index()?;
+            let entries = storage.list(ListOrder::Recency, Some(count))?;
+            let total = storage.counts()?.total;
 
-            for entry in index.entries.iter().take(count) {
-                let time = util::format_relative_time(entry.timestamp);
+            for entry in &entries {
+                let time = util::format_relative_time(entry.last_used);
                 let size = util::format_size(entry.size);
                 let preview: String = entry
                     .preview
@@ -141,19 +160,19 @@ fn main() -> Result<()> {
                 println!("{:>5} [{:>6}] {}", time, size, preview);
             }
 
-            if index.entries.len() > count {
-                println!("... and {} more", index.entries.len() - count);
+            if total > entries.len() {
+                println!("... and {} more", total - entries.len());
             }
         }
 
         Some(Commands::Clear) => {
-            storage.clear()?;
-            println!("Clipboard history cleared");
+            let cleared = storage.clear()?;
+            println!("Clipboard history cleared ({cleared} entries)");
         }
 
         Some(Commands::Daemon) => {
-            // Use custom storage dir if provided, but always use global lock file
-            let daemon = daemon::Daemon::new(Some(storage.base_dir().to_path_buf()), max_entries)?;
+            // The lock file is global even with a custom storage dir
+            let daemon = daemon::Daemon::new(storage)?;
 
             // Stop cleanly on SIGINT, SIGTERM and SIGHUP (ctrlc "termination")
             let running = daemon.stop_handle();
@@ -198,43 +217,33 @@ fn main() -> Result<()> {
         }
 
         Some(Commands::Stats) => {
-            let index = storage.load_index()?;
-            let total_size: usize = index.entries.iter().map(|e| e.size).sum();
-            let pinned_count = index.entries.iter().filter(|e| e.pinned).count();
-            let unpinned_count = index.entries.len() - pinned_count;
+            let counts = storage.counts()?;
 
-            println!("Entries:     {}", index.entries.len());
-            println!("  Pinned:    {} (protected)", pinned_count);
+            println!("Entries:     {}", counts.total);
+            println!("  Pinned:    {} (protected)", counts.pinned);
             println!(
                 "  Regular:   {}/{} ({})",
-                unpinned_count,
+                counts.total - counts.pinned,
                 storage.max_entries(),
-                limit_source.label(storage.index_exists())
+                limit_source.label(storage.limit_is_saved())
             );
-            println!("Total size:  {}", util::format_size(total_size));
+            println!("Total size:  {}", util::format_size(usize::try_from(counts.total_bytes)?));
 
-            if let Some(oldest) = index.entries.last() {
-                println!("Oldest:      {}", util::format_relative_time(oldest.timestamp));
+            if let Some(oldest) = counts.oldest {
+                println!("Oldest:      {}", util::format_relative_time(oldest));
             }
-            if let Some(newest) = index.entries.first() {
-                println!("Newest:      {}", util::format_relative_time(newest.timestamp));
+            if let Some(newest) = counts.newest {
+                println!("Newest:      {}", util::format_relative_time(newest));
             }
         }
 
         Some(Commands::Status) => {
-            print_status(&storage, limit_source)?;
+            print_status(&storage, limit_source, &config, &config_source)?;
         }
 
         Some(Commands::Recover) => {
-            match storage.attempt_recovery() {
-                Ok(count) => {
-                    println!("Recovery complete. Recovered {} entries.", count);
-                }
-                Err(e) => {
-                    eprintln!("Recovery failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            // Opening the database already checked it; `check --repair` replaces this in 1-15
+            println!("Recovery complete. {} entries.", storage.counts()?.total);
         }
 
         Some(Commands::Serve { port }) => {
@@ -254,17 +263,17 @@ fn main() -> Result<()> {
 enum LimitSource {
     Cli,
     Env,
-    /// Not configured this run: reuse the limit saved in the index (or default)
+    /// Not configured this run: reuse the limit saved in the database (or default)
     Stored,
 }
 
 impl LimitSource {
-    /// `index_exists`: whether a stored limit could have come from index.json
-    fn label(self, index_exists: bool) -> &'static str {
+    /// `limit_saved`: whether the database holds a saved limit
+    fn label(self, limit_saved: bool) -> &'static str {
         match self {
             LimitSource::Cli => "cli",
             LimitSource::Env => "env",
-            LimitSource::Stored if index_exists => "saved",
+            LimitSource::Stored if limit_saved => "saved",
             LimitSource::Stored => "default",
         }
     }
@@ -307,7 +316,12 @@ fn check_dependencies() -> Result<()> {
 }
 
 /// Print daemon and system status
-fn print_status(storage: &storage::json::Storage, limit_source: LimitSource) -> Result<()> {
+fn print_status(
+    storage: &storage::Storage,
+    limit_source: LimitSource,
+    config: &config::Config,
+    config_source: &config::ConfigSource,
+) -> Result<()> {
     // Check daemon status
     let daemon_running = daemon::Daemon::is_running();
 
@@ -322,26 +336,60 @@ fn print_status(storage: &storage::json::Storage, limit_source: LimitSource) -> 
     println!();
 
     // Storage info
-    let index = storage.load_index()?;
-    let total_size: usize = index.entries.iter().map(|e| e.size).sum();
+    let counts = storage.counts()?;
 
-    println!("Storage: {:?}", storage.base_dir());
-    println!("Entries: {}/{}", index.entries.len(), index.max_entries);
-    println!("Size:    {}", util::format_size(total_size));
+    println!("Storage:  {}", storage.base_dir().display());
+    println!("Database: {}", storage.db_path().display());
+    println!("Entries:  {} ({} pinned)", counts.total, counts.pinned);
+    println!("Size:     {}", util::format_size(usize::try_from(counts.total_bytes)?));
 
-    if let Some(newest) = index.entries.first() {
-        println!("Latest:  {}", util::format_relative_time(newest.timestamp));
+    if let Some(newest) = counts.newest {
+        println!("Latest:   {}", util::format_relative_time(newest));
     }
 
     println!();
 
     // Configuration info
+    let policy = storage.policy();
+    let file = match config_source {
+        config::ConfigSource::Explicit(path) => format!("{} (--config)", path.display()),
+        config::ConfigSource::File(path) => path.display().to_string(),
+        config::ConfigSource::Defaults(Some(path)) => {
+            format!("{} (not found; using defaults)", path.display())
+        }
+        config::ConfigSource::Defaults(None) => "none (using defaults)".to_string(),
+    };
     println!("Config:");
+    println!("  File:        {file}");
     println!(
         "  Max entries: {} ({})",
         storage.max_entries(),
-        limit_source.label(storage.index_exists())
+        limit_source.label(storage.limit_is_saved())
     );
+    match policy.retention() {
+        Some(retention) => println!("  Retention:   {} days", retention.as_secs() / 86_400),
+        None => println!("  Retention:   off"),
+    }
+    println!("  Entry cap:   {}", util::format_size(policy.max_entry_bytes()));
+    println!(
+        "  Total cap:   {} (unpinned)",
+        util::format_size(usize::try_from(policy.max_total_bytes()).unwrap_or(usize::MAX))
+    );
+    let builtins = if config.storage.builtin_secret_patterns {
+        " + built-in secret patterns"
+    } else {
+        ""
+    };
+    println!("  Ignore:      {} patterns{builtins}", policy.user_pattern_count());
+
+    let backups = storage.legacy_backup_dirs();
+    if !backups.is_empty() {
+        println!();
+        println!("\x1b[33mLegacy backup\x1b[0m (old plaintext files; delete after checking):");
+        for dir in backups {
+            println!("  {}", dir.display());
+        }
+    }
 
     println!();
 
@@ -366,7 +414,7 @@ fn generate_completions(shell: Shell) {
 /// Maximum size for incoming TCP data (10MB)
 const MAX_TCP_CONTENT_SIZE: usize = 10 * 1024 * 1024;
 
-fn serve_clipboard(storage: storage::json::Storage, port: u16) -> Result<()> {
+fn serve_clipboard(storage: storage::Storage, port: u16) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("Clipboard server listening on {}", addr);
@@ -417,18 +465,22 @@ fn serve_clipboard(storage: storage::json::Storage, port: u16) -> Result<()> {
                 };
 
                 // Save to storage and clipboard
-                match storage.save_entry(&content) {
-                    Ok(entry) => {
+                match storage.ingest(&content, Source::Remote, &[]) {
+                    Ok(outcome) => {
                         if let Err(e) = clipboard::Clipboard::copy(&content) {
                             eprintln!("Warning: couldn't copy to system clipboard: {}", e);
                         }
-                        // Use chars().take() for safe Unicode truncation
-                        let preview: String = entry.preview.chars().take(40).collect();
-                        eprintln!(
-                            "Received {} bytes: {}...",
-                            entry.size,
-                            preview
-                        );
+                        match outcome {
+                            IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry) => {
+                                // Use chars().take() for safe Unicode truncation
+                                let preview: String = entry.preview.chars().take(40).collect();
+                                eprintln!("Received {} bytes: {}...", entry.size, preview);
+                            }
+                            IngestOutcome::Skipped(reason) => eprintln!(
+                                "[remote] skipped: {}",
+                                storage.policy().describe_skip(&reason)
+                            ),
+                        }
                     }
                     Err(e) => eprintln!("Error saving entry: {}", e),
                 }
@@ -479,6 +531,18 @@ mod tests {
         assert_eq!(LimitSource::Stored.label(false), "default");
         assert_eq!(LimitSource::Cli.label(false), "cli");
         assert_eq!(LimitSource::Env.label(true), "env");
+    }
+
+    #[test]
+    fn limit_label_saved_when_settings_row_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let open = |limit| {
+            storage::Storage::open(dir.path().to_path_buf(), limit, storage::IngestPolicy::default())
+                .unwrap()
+        };
+        assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "default");
+        open(Some(5));
+        assert_eq!(LimitSource::Stored.label(open(None).limit_is_saved()), "saved");
     }
 
     #[test]

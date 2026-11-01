@@ -3,7 +3,6 @@ use crate::util;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -109,11 +108,6 @@ impl Storage {
     #[allow(dead_code)]
     pub fn with_defaults(base_dir: PathBuf) -> Result<Self> {
         Self::new(base_dir, DEFAULT_MAX_ENTRIES)
-    }
-
-    /// Get the configured max entries
-    pub fn max_entries(&self) -> usize {
-        self.max_entries
     }
 
     /// Sync max_entries to stored index and prune if necessary
@@ -238,19 +232,8 @@ impl Storage {
         Ok(file)
     }
 
-    /// Whether an index file has been written yet
-    pub fn index_exists(&self) -> bool {
-        self.index_path().exists()
-    }
-
     pub fn base_dir(&self) -> &PathBuf {
         &self.base_dir
-    }
-
-    pub fn default_dir() -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("clipd")
     }
 
     fn index_path(&self) -> PathBuf {
@@ -437,144 +420,6 @@ impl Storage {
         Ok(index.entries.iter().filter(|e| e.pinned).count())
     }
 
-    pub fn clear(&self) -> Result<()> {
-        let _lock = self.lock_index()?;
-        let index = self.load_index()?;
-        for entry in &index.entries {
-            let path = self.content_path(&entry.id);
-            let _ = fs::remove_file(path);
-        }
-        self.save_index(&ClipIndex {
-            max_entries: self.max_entries,
-            entries: Vec::new(),
-        })
-    }
-
-    /// Attempt to recover from corrupted storage.
-    /// Rebuilds index from existing content files.
-    pub fn attempt_recovery(&self) -> Result<usize> {
-        let _lock = self.lock_index()?;
-        eprintln!("[recovery] Starting storage recovery...");
-
-        let index_path = self.index_path();
-        let mut recovered_entries: Vec<ClipEntry> = Vec::new();
-
-        // Try to load existing index entries first
-        if index_path.exists() {
-            match fs::read_to_string(&index_path) {
-                Ok(data) => match serde_json::from_str::<ClipIndex>(&data) {
-                    Ok(index) => {
-                        eprintln!(
-                            "[recovery] Loaded {} entries from existing index",
-                            index.entries.len()
-                        );
-                        recovered_entries = index.entries;
-                    }
-                    Err(e) => {
-                        eprintln!("[recovery] Index corrupted ({}), scanning files...", e);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("[recovery] Cannot read index ({}), scanning files...", e);
-                }
-            }
-        }
-
-        // Collect IDs of entries we already have
-        let known_ids: HashSet<_> =
-            recovered_entries.iter().map(|e| e.id.clone()).collect();
-
-        // Scan for orphaned content files
-        let mut orphan_count = 0;
-        for entry in fs::read_dir(&self.base_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.extension().is_some_and(|ext| ext == "txt") {
-                let id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if known_ids.contains(&id) {
-                    continue;
-                }
-
-                if let Ok(content) = fs::read_to_string(&path) {
-                    // IDs are "{millis}" (legacy) or "{millis}_{suffix}"
-                    let timestamp: i64 = id
-                        .split('_')
-                        .next()
-                        .and_then(|ms| ms.parse().ok())
-                        .unwrap_or(0);
-
-                    let hash = util::compute_hash_string(&content);
-                    let preview: String = content
-                        .chars()
-                        .take(MAX_PREVIEW_LEN)
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect();
-
-                    recovered_entries.push(ClipEntry {
-                        id,
-                        timestamp,
-                        size: content.len(),
-                        preview,
-                        hash,
-                        pinned: false,
-                    });
-                    orphan_count += 1;
-                }
-            }
-        }
-
-        eprintln!("[recovery] Found {} orphaned content files", orphan_count);
-
-        // Sort by timestamp descending, then by pinned (true first) to prefer pinned during dedup
-        recovered_entries.sort_by(|a, b| {
-            b.timestamp
-                .cmp(&a.timestamp)
-                .then_with(|| b.pinned.cmp(&a.pinned))
-        });
-
-        // Deduplicate by hash, preferring pinned entries
-        // Use a map to track which entries we've seen, and prefer pinned ones
-        let mut hash_to_entry: std::collections::HashMap<String, ClipEntry> =
-            std::collections::HashMap::new();
-        for entry in recovered_entries {
-            match hash_to_entry.get(&entry.hash) {
-                Some(existing) if !existing.pinned && entry.pinned => {
-                    // Replace unpinned with pinned
-                    hash_to_entry.insert(entry.hash.clone(), entry);
-                }
-                None => {
-                    // First entry with this hash
-                    hash_to_entry.insert(entry.hash.clone(), entry);
-                }
-                _ => {
-                    // Already have a pinned entry or same pin state, keep existing
-                }
-            }
-        }
-
-        // Collect back into vec and sort by timestamp descending
-        let mut recovered_entries: Vec<ClipEntry> = hash_to_entry.into_values().collect();
-        recovered_entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
-
-        let total = recovered_entries.len();
-        eprintln!("[recovery] Total entries after dedup: {}", total);
-
-        // Save recovered index
-        let index = ClipIndex {
-            max_entries: self.max_entries,
-            entries: recovered_entries,
-        };
-        self.save_index(&index)?;
-
-        eprintln!("[recovery] Recovery complete");
-        Ok(total)
-    }
 }
 
 #[cfg(test)]
@@ -688,7 +533,7 @@ mod tests {
     #[test]
     fn test_rapid_saves_have_unique_ids() {
         let (storage, _dir) = test_storage();
-        let ids: HashSet<String> = (0..50)
+        let ids: std::collections::HashSet<String> = (0..50)
             .map(|i| storage.save_entry(&format!("rapid {}", i)).unwrap().id)
             .collect();
         assert_eq!(ids.len(), 50);
@@ -787,32 +632,6 @@ mod tests {
 
         // Oldest entries should be pruned
         assert!(index.entries[0].preview.contains(&(DEFAULT_MAX_ENTRIES + 4).to_string()));
-    }
-
-    #[test]
-    fn test_clear() {
-        let (storage, _dir) = test_storage();
-
-        storage.save_entry("one").unwrap();
-        storage.save_entry("two").unwrap();
-        storage.clear().unwrap();
-
-        let index = storage.load_index().unwrap();
-        assert!(index.entries.is_empty());
-    }
-
-    #[test]
-    fn test_clear_preserves_custom_max_entries() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::new(dir.path().to_path_buf(), 42).unwrap();
-
-        storage.save_entry("test").unwrap();
-        storage.clear().unwrap();
-
-        // Verify max_entries is preserved after clear
-        let index = storage.load_index().unwrap();
-        assert!(index.entries.is_empty());
-        assert_eq!(index.max_entries, 42, "clear() should preserve configured max_entries");
     }
 
     #[test]
@@ -982,20 +801,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_entries_clamps_low() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::new(dir.path().to_path_buf(), 0).unwrap();
-        assert_eq!(storage.max_entries(), 1);
-    }
-
-    #[test]
-    fn test_max_entries_clamps_high() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::new(dir.path().to_path_buf(), 999999).unwrap();
-        assert_eq!(storage.max_entries(), 10000);
-    }
-
-    #[test]
     fn test_reducing_max_entries_prunes_immediately() {
         let dir = TempDir::new().unwrap();
 
@@ -1010,180 +815,6 @@ mod tests {
         let index = storage.load_index().unwrap();
 
         assert_eq!(index.entries.len(), 10);
-    }
-
-    #[test]
-    fn test_max_entries_getter() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::new(dir.path().to_path_buf(), 42).unwrap();
-        assert_eq!(storage.max_entries(), 42);
-    }
-
-    #[test]
-    fn test_open_without_limit_uses_stored_limit_and_does_not_prune() {
-        let dir = TempDir::new().unwrap();
-
-        // User configured a higher limit once and filled history past the default
-        let storage = Storage::open(dir.path().to_path_buf(), Some(500)).unwrap();
-        for i in 0..150 {
-            storage.save_entry(&format!("entry {}", i)).unwrap();
-        }
-
-        // A later invocation with no flag/env (e.g. auto-started daemon, `list`)
-        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
-        assert_eq!(storage.max_entries(), 500, "should reuse stored limit");
-        let index = storage.load_index().unwrap();
-        assert_eq!(index.entries.len(), 150, "must not prune to the default");
-        assert_eq!(index.max_entries, 500);
-    }
-
-    #[test]
-    fn test_open_without_limit_on_fresh_dir_uses_default() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
-        assert_eq!(storage.max_entries(), DEFAULT_MAX_ENTRIES);
-    }
-
-    #[test]
-    fn test_open_with_explicit_limit_persists_and_prunes() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
-        for i in 0..20 {
-            storage.save_entry(&format!("entry {}", i)).unwrap();
-        }
-
-        let storage = Storage::open(dir.path().to_path_buf(), Some(5)).unwrap();
-        assert_eq!(storage.load_index().unwrap().entries.len(), 5);
-
-        // Limit is remembered by the next unconfigured invocation
-        let storage = Storage::open(dir.path().to_path_buf(), None).unwrap();
-        assert_eq!(storage.max_entries(), 5);
-    }
-
-    #[test]
-    fn test_with_defaults_uses_100() {
-        let dir = TempDir::new().unwrap();
-        let storage = Storage::with_defaults(dir.path().to_path_buf()).unwrap();
-        assert_eq!(storage.max_entries(), 100);
-    }
-
-    #[test]
-    fn test_recovery_from_orphaned_files() {
-        let dir = TempDir::new().unwrap();
-        let base_dir = dir.path().to_path_buf();
-        fs::create_dir_all(&base_dir).unwrap();
-
-        // Create some orphaned content files (without index entries)
-        let timestamp1 = 1000i64;
-        let timestamp2 = 2000i64;
-        fs::write(base_dir.join(format!("{}.txt", timestamp1)), "orphan content 1").unwrap();
-        fs::write(base_dir.join(format!("{}.txt", timestamp2)), "orphan content 2").unwrap();
-
-        // Create an empty index
-        let empty_index = ClipIndex::default();
-        fs::write(
-            base_dir.join("index.json"),
-            serde_json::to_string(&empty_index).unwrap(),
-        )
-        .unwrap();
-
-        // Create storage and run recovery
-        let storage = Storage::with_defaults(base_dir).unwrap();
-        let recovered = storage.attempt_recovery().unwrap();
-
-        // Should have recovered both orphaned files
-        assert_eq!(recovered, 2);
-
-        // Verify index now has entries
-        let index = storage.load_index().unwrap();
-        assert_eq!(index.entries.len(), 2);
-
-        // Entries should be sorted by timestamp descending (newest first)
-        assert_eq!(index.entries[0].timestamp, timestamp2);
-        assert_eq!(index.entries[1].timestamp, timestamp1);
-    }
-
-    #[test]
-    fn test_recovery_with_corrupted_index() {
-        let dir = TempDir::new().unwrap();
-        let base_dir = dir.path().to_path_buf();
-
-        // First create valid storage
-        let storage = Storage::with_defaults(base_dir.clone()).unwrap();
-
-        // Save an entry normally
-        storage.save_entry("saved content").unwrap();
-        let index = storage.load_index().unwrap();
-        let entry_id = index.entries[0].id.clone();
-
-        // Now corrupt the index (simulating crash/corruption)
-        fs::write(base_dir.join("index.json"), "not valid json {{{").unwrap();
-
-        // Verify load_index returns empty (graceful degradation on corruption)
-        let corrupted_index = storage.load_index().unwrap();
-        assert!(
-            corrupted_index.entries.is_empty(),
-            "Corrupted index should return empty"
-        );
-
-        // Run recovery
-        let recovered = storage.attempt_recovery().unwrap();
-
-        // Should have recovered the content file
-        assert_eq!(recovered, 1);
-
-        // Verify index is valid now
-        let index = storage.load_index().unwrap();
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].id, entry_id);
-    }
-
-    #[test]
-    fn test_recovery_parses_timestamp_from_suffixed_id() {
-        let dir = TempDir::new().unwrap();
-        let base_dir = dir.path().to_path_buf();
-        fs::create_dir_all(&base_dir).unwrap();
-
-        // Current ID format: {millis}_{suffix}
-        fs::write(base_dir.join("1736789123456_042.txt"), "newer").unwrap();
-        fs::write(base_dir.join("1736789000000_007.txt"), "older").unwrap();
-
-        let storage = Storage::with_defaults(base_dir).unwrap();
-        assert_eq!(storage.attempt_recovery().unwrap(), 2);
-
-        let index = storage.load_index().unwrap();
-        assert_eq!(index.entries[0].timestamp, 1736789123456);
-        assert_eq!(index.entries[0].id, "1736789123456_042");
-        assert_eq!(index.entries[1].timestamp, 1736789000000);
-    }
-
-    #[test]
-    fn test_recovery_deduplicates_by_hash() {
-        let dir = TempDir::new().unwrap();
-        let base_dir = dir.path().to_path_buf();
-        fs::create_dir_all(&base_dir).unwrap();
-
-        // Create content files with same content (same hash)
-        fs::write(base_dir.join("1000.txt"), "duplicate content").unwrap();
-        fs::write(base_dir.join("2000.txt"), "duplicate content").unwrap();
-
-        // Create empty index
-        let empty_index = ClipIndex::default();
-        fs::write(
-            base_dir.join("index.json"),
-            serde_json::to_string(&empty_index).unwrap(),
-        )
-        .unwrap();
-
-        // Create storage and run recovery
-        let storage = Storage::with_defaults(base_dir).unwrap();
-        let recovered = storage.attempt_recovery().unwrap();
-
-        // Should keep only one (most recent = 2000)
-        assert_eq!(recovered, 1);
-        let index = storage.load_index().unwrap();
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].timestamp, 2000);
     }
 
     #[test]
