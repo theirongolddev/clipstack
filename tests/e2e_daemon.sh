@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # E2E: the daemon captures through the fake `wl-paste --watch`, serves the
-# Unix socket, and scripts/rcopy pushes to it over socat and `nc -U`.
+# Unix socket (PING over socat and `nc -U`), stops cleanly, and its systemd
+# unit verifies. rcopy/rpaste are in tests/e2e_remote.sh.
 # Run from project root: ./tests/e2e_daemon.sh
 # Fully isolated (tests/lib.sh): temp runtime dir, store and HOME, fake
 # wl-clipboard first on PATH, no WAYLAND_DISPLAY.
@@ -18,7 +19,6 @@ isolate_env
 
 ROOT="$(pwd)"
 CLIPSTACK="$ROOT/target/release/clipstack"
-RCOPY="$ROOT/scripts/rcopy"
 STORE="$ISOLATED_ROOT/store"
 SOCK="$XDG_RUNTIME_DIR/clipstack.sock"
 LOG="$ISOLATED_ROOT/daemon.log"
@@ -57,7 +57,6 @@ has_entry() {
     export_json | jq -e --arg c "$1" --arg s "${2:-}" \
         'any(.[]; .content == $c and ($s == "" or .source == $s))' >/dev/null
 }
-clipboard() { cat "$FAKE_CLIP_DIR/content" 2>/dev/null; }
 # An nc that speaks Unix sockets (OpenBSD netcat)
 have_nc_unix() {
     command -v nc >/dev/null || return 1
@@ -76,25 +75,6 @@ offer() {
     timeout 5 sh -c 'printf "%s %s\n" "$1" "$2" > "$3"' sh "$1" "$file" "$FAKE_CLIP_DIR/events" ||
         log_fail "fake wl-paste --watch is not reading its events FIFO"
 }
-
-# A PATH holding only the tools rcopy needs plus the named transports
-tool_path() {
-    local dir="$ISOLATED_ROOT/path-$1" tool
-    shift
-    mkdir -p "$dir"
-    for tool in sh cat mktemp wc tr rm sed grep "$@"; do
-        if command -v "$tool" >/dev/null 2>&1 && [[ "$(type -t "$tool")" == file ]]; then
-            ln -sf "$(command -v "$tool")" "$dir/$tool"
-        fi
-    done
-    echo "$dir"
-}
-
-mkdir -p "$XDG_CONFIG_HOME/clipstack"
-cat >"$XDG_CONFIG_HOME/clipstack/config.toml" <<'TOML'
-[storage]
-ignore_patterns = ["^e2e-ignored"]
-TOML
 
 log_info "Starting an isolated daemon"
 "$CLIPSTACK" --storage-dir "$STORE" daemon 2>"$LOG" &
@@ -132,56 +112,7 @@ else
     log_skip "PING over nc -U (no nc with -U)"
 fi
 
-# --- rcopy ---------------------------------------------------------------------
-export CLIPSTACK_SOCK="$SOCK"
-
-if command -v socat >/dev/null; then
-    out="$(printf 'from rcopy\nvia socat' | PATH="$(tool_path socat socat)" "$RCOPY" 2>&1)" ||
-        log_fail "rcopy via socat failed: $out"
-    has_entry $'from rcopy\nvia socat' remote && [[ "$(clipboard)" == $'from rcopy\nvia socat' ]] &&
-        log_pass "rcopy via socat stores and copies" || log_fail "rcopy via socat: not stored or not copied"
-else
-    log_skip "rcopy via socat (socat not installed)"
-fi
-
-if have_nc_unix; then
-    out="$(printf 'from rcopy via nc' | PATH="$(tool_path nc nc)" "$RCOPY" 2>&1)" ||
-        log_fail "rcopy via nc -U failed: $out"
-    has_entry "from rcopy via nc" remote && [[ "$(clipboard)" == "from rcopy via nc" ]] &&
-        log_pass "rcopy via nc -U stores and copies" || log_fail "rcopy via nc -U: not stored or not copied"
-else
-    log_skip "rcopy via nc -U (no nc with -U)"
-fi
-
-set +e
-err="$(printf 'e2e-ignored token' | "$RCOPY" 2>&1 >/dev/null)"
-status=$?
-set -e
-[[ $status -eq 0 && "$err" == *"not saved"*"ignored"* ]] && log_pass "stored=0 is reported on stderr, exit 0: $err" ||
-    log_fail "ignored push: exit $status, stderr: $err"
-[[ "$(clipboard)" == "e2e-ignored token" ]] && ! has_entry "e2e-ignored token" &&
-    log_pass "Ignored push is copied but not stored" || log_fail "ignored push: wrong clipboard or stored"
-
-set +e
-err="$(printf '\377\376' | "$RCOPY" 2>&1 >/dev/null)"
-status=$?
-set -e
-[[ $status -eq 1 && "$err" == *"not_utf8"* ]] && log_pass "ERR reply exits 1: $err" ||
-    log_fail "non-UTF-8 push: exit $status, stderr: $err"
-
-set +e
-err="$(printf 'x' | CLIPSTACK_SOCK="$ISOLATED_ROOT/missing.sock" "$RCOPY" 2>&1)"
-status=$?
-set -e
-[[ $status -eq 3 && "$err" == *"missing.sock"* ]] && log_pass "Unreachable socket exits 3" ||
-    log_fail "unreachable socket: exit $status, stderr: $err"
-
-set +e
-err="$(printf 'x' | PATH="$(tool_path none)" "$RCOPY" 2>&1)"
-status=$?
-set -e
-[[ $status -eq 3 && "$err" == *"socat"* ]] && log_pass "No transport exits 3" ||
-    log_fail "no transport: exit $status, stderr: $err"
+# rcopy and rpaste over this socket: tests/e2e_remote.sh
 
 # --- shutdown ------------------------------------------------------------------
 kill -TERM "$DAEMON_PID"

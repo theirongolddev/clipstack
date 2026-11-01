@@ -1,0 +1,59 @@
+#!/bin/sh
+# rpaste - print your local clipboard from an SSH session.
+#
+#   rpaste              rpaste > file        rpaste | grep foo
+#
+# It asks the local clipstack daemon over its Unix socket, forwarded by ssh:
+#
+#   Host myserver
+#       RemoteForward /home/<remote-user>/.clipstack.sock /run/user/<local-uid>/clipstack.sock
+#
+# The local daemon refuses unless its config has `[socket] allow_pull = true`,
+# and always refuses an offer a password manager marked sensitive.
+#
+# CLIPSTACK_SOCK overrides the socket path (default: $HOME/.clipstack.sock).
+# Needs socat, or nc with -U (OpenBSD netcat), or ncat.
+#
+# The clipboard is printed exactly, with no newline added.
+# Exit status: 0 printed, 1 the daemon refused (pull disabled, sensitive),
+# 3 no socket, no daemon behind it, or no transport.
+
+set -u
+SOCK="${CLIPSTACK_SOCK:-$HOME/.clipstack.sock}"
+
+if command -v socat >/dev/null 2>&1; then
+    transport() { socat -t 10 - "UNIX-CONNECT:$SOCK"; }
+elif command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-U'; then
+    transport() { nc -U "$SOCK"; }
+elif command -v ncat >/dev/null 2>&1; then
+    transport() { ncat -U "$SOCK"; }
+else
+    echo "rpaste: needs socat, nc (OpenBSD, with -U) or ncat" >&2
+    exit 3
+fi
+
+if [ ! -S "$SOCK" ]; then
+    echo "rpaste: no clipstack socket at $SOCK (is the ssh RemoteForward set up? see CLIPSTACK_SOCK)" >&2
+    exit 3
+fi
+
+# The reply is one header line, then (after OK) the content. POSIX `read`
+# takes one byte at a time from a pipe, so `cat` gets the rest untouched.
+printf 'CLIPSTACK/1 PULL 0\n' | transport 2>/dev/null | {
+    IFS= read -r hdr
+    case $hdr in
+        OK*) cat ;;
+        ERR*)
+            echo "rpaste: ${hdr#ERR }" >&2
+            exit 1
+            ;;
+        "")
+            echo "rpaste: no reply from $SOCK (is the clipstack daemon running?)" >&2
+            exit 3
+            ;;
+        *)
+            echo "rpaste: unexpected reply: $hdr" >&2
+            exit 1
+            ;;
+    esac
+}
