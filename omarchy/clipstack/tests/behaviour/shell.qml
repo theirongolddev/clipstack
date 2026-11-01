@@ -84,6 +84,22 @@ ShellRoot {
           shellRoot.callLog.join(",") === "A=a,B=b,C=c", shellRoot.callLog.join(","));
         shellRoot.check("a command that cannot start reports exit 127", shellRoot.missingResult === "missing:127",
           shellRoot.missingResult);
+        store.open("{}");
+      }],
+      [800, function () {
+        shellRoot.check("open lists the history", store.rows.length === 9, store.rows.length + " rows");
+        shellRoot.sh(": > \"$1/calls.log\"");
+      }],
+      [200, function () {
+        store.setQuery("dock");
+      }],
+      [800, function () {
+        shellRoot.check("typing shows matches", store.rows.length > 0 && store.rows[0].group === "MATCHES",
+          JSON.stringify(store.rows.map(function (r) { return r.group; })));
+        shellRoot.sh("cat \"$1/calls.log\"", function (log) {
+          shellRoot.check("typing runs search only, not list first", /^search /m.test(log) && !/^list /m.test(log),
+            JSON.stringify(log));
+        });
       }],
     ];
     stepTimer.interval = 1;

@@ -87,6 +87,13 @@ Item {
     listCall.run(Logic.listArgv(root.bin), "list");
   }
 
+  // The rows for the current query: a search, or the whole list already
+  // loaded (typing never re-reads the list)
+  function runQuery() {
+    if (root.searching) searchCall.run(Logic.searchArgv(root.bin, root.query.trim()), root.query);
+    else root.showRows(root.allEntries);
+  }
+
   function showRows(entries) {
     var prevId = root.selected ? root.selected.id : -1;
     var prevIndex = root.selectedIndex;
@@ -211,7 +218,7 @@ Item {
   Timer {
     id: searchDebounce
     interval: 60
-    onTriggered: root.refresh()
+    onTriggered: root.runQuery()
   }
 
   Timer {
@@ -245,8 +252,7 @@ Item {
       var parsed = Logic.parseEntries(error === "" ? stdout : "");
       root.report(error || parsed.error);
       if (error === "" && parsed.error === "") root.allEntries = parsed.entries;
-      if (root.searching) searchCall.run(Logic.searchArgv(root.bin, root.query.trim()), root.query);
-      else root.showRows(root.allEntries);
+      root.runQuery();
     }
   }
 
