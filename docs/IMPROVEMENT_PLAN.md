@@ -268,7 +268,7 @@ pub fn tighten_dir(path: &Path) -> io::Result<TightenReport>;
 pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub skipped: usize }
 ```
 
-- `Storage::new`: replace `fs::create_dir_all` with `perms::ensure_private_dir`, then call `perms::tighten_dir` while holding `index.lock`. If anything changed, print `[storage] tightened permissions on N files` once to stderr.
+- `Storage::new`: replace `fs::create_dir_all` with `perms::ensure_private_dir`, then call `perms::tighten_dir` while holding `index.lock`. If any file changed, print `[storage] tightened permissions on N files` once to stderr (the dir itself was already fixed by `ensure_private_dir`).
 - `atomic_write`: create the temp file with `private_file_options()`. The rename keeps the mode.
 - `lock_index` and the daemon lock file: create with `.mode(0o600)`.
 - `Cargo.toml`: `ctrlc = { version = "3.5", features = ["termination"] }`. That handles SIGINT, SIGTERM and SIGHUP. The daemon loop already polls `running` every 250 ms and returns `Ok(())`, so the process exits 0 and prints `clipstack daemon stopped`.
@@ -287,7 +287,9 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 | `src/storage.rs` | Use perms in `new`, `atomic_write`, `lock_index` |
 | `src/daemon.rs` | Lock file `0600` |
 | `Cargo.toml` | `ctrlc` `termination` feature |
-| `tests/fakes/wl-paste` | New: minimal fake (`--no-newline` → exit 1 "No selection", `--version`). Extended in Step 2 |
+| `tests/fakes/wl-paste` | New: minimal fake (`--no-newline` → exit 1 "No selection", `--version`; calls logged to `$FAKE_CLIP_DIR/wl-paste.calls`). Extended in Step 2 |
+| `tests/fakes/wl-copy` | New: minimal fake (stdin → `$FAKE_CLIP_DIR/content`) so `copy`/picker tests can't reach the real clipboard. Extended in Step 2 |
+| `tests/lib.sh` | New: `isolate_env`, `track_pid`, `cleanup` for shell suites (see 0.5) |
 | `tests/common/mod.rs` | New: `TestEnv` harness (see 0.5) |
 | `tests/daemon_lifecycle.rs` | New Rust integration test |
 | `tests/integration/test_component_interaction.sh` | Remove `pkill -f "clipstack.*daemon"` (it kills the user's real daemon); isolate `XDG_RUNTIME_DIR` |
@@ -310,11 +312,11 @@ pub struct TightenReport { pub dir_changed: bool, pub files_changed: usize, pub 
 
 - Unit tests as listed above; existing tests stay green.
 - **Isolation harness** (`tests/common/mod.rs`), reused by every later step:
-  - `TestEnv::new()` creates temp dirs for `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and storage, plus a `FAKE_CLIP_DIR` state dir.
-  - `TestEnv::cmd()` returns a `std::process::Command` for `env!("CARGO_BIN_EXE_clipstack")` with those env vars set, `PATH=<repo>/tests/fakes:$PATH`, `WAYLAND_DISPLAY` removed, and `--storage-dir` set.
+  - `TestEnv::new()` creates temp dirs for `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `HOME` and storage, plus a `FAKE_CLIP_DIR` state dir.
+  - `TestEnv::cmd()` returns a `std::process::Command` for `env!("CARGO_BIN_EXE_clipstack")` with those env vars set, `PATH=<repo>/tests/fakes:$PATH`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `CLIPSTACK_MAX_ENTRIES` removed, and `--storage-dir` set.
   - `Drop` kills only the children it spawned.
   - A guard asserts the runtime dir is not `/run/user/<uid>`.
-- Shell E2E: add `tests/lib.sh` with the same `isolate_env` (exports the XDG vars and PATH) and a `cleanup` that kills only recorded PIDs. Source it from `test_component_interaction.sh`.
+- Shell E2E: add `tests/lib.sh` with the same `isolate_env` (exports the XDG vars, `HOME` and PATH; keeps `CARGO_HOME`/`RUSTUP_HOME` pointing at the real toolchain) and a `cleanup` that kills only PIDs recorded with `track_pid`. Source it from `test_component_interaction.sh`.
 
 #### 0.6 Docs
 
@@ -806,7 +808,7 @@ WantedBy=graphical-session.target
 #### 2.5 Test plan
 
 - **No real clipboard or daemon involved:**
-  - Every daemon test goes through `TestEnv`: temp `XDG_RUNTIME_DIR`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`--storage-dir`, PATH with `tests/fakes` first, no `WAYLAND_DISPLAY`.
+  - Every daemon test goes through `TestEnv`: temp `XDG_RUNTIME_DIR`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`HOME`/`--storage-dir`, PATH with `tests/fakes` first, no `WAYLAND_DISPLAY`.
   - The real wl-copy/wl-paste are never reached because the fakes shadow them.
   - The lock and socket live in the temp runtime dir, so the user's running daemon (`/run/user/1000/clipstack.lock`) is never seen.
 - **Socket tests** use a small `std::os::unix::net::UnixStream` client built on `protocol::write_request`/`read_response`.
@@ -1076,4 +1078,4 @@ Implementation proceeds through Steps 0-3 on the decisions below. Q2 and Q10 are
   working tree). Stage files by explicit path; never `git add -A` / `git commit -a`.
 - Never touch the user's real store (`~/.local/share/clipd`) or a running
   daemon; use `--storage-dir` with temp dirs.
-- Daemon, socket and CLI integration tests run only through `tests/common/mod.rs::TestEnv` (Rust) or `tests/lib.sh::isolate_env` (shell): temp `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `--storage-dir`, and `tests/fakes` first on PATH. Never `pkill`; kill only recorded PIDs.
+- Daemon, socket and CLI integration tests run only through `tests/common/mod.rs::TestEnv` (Rust) or `tests/lib.sh::isolate_env` (shell): temp `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `HOME`, `--storage-dir`, and `tests/fakes` first on PATH. Never `pkill`; kill only recorded PIDs.
