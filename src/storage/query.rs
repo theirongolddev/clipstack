@@ -2,7 +2,7 @@
 
 use super::{ClipEntry, Counts, EntryId, Kind, ListOrder, Source, Storage, StorageError};
 use rusqlite::types::Value;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::Engine as _;
 use rusqlite::{OptionalExtension, Row};
 use serde::Serialize;
@@ -150,30 +150,30 @@ impl Storage {
         })
     }
 
-    /// Full content of a text entry; an error if it doesn't exist or is an
-    /// image (`StorageError::NotText`).
+    /// Full content of a text entry; `StorageError::NotFound` if it doesn't
+    /// exist (deleted or expired since it was listed), `NotText` for an image.
     pub fn load_content(&self, id: EntryId) -> Result<String> {
         let conn = self.conn();
         let (kind, content): (String, String) = conn
             .prepare_cached("SELECT kind, content FROM entries WHERE id = ?1")?
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?
-            .with_context(|| format!("No entry with id {id}"))?;
+            .ok_or(StorageError::NotFound { id })?;
         if Kind::from_db(&kind) == Kind::Image {
             return Err(StorageError::NotText { id }.into());
         }
         Ok(content)
     }
 
-    /// The PNG bytes of an image entry; an error if it doesn't exist or is
-    /// text (`StorageError::NotImage`).
+    /// The PNG bytes of an image entry; `StorageError::NotFound` if it
+    /// doesn't exist, `NotImage` for text.
     pub fn load_image(&self, id: EntryId) -> Result<Vec<u8>> {
         let conn = self.conn();
         let image: Option<Vec<u8>> = conn
             .prepare_cached("SELECT image FROM entries WHERE id = ?1")?
             .query_row([id], |r| r.get(0))
             .optional()?
-            .with_context(|| format!("No entry with id {id}"))?;
+            .ok_or(StorageError::NotFound { id })?;
         image.ok_or_else(|| StorageError::NotImage { id }.into())
     }
 

@@ -357,6 +357,30 @@ impl Picker {
         Ok(())
     }
 
+    /// `result`, except that an entry deleted or expired since the list was
+    /// read (`StorageError::NotFound`) reloads the list with a status
+    /// message instead of ending the picker with an error.
+    fn unless_gone<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(e) if matches!(e.downcast_ref(), Some(crate::storage::StorageError::NotFound { .. })) => {
+                let row = self.selected_index().unwrap_or(0);
+                self.data.entries = self.data.storage.list(ListOrder::PinnedFirst, None)?;
+                self.view.selection = None;
+                self.update_filter();
+                self.select_index(row);
+                self.data.content_cache = None;
+                self.load_preview();
+                self.view.set_status(
+                    "That entry is gone (deleted or expired since the list was read)".to_string(),
+                    StatusLevel::Warning,
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn undo_delete(&mut self) -> Result<()> {
         if let Some(deleted) = self.data.last_deleted.take() {
             if deleted.deleted_at.elapsed() < UNDO_WINDOW {
@@ -443,11 +467,11 @@ impl Picker {
             Action::Quit => return Ok(Some(Outcome::Cancelled)),
             Action::Select => {
                 if let Some(entry) = self.selected_entry() {
-                    if entry.kind == Kind::Image {
-                        return Ok(Some(Outcome::SelectedImage(self.data.storage.load_image(entry.id)?)));
-                    }
-                    let content = self.data.storage.load_content(entry.id)?;
-                    return Ok(Some(Outcome::Selected(content)));
+                    let outcome = match entry.kind {
+                        Kind::Image => self.data.storage.load_image(entry.id).map(Outcome::SelectedImage),
+                        Kind::Text => self.data.storage.load_content(entry.id).map(Outcome::Selected),
+                    };
+                    return self.unless_gone(outcome);
                 }
             }
             Action::Move(delta) => self.move_selection(delta),
@@ -473,7 +497,10 @@ impl Picker {
                     self.view.mode = Mode::Normal;
                 }
             }
-            Action::Delete => self.delete_selected()?,
+            Action::Delete => {
+                let deleted = self.delete_selected();
+                self.unless_gone(deleted)?;
+            }
             Action::Undo => self.undo_delete()?,
             Action::TogglePin => self.toggle_pin_selected()?,
             Action::FocusPreview => {
@@ -808,6 +835,22 @@ pub(super) mod tests {
 
     fn status(picker: &Picker) -> &str {
         picker.view.status.as_ref().map_or("", |(msg, _, _)| msg.as_str())
+    }
+
+    #[test]
+    fn acting_on_an_entry_removed_meanwhile_keeps_the_picker_open() {
+        // The daemon expired or evicted it, or another clipstack deleted it
+        for keys in ["\n", "dd"] {
+            let (_temp, storage) = create_test_storage(&["keep", "gone"]);
+            let mut picker = Picker::new(storage).unwrap();
+            let gone = picker.selected_entry().unwrap().id;
+            picker.data.storage.delete_entry(gone).unwrap();
+            let outcome = if keys == "\n" { key(&mut picker, KeyCode::Enter) } else { press(&mut picker, keys) };
+            assert_eq!(outcome, None, "{keys:?}");
+            assert!(status(&picker).contains("gone"), "{keys:?}: {}", status(&picker));
+            assert_eq!(previews(&picker), vec!["keep"], "{keys:?}: the list is reloaded");
+            assert_eq!(key(&mut picker, KeyCode::Enter), Some(Outcome::Selected("keep".to_string())));
+        }
     }
 
     #[test]
