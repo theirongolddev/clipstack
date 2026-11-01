@@ -82,6 +82,18 @@ impl IngestPolicy {
         self.user_patterns
     }
 
+    /// One-line reason for a skip log or message. Never includes content.
+    pub fn describe_skip(&self, reason: &SkipReason) -> String {
+        match reason {
+            SkipReason::Empty => "empty".to_string(),
+            SkipReason::Sensitive => "marked sensitive by a password manager".to_string(),
+            SkipReason::IgnoredPattern { index } => format!("matches {}", self.pattern_label(*index)),
+            SkipReason::TooLarge { size, limit } => {
+                format!("too large ({size} bytes; max_entry_bytes is {limit})")
+            }
+        }
+    }
+
     /// Total patterns, user and built-in.
     pub fn pattern_count(&self) -> usize {
         self.ignore.len()
@@ -110,6 +122,25 @@ pub enum SkipReason {
     TooLarge { size: usize, limit: usize },
 }
 
+/// Offer mime type that password managers set on secrets.
+pub const PASSWORD_HINT_MIME: &str = "x-kde-passwordManagerHint";
+
+/// Why `content` must not be saved, or `None`. Pure; checks run in order:
+/// empty, password-manager hint, size, ignore patterns (only on content
+/// within the size cap, so regex work is bounded).
+pub fn classify(content: &str, mime_types: &[String], policy: &IngestPolicy) -> Option<SkipReason> {
+    if content.is_empty() {
+        return Some(SkipReason::Empty);
+    }
+    if mime_types.iter().any(|t| t == PASSWORD_HINT_MIME) {
+        return Some(SkipReason::Sensitive);
+    }
+    if content.len() > policy.max_entry_bytes {
+        return Some(SkipReason::TooLarge { size: content.len(), limit: policy.max_entry_bytes });
+    }
+    policy.ignored_by(content).map(|index| SkipReason::IgnoredPattern { index })
+}
+
 /// Preview length in characters.
 pub const MAX_PREVIEW_CHARS: usize = 100;
 
@@ -136,6 +167,9 @@ impl Storage {
         mime_types: &[String],
         now_ms: i64,
     ) -> Result<IngestOutcome> {
+        if let Some(reason) = classify(content, mime_types, &self.policy) {
+            return Ok(IngestOutcome::Skipped(reason));
+        }
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (entry, inserted) = insert_or_bump(&tx, content, source, mime_types, now_ms)?;
@@ -308,5 +342,87 @@ mod tests {
             assert_eq!(&storage.load_content(entry.id).unwrap(), content);
             assert_eq!(entry.size, content.len());
         }
+    }
+
+    fn storage_with(policy: IngestPolicy) -> (Storage, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::open(dir.path().to_path_buf(), None, policy).unwrap();
+        (storage, dir)
+    }
+
+    fn policy(patterns: &[&str], max_entry_bytes: usize) -> IngestPolicy {
+        IngestPolicy::new(RegexSet::new(patterns).unwrap(), patterns.len(), max_entry_bytes, 1 << 20, None)
+    }
+
+    fn entry_count(storage: &Storage) -> i64 {
+        storage.with_conn(|c| c.query_row("SELECT count(*) FROM entries", [], |r| r.get(0)).unwrap())
+    }
+
+    #[test]
+    fn empty_is_skipped() {
+        let (storage, _dir) = test_storage();
+        assert_eq!(
+            storage.ingest_at("", Source::Copy, &[], 1).unwrap(),
+            IngestOutcome::Skipped(SkipReason::Empty)
+        );
+        assert_eq!(entry_count(&storage), 0);
+    }
+
+    #[test]
+    fn password_hint_mime_is_skipped() {
+        let (storage, _dir) = test_storage();
+        let types = vec!["text/plain".to_string(), PASSWORD_HINT_MIME.to_string()];
+        assert_eq!(
+            storage.ingest_at("hunter2", Source::Watch, &types, 1).unwrap(),
+            IngestOutcome::Skipped(SkipReason::Sensitive)
+        );
+        assert_eq!(entry_count(&storage), 0);
+    }
+
+    #[test]
+    fn oversize_is_skipped() {
+        let (storage, _dir) = storage_with(policy(&[], 16));
+        assert_eq!(
+            storage.ingest_at(&"x".repeat(17), Source::Copy, &[], 1).unwrap(),
+            IngestOutcome::Skipped(SkipReason::TooLarge { size: 17, limit: 16 })
+        );
+        assert!(matches!(
+            storage.ingest_at(&"x".repeat(16), Source::Copy, &[], 2).unwrap(),
+            IngestOutcome::Inserted(_)
+        ));
+        assert_eq!(entry_count(&storage), 1);
+    }
+
+    #[test]
+    fn ignore_pattern_match_is_skipped() {
+        let policy = policy(&["^never$", "(?i)password:"], 1024);
+        let label = policy.pattern_label(1);
+        let (storage, _dir) = storage_with(policy);
+        let outcome = storage.ingest_at("Password: hunter2", Source::Copy, &[], 1).unwrap();
+        assert_eq!(outcome, IngestOutcome::Skipped(SkipReason::IgnoredPattern { index: 1 }));
+        assert_eq!(label, "ignore_patterns[1]");
+        let IngestOutcome::Skipped(reason) = outcome else { unreachable!() };
+        assert!(storage.policy().describe_skip(&reason).contains("ignore_patterns[1]"));
+        assert!(matches!(
+            storage.ingest_at("just text", Source::Copy, &[], 2).unwrap(),
+            IngestOutcome::Inserted(_)
+        ));
+        assert_eq!(entry_count(&storage), 1);
+    }
+
+    #[test]
+    fn classify_order_sensitive_before_size() {
+        let policy = policy(&["secret"], 8);
+        let hint = vec![PASSWORD_HINT_MIME.to_string()];
+        let big_secret = "secret ".repeat(10);
+        assert_eq!(classify("", &hint, &policy), Some(SkipReason::Empty));
+        assert_eq!(classify(&big_secret, &hint, &policy), Some(SkipReason::Sensitive));
+        assert_eq!(
+            classify(&big_secret, &[], &policy),
+            Some(SkipReason::TooLarge { size: 70, limit: 8 }),
+            "size is checked before patterns"
+        );
+        assert_eq!(classify("secret", &[], &policy), Some(SkipReason::IgnoredPattern { index: 0 }));
+        assert_eq!(classify("fine", &[], &policy), None);
     }
 }
