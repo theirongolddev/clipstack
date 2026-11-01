@@ -224,6 +224,11 @@ impl Storage {
         Ok(file)
     }
 
+    /// Whether an index file has been written yet
+    pub fn index_exists(&self) -> bool {
+        self.index_path().exists()
+    }
+
     pub fn base_dir(&self) -> &PathBuf {
         &self.base_dir
     }

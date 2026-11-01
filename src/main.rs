@@ -207,7 +207,7 @@ fn main() -> Result<()> {
                 "  Regular:   {}/{} ({})",
                 unpinned_count,
                 storage.max_entries(),
-                limit_source.label()
+                limit_source.label(storage.index_exists())
             );
             println!("Total size:  {}", util::format_size(total_size));
 
@@ -257,11 +257,13 @@ enum LimitSource {
 }
 
 impl LimitSource {
-    fn label(self) -> &'static str {
+    /// `index_exists`: whether a stored limit could have come from index.json
+    fn label(self, index_exists: bool) -> &'static str {
         match self {
             LimitSource::Cli => "--max-entries",
             LimitSource::Env => "CLIPSTACK_MAX_ENTRIES",
-            LimitSource::Stored => "saved",
+            LimitSource::Stored if index_exists => "saved",
+            LimitSource::Stored => "default",
         }
     }
 }
@@ -336,7 +338,7 @@ fn print_status(storage: &storage::Storage, limit_source: LimitSource) -> Result
     println!(
         "  Max entries: {} ({})",
         storage.max_entries(),
-        limit_source.label()
+        limit_source.label(storage.index_exists())
     );
 
     println!();
@@ -467,6 +469,14 @@ mod tests {
     fn test_resolve_limit_ignores_invalid_env() {
         // Unparseable env must not override the stored limit
         assert_eq!(resolve_max_entries(None, Some("lots")), (None, LimitSource::Stored));
+    }
+
+    #[test]
+    fn test_limit_label_distinguishes_saved_from_default() {
+        assert_eq!(LimitSource::Stored.label(true), "saved");
+        assert_eq!(LimitSource::Stored.label(false), "default");
+        assert_eq!(LimitSource::Cli.label(false), "--max-entries");
+        assert_eq!(LimitSource::Env.label(true), "CLIPSTACK_MAX_ENTRIES");
     }
 
     #[test]
