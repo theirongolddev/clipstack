@@ -128,7 +128,14 @@ impl Picker {
     }
 
     /// Two-phase search: first search previews (fast), then full content (lazy load)
+    ///
+    /// Performance limits to prevent UI freezes:
+    /// - Stop content search after MAX_CONTENT_MATCHES matches found
+    /// - Stop content search after MAX_FILE_LOADS files loaded
     fn filter_entries(&self, query: &str) -> Vec<FilteredEntry> {
+        const MAX_CONTENT_MATCHES: usize = 10;
+        const MAX_FILE_LOADS: usize = 50;
+
         let mut results: Vec<FilteredEntry> = Vec::new();
 
         // Phase 1: Search previews (always available, fast)
@@ -143,14 +150,24 @@ impl Picker {
         }
 
         // Phase 2: For entries not matched in preview, search full content
+        // Limited to prevent performance degradation with large histories
         let preview_matched: HashSet<usize> = results.iter().map(|r| r.index).collect();
 
+        let mut content_matches = 0;
+        let mut file_loads = 0;
+
         for (idx, entry) in self.entries.iter().enumerate() {
+            // Stop if we've hit either limit
+            if content_matches >= MAX_CONTENT_MATCHES || file_loads >= MAX_FILE_LOADS {
+                break;
+            }
+
             if preview_matched.contains(&idx) {
                 continue; // Already matched in preview
             }
 
             // Lazy load content only when needed
+            file_loads += 1;
             if let Ok(content) = self.storage.load_content(&entry.id)
                 && let Some(score) = self.matcher.fuzzy_match(&content, query)
             {
@@ -159,6 +176,7 @@ impl Picker {
                     score,
                     match_location: MatchLocation::Content,
                 });
+                content_matches += 1;
             }
         }
 
