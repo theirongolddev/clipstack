@@ -32,7 +32,8 @@ pub fn format_relative_time(timestamp: i64) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let diff_secs = (now - timestamp) / 1000;
+    // Clamp to 0 to handle future timestamps (clock skew)
+    let diff_secs = ((now - timestamp) / 1000).max(0);
 
     match diff_secs {
         0..=59 => format!("{}s ago", diff_secs),
@@ -77,5 +78,17 @@ mod tests {
 
         // 3 days ago
         assert_eq!(format_relative_time(now - 259_200_000), "3d ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_future() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Future timestamp (clock skew) should show "0s ago" not negative
+        assert_eq!(format_relative_time(now + 60_000), "0s ago");
+        assert_eq!(format_relative_time(now + 3_600_000), "0s ago");
     }
 }
