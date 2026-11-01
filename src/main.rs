@@ -302,25 +302,58 @@ fn generate_completions(shell: Shell) {
     generate(shell, &mut cmd, name, &mut io::stdout());
 }
 
+/// Maximum size for incoming TCP data (10MB)
+const MAX_TCP_CONTENT_SIZE: usize = 10 * 1024 * 1024;
+
 fn serve_clipboard(storage: storage::Storage, port: u16) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("Clipboard server listening on {}", addr);
     eprintln!("SSH usage: ssh -R {}:localhost:{} remote", port, port);
     eprintln!("Remote usage: cat file | nc localhost {}", port);
+    eprintln!("Max content size: {} bytes", MAX_TCP_CONTENT_SIZE);
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut content = String::new();
-                if let Err(e) = stream.read_to_string(&mut content) {
-                    eprintln!("Error reading from connection: {}", e);
+                // Read with size limit to prevent memory exhaustion attacks
+                let mut content = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let mut total_read = 0;
+
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            total_read += n;
+                            if total_read > MAX_TCP_CONTENT_SIZE {
+                                eprintln!(
+                                    "Connection rejected: content exceeds {} byte limit",
+                                    MAX_TCP_CONTENT_SIZE
+                                );
+                                break;
+                            }
+                            content.extend_from_slice(&buffer[..n]);
+                        }
+                        Err(e) => {
+                            eprintln!("Error reading from connection: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                if total_read > MAX_TCP_CONTENT_SIZE || content.is_empty() {
                     continue;
                 }
 
-                if content.is_empty() {
-                    continue;
-                }
+                // Convert to string, rejecting non-UTF-8 content
+                let content = match String::from_utf8(content) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        eprintln!("Rejected non-UTF-8 content");
+                        continue;
+                    }
+                };
 
                 // Save to storage and clipboard
                 match storage.save_entry(&content) {
