@@ -692,10 +692,10 @@ impl Supervisor { pub fn on(&mut self, ev: Event) -> Action; }
 
 **Poller:**
 - Every `poll_interval_ms`, `paste_text()`. When the content hash changes, `list_types()` and `ingest(Source::Poll, &types)`.
-- If the types include the password hint, record the hash anyway so the same secret isn't re-read on every tick.
+- The hash is recorded only after `ingest` returns `Ok` (inserted, bumped or skipped, so a skipped secret isn't re-read on every tick). An ingest error leaves it unrecorded, so the next tick retries the same clip.
 - Capture logs (`[watch]`, `[poll]`) give the entry id, byte size or skip reason, never a content preview.
 
-**Periodic expire:** the daemon tick calls `storage.expire()` every 60 seconds, so secrets age out even when nothing new is copied. `expire()` takes the write lock only when a cheap read finds something to delete, so the short interval costs one query a minute.
+**Periodic expire:** the daemon tick calls `storage.expire()` every 60 seconds, so secrets age out even when nothing new is copied, then `storage.retry_pending_scrub()` (see "Deleting secrets" in Step 1). `expire()` takes the write lock only when a cheap read finds something to delete, so the short interval costs one query a minute.
 
 **Socket server:**
 - After the lock is acquired, `remove_file(sock)` (a stale socket from a crash), bind, then `chmod 0600`. A path that isn't a socket, or a socket that still accepts connections (some other process), is left alone and the socket is disabled with a warning. The runtime dir is already `0700`, so the gap between bind and chmod doesn't matter.

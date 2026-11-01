@@ -368,8 +368,21 @@ impl Poller {
     }
 
     /// Save `content` if it differs from the last poll. The hash is recorded
-    /// even when ingest skips it, so a secret isn't re-read on every tick.
+    /// once ingest returns, even when it skips the content, so a secret isn't
+    /// re-read on every tick; after an ingest error it isn't, so the next
+    /// poll retries.
     pub fn observe(&mut self, storage: &Storage, content: &str, types: impl FnOnce() -> Vec<String>) {
+        self.observe_with(storage, content, types, |c, t| storage.ingest(c, Source::Poll, t));
+    }
+
+    /// `observe` with the ingest call injected, so tests can make it fail.
+    pub(crate) fn observe_with(
+        &mut self,
+        storage: &Storage,
+        content: &str,
+        types: impl FnOnce() -> Vec<String>,
+        ingest: impl FnOnce(&str, &[String]) -> Result<IngestOutcome>,
+    ) {
         if content.is_empty() {
             return;
         }
@@ -377,10 +390,13 @@ impl Poller {
         if self.last_hash.as_ref() == Some(&hash) {
             return;
         }
-        self.last_hash = Some(hash);
-        match storage.ingest(content, Source::Poll, &types()) {
-            Ok(outcome) => log_outcome("poll", storage, &outcome),
-            Err(e) => eprintln!("[poll] error saving entry: {e:#}"),
+        match ingest(content, &types()) {
+            Ok(outcome) => {
+                // Only now: a failed ingest is retried on the next tick
+                self.last_hash = Some(hash);
+                log_outcome("poll", storage, &outcome);
+            }
+            Err(e) => eprintln!("[poll] error saving entry (retrying next poll): {e:#}"),
         }
     }
 }
@@ -505,6 +521,28 @@ mod tests {
         assert_eq!(entries[0].source, Source::Poll);
         assert_eq!(entries[0].mime, "text/html");
         assert_eq!(storage.load_content(entries[0].id).unwrap(), "copied text");
+    }
+
+    #[test]
+    fn poller_retries_content_whose_ingest_failed() {
+        let (storage, _dir) = crate::storage::test_storage();
+        let mut poller = Poller::new(Duration::from_millis(250));
+        let mut attempts = 0;
+        let store = &storage;
+        let ingest = |fail: bool| {
+            move |content: &str, types: &[String]| -> Result<IngestOutcome> {
+                if fail {
+                    anyhow::bail!("database is locked");
+                }
+                store.ingest(content, Source::Poll, types)
+            }
+        };
+        poller.observe_with(&storage, "copied text", || { attempts += 1; Vec::new() }, ingest(true));
+        poller.observe_with(&storage, "copied text", || { attempts += 1; Vec::new() }, ingest(false));
+        assert_eq!(attempts, 2, "a failed ingest is retried on the next tick");
+        poller.observe_with(&storage, "copied text", || { attempts += 1; Vec::new() }, ingest(false));
+        assert_eq!(attempts, 2, "a saved clip is not re-read");
+        assert_eq!(storage.list(crate::storage::ListOrder::Recency, None).unwrap().len(), 1);
     }
 
     #[test]
