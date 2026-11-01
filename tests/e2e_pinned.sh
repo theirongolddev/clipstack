@@ -86,15 +86,17 @@ fi
 log_info "Test directory: $TEST_DIR"
 
 # Test 1: Index has pinned field
-log_info "Test 1: Index supports pinned field"
+log_info "Test 1: Pinned flag is imported"
 mkdir -p "$TEST_DIR/test1"
-ENTRY1=$(create_entry_with_content "$TEST_DIR/test1" "entry1" "1700000001000" "false")
-build_index "$TEST_DIR/test1" 100 "$ENTRY1"
+ENTRY1A=$(create_entry_with_content "$TEST_DIR/test1" "entry1" "1700000001000" "false")
+ENTRY1B=$(create_entry_with_content "$TEST_DIR/test1" "entry2" "1700000002000" "true")
+build_index "$TEST_DIR/test1" 100 "$ENTRY1B" "$ENTRY1A"
 
-if fgrep -q 'pinned' "$TEST_DIR/test1/index.json"; then
-    log_pass "Pinned field present in index"
+if $CLIPSTACK --storage-dir "$TEST_DIR/test1" export | \
+    jq -e -s 'map({content, pinned}) == [{"content":"entry1","pinned":false},{"content":"entry2","pinned":true}]' >/dev/null; then
+    log_pass "Pinned flag carried over by the import"
 else
-    log_fail "Pinned field missing from index"
+    log_fail "Pinned flag lost by the import"
 fi
 
 # Test 2: Pinned entries survive pruning
@@ -116,12 +118,17 @@ build_index "$TEST_DIR/test2" 10 "${ENTRIES[@]}"
 # Access with max=10, which should prune unpinned but keep pinned
 $CLIPSTACK --storage-dir "$TEST_DIR/test2" --max-entries 10 stats >/dev/null 2>&1
 
-# Check pinned entry survives (use fgrep which handles the ID better)
-if fgrep -q '1700000000100' "$TEST_DIR/test2/index.json"; then
+# Check pinned entry survives, and 10 unpinned entries are kept besides it
+EXPORT2=$($CLIPSTACK --storage-dir "$TEST_DIR/test2" --max-entries 10 export | jq -s .)
+if echo "$EXPORT2" | jq -e 'any(.[]; .content == "keep me forever" and .pinned)' >/dev/null; then
     log_pass "Pinned entry survived pruning"
 else
     log_fail "Pinned entry was incorrectly pruned"
 fi
+UNPINNED2=$(echo "$EXPORT2" | jq '[.[] | select(.pinned | not)] | length')
+[[ "$UNPINNED2" -eq 10 ]] && \
+    log_pass "Pruned to 10 unpinned entries" || \
+    log_fail "Expected 10 unpinned entries, got $UNPINNED2"
 
 # Test 3: Backwards compatibility (old index without pinned field)
 log_info "Test 3: Backwards compatibility with old format"
@@ -160,9 +167,8 @@ build_index "$TEST_DIR/test4" 10 "${ENTRIES4[@]}"
 # Access with max=10 (should prune only unpinned entries)
 $CLIPSTACK --storage-dir "$TEST_DIR/test4" --max-entries 10 stats >/dev/null 2>&1
 
-# Count remaining pinned entries (look for "pinned": true with flexible whitespace)
-PINNED_COUNT=$(fgrep -c '"pinned": true' "$TEST_DIR/test4/index.json" 2>/dev/null || \
-               fgrep -c '"pinned":true' "$TEST_DIR/test4/index.json" 2>/dev/null || echo 0)
+# Count remaining pinned entries
+PINNED_COUNT=$($CLIPSTACK --storage-dir "$TEST_DIR/test4" --max-entries 10 export | jq -s 'map(select(.pinned)) | length')
 [[ "$PINNED_COUNT" -eq 5 ]] && \
     log_pass "All 5 pinned entries preserved" || \
     log_fail "Expected 5 pinned, got $PINNED_COUNT"
@@ -170,14 +176,14 @@ PINNED_COUNT=$(fgrep -c '"pinned": true' "$TEST_DIR/test4/index.json" 2>/dev/nul
 # Test 5: Verify stats command works with pinned entries
 log_info "Test 5: Stats command with pinned entries"
 STATS_OUTPUT=$($CLIPSTACK --storage-dir "$TEST_DIR/test4" --max-entries 10 stats 2>/dev/null)
-echo "$STATS_OUTPUT" | fgrep -q "Entries:" && \
+echo "$STATS_OUTPUT" | grep -Fq "Entries:" && \
     log_pass "Stats outputs with pinned storage" || \
     log_fail "Stats failed with pinned entries"
 
 # Test 6: List command shows entries correctly
 log_info "Test 6: List command with pinned entries"
 LIST_OUTPUT=$($CLIPSTACK --storage-dir "$TEST_DIR/test4" --max-entries 10 list 2>/dev/null)
-if echo "$LIST_OUTPUT" | fgrep -q "pinned"; then
+if echo "$LIST_OUTPUT" | grep -Fq "pinned"; then
     log_pass "List shows entry previews"
 else
     log_fail "List doesn't show entry previews"
@@ -186,7 +192,7 @@ fi
 # Test 7: Stats shows pinned count
 log_info "Test 7: Stats shows pinned count"
 STATS_OUTPUT=$($CLIPSTACK --storage-dir "$TEST_DIR/test4" --max-entries 10 stats 2>/dev/null)
-if echo "$STATS_OUTPUT" | fgrep -q "Pinned:"; then
+if echo "$STATS_OUTPUT" | grep -Fq "Pinned:"; then
     log_pass "Stats shows pinned count"
 else
     log_fail "Stats should show pinned count"

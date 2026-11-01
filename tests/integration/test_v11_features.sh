@@ -71,6 +71,13 @@ if [[ ! -f "$CLIPSTACK" ]]; then
 fi
 
 log_info "v1.1 Features Integration Test"
+
+# All entries of the store at $1 as one JSON array (imports legacy files first)
+exported() {
+    local dir="$1"
+    shift
+    $CLIPSTACK --storage-dir "$dir" "$@" export | jq -s .
+}
 log_info "Test directory: $TEST_DIR"
 echo ""
 
@@ -101,17 +108,18 @@ build_index "$TEST_DIR/test1" 100 "${ENTRIES1[@]}"
 $CLIPSTACK --storage-dir "$TEST_DIR/test1" --max-entries 20 stats >/dev/null 2>&1
 
 # Count remaining entries
-TOTAL=$(jq '.entries | length' "$TEST_DIR/test1/index.json")
-PINNED_COUNT=$(jq '[.entries[] | select(.pinned == true)] | length' "$TEST_DIR/test1/index.json")
+EXPORT1=$(exported "$TEST_DIR/test1" --max-entries 20)
+TOTAL=$(echo "$EXPORT1" | jq 'length')
+PINNED_COUNT=$(echo "$EXPORT1" | jq 'map(select(.pinned)) | length')
 
 # All 5 pinned should survive, plus up to 20 unpinned
 [[ "$PINNED_COUNT" -eq 5 ]] && \
     log_pass "All 5 pinned entries preserved" || \
     log_fail "Expected 5 pinned, got $PINNED_COUNT"
 
-[[ "$TOTAL" -le 25 ]] && \
+[[ "$TOTAL" -eq 25 ]] && \
     log_pass "Total entries respects limit ($TOTAL entries)" || \
-    log_fail "Expected <= 25 total, got $TOTAL"
+    log_fail "Expected 25 total, got $TOTAL"
 
 # ============================================================================
 # Test 2: Search finds both preview and content matches with pinned indicator
@@ -129,20 +137,18 @@ ENTRY_UNPINNED=$(create_entry "$TEST_DIR/test2" "PREVIEW_SEARCH_TERM visible" "1
 
 build_index "$TEST_DIR/test2" 100 "$ENTRY_UNPINNED" "$ENTRY_PINNED"
 
-# Verify search term is in content file but not preview for pinned
-if ! grep -q "DEEP_SEARCH_TERM" "$TEST_DIR/test2/index.json" 2>/dev/null; then
-    if grep -q "DEEP_SEARCH_TERM" "$TEST_DIR/test2/1700000001000.txt"; then
-        log_pass "Deep search term in content file, not preview (searchable)"
-    else
-        log_fail "Deep search term not found in content file"
-    fi
+# Verify search term is in the stored content but not the preview
+EXPORT2=$(exported "$TEST_DIR/test2")
+if $CLIPSTACK --storage-dir "$TEST_DIR/test2" list 2>/dev/null | grep -q "DEEP_SEARCH_TERM"; then
+    log_fail "Deep search term should be beyond the preview"
+elif echo "$EXPORT2" | jq -e --arg c "$PINNED_DEEP_CONTENT" 'any(.[]; .content == $c)' >/dev/null; then
+    log_pass "Deep search term in content, not preview (searchable)"
 else
-    # If it's in preview, that's still fine
-    log_pass "Search term accessible (in preview)"
+    log_fail "Deep search term not found in content"
 fi
 
 # Verify pinned entry is marked correctly
-if jq -e '.entries[] | select(.id == "1700000001000" and .pinned == true)' "$TEST_DIR/test2/index.json" >/dev/null; then
+if echo "$EXPORT2" | jq -e --arg c "$PINNED_DEEP_CONTENT" 'any(.[]; .content == $c and .pinned)' >/dev/null; then
     log_pass "Pinned entry correctly marked for search results"
 else
     log_fail "Pinned entry not marked correctly"
@@ -164,13 +170,13 @@ ENTRY_LONG=$(create_entry "$TEST_DIR/test3" "$LONG_CONTENT" "1700000001000" "tru
 build_index "$TEST_DIR/test3" 100 "$ENTRY_LONG"
 
 # Verify full content stored
-LINE_COUNT=$(wc -l < "$TEST_DIR/test3/1700000001000.txt")
-[[ "$LINE_COUNT" -ge 500 ]] && \
-    log_pass "Long pinned content fully stored ($LINE_COUNT lines)" || \
-    log_fail "Content truncated, expected 500+ lines, got $LINE_COUNT"
+EXPORT3=$(exported "$TEST_DIR/test3")
+echo "$EXPORT3" | jq -e --arg c "$LONG_CONTENT" '.[0].content == $c' >/dev/null && \
+    log_pass "Long pinned content fully stored (500 lines)" || \
+    log_fail "Content truncated or changed"
 
 # Verify entry is still pinned
-if jq -e '.entries[0].pinned == true' "$TEST_DIR/test3/index.json" >/dev/null; then
+if echo "$EXPORT3" | jq -e '.[0].pinned == true' >/dev/null; then
     log_pass "Long content entry remains pinned"
 else
     log_fail "Pinned status lost on long content"
@@ -179,7 +185,7 @@ fi
 # ============================================================================
 # Test 4: Atomic writes + Pin toggle (no corruption)
 # ============================================================================
-log_info "Test 4: Concurrent pin toggles maintain index integrity"
+log_info "Test 4: Import survives an index.json raced by old-version writers"
 mkdir -p "$TEST_DIR/test4"
 ENTRY=$(create_entry "$TEST_DIR/test4" "toggle me" "1700000001000" "false")
 build_index "$TEST_DIR/test4" 100 "$ENTRY"
@@ -197,17 +203,19 @@ for i in {1..20}; do
 done
 wait
 
-# Verify index is valid JSON (not corrupted)
-if jq -e '.' "$TEST_DIR/test4/index.json" >/dev/null 2>&1; then
-    log_pass "Index valid after rapid pin toggles"
+# Whatever the racing writers left in index.json, the content is imported once
+EXPORT4=$(exported "$TEST_DIR/test4")
+if echo "$EXPORT4" | jq -e 'length == 1 and .[0].content == "toggle me"' >/dev/null && \
+    $CLIPSTACK --storage-dir "$TEST_DIR/test4" check >/dev/null 2>&1; then
+    log_pass "Entry imported once after rapid pin toggles; check passes"
 else
-    log_fail "Index corrupted after pin toggles"
+    log_fail "Import after pin toggles gave: $EXPORT4"
 fi
 
 # ============================================================================
 # Test 5: Recovery works with pinned entries
 # ============================================================================
-log_info "Test 5: Recovery handles pinned entries"
+log_info "Test 5: Import and recover handle pinned entries"
 mkdir -p "$TEST_DIR/test5"
 
 # Create entries with content files
@@ -218,21 +226,22 @@ build_index "$TEST_DIR/test5" 100 "$ENTRY2" "$ENTRY1"
 # Create orphan temp file (simulating interrupted write)
 echo '{"max_entries":100,"entries":[]}' > "$TEST_DIR/test5/index.json.tmp"
 
-# Run recovery
-$CLIPSTACK --storage-dir "$TEST_DIR/test5" recover >/dev/null 2>&1
+# Run recovery (the import runs first, on open)
+RECOVER=$($CLIPSTACK --storage-dir "$TEST_DIR/test5" recover 2>/dev/null) || true
 
-# Verify temp file cleaned up
-if [[ ! -f "$TEST_DIR/test5/index.json.tmp" ]]; then
-    log_pass "Recovery cleaned temp files"
+# Verify the temp file moved to the backup
+if [[ ! -f "$TEST_DIR/test5/index.json.tmp" ]] && \
+    find "$TEST_DIR/test5" -path '*/legacy-backup-*/index.json.tmp' | grep -q .; then
+    log_pass "Temp file moved to the legacy backup"
 else
-    log_fail "Temp file not cleaned"
+    log_fail "Temp file not moved to the backup"
 fi
 
-# Verify index still valid with entries
-ENTRY_COUNT=$(jq '.entries | length' "$TEST_DIR/test5/index.json")
-[[ "$ENTRY_COUNT" -ge 1 ]] && \
-    log_pass "Entries preserved after recovery ($ENTRY_COUNT)" || \
-    log_fail "Entries lost after recovery"
+# Verify both entries kept, with their pinned flags
+echo "$RECOVER" | grep -q "Recovery complete. 2 entries." && \
+    exported "$TEST_DIR/test5" | jq -e 'map({content, pinned}) == [{"content":"recoverable pinned","pinned":true},{"content":"recoverable unpinned","pinned":false}]' >/dev/null && \
+    log_pass "Entries preserved after recovery (2)" || \
+    log_fail "Entries lost after recovery: $RECOVER"
 
 # ============================================================================
 # Test 6: All features respect CLI max_entries flag
@@ -252,11 +261,11 @@ build_index "$TEST_DIR/test6" 100 "${ENTRIES6[@]}"
 # Run stats with --max-entries 15
 OUTPUT=$($CLIPSTACK --storage-dir "$TEST_DIR/test6" --max-entries 15 stats 2>/dev/null)
 
-# Verify max_entries was applied (check index was pruned)
-REMAINING=$(jq '.entries | length' "$TEST_DIR/test6/index.json")
-[[ "$REMAINING" -le 15 ]] && \
+# Verify max_entries was applied
+REMAINING=$(exported "$TEST_DIR/test6" --max-entries 15 | jq 'length')
+[[ "$REMAINING" -eq 15 ]] && \
     log_pass "CLI --max-entries enforced ($REMAINING entries)" || \
-    log_fail "Expected <= 15 entries, got $REMAINING"
+    log_fail "Expected 15 entries, got $REMAINING"
 
 # ============================================================================
 # Test 7: Environment variable max entries
@@ -277,10 +286,10 @@ build_index "$TEST_DIR/test7" 100 "${ENTRIES7[@]}"
 CLIPSTACK_MAX_ENTRIES=10 $CLIPSTACK --storage-dir "$TEST_DIR/test7" stats >/dev/null 2>&1
 
 # Verify pruning occurred
-REMAINING=$(jq '.entries | length' "$TEST_DIR/test7/index.json")
-[[ "$REMAINING" -le 10 ]] && \
+REMAINING=$(CLIPSTACK_MAX_ENTRIES=10 exported "$TEST_DIR/test7" | jq 'length')
+[[ "$REMAINING" -eq 10 ]] && \
     log_pass "CLIPSTACK_MAX_ENTRIES env var enforced ($REMAINING entries)" || \
-    log_fail "Expected <= 10 entries, got $REMAINING"
+    log_fail "Expected 10 entries, got $REMAINING"
 
 # ============================================================================
 # Test 8: Pinned entry limit (MAX_PINNED=25)
@@ -300,11 +309,11 @@ build_index "$TEST_DIR/test8" 100 "${ENTRIES8[@]}"
 # Run stats (which triggers pruning logic)
 $CLIPSTACK --storage-dir "$TEST_DIR/test8" --max-entries 100 stats >/dev/null 2>&1
 
-# Check pinned count doesn't exceed limit (25)
-PINNED_COUNT=$(jq '[.entries[] | select(.pinned == true)] | length' "$TEST_DIR/test8/index.json")
-# Note: Current implementation may not enforce MAX_PINNED during stats, this tests the concept
-[[ "$PINNED_COUNT" -le 30 ]] && \
-    log_pass "Pinned entries tracked ($PINNED_COUNT pinned)" || \
+# The import keeps every pinned entry, even past MAX_PINNED (25): it never
+# drops data. MAX_PINNED applies when pinning, not to imported pins.
+PINNED_COUNT=$(exported "$TEST_DIR/test8" --max-entries 100 | jq 'map(select(.pinned)) | length')
+[[ "$PINNED_COUNT" -eq 30 ]] && \
+    log_pass "All imported pins kept ($PINNED_COUNT pinned)" || \
     log_fail "Unexpected pinned count: $PINNED_COUNT"
 
 # ============================================================================

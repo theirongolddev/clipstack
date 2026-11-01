@@ -131,48 +131,34 @@ for _ in {1..20}; do
 done
 wait
 
-# Verify integrity
-if $CLIPSTACK --storage-dir "$TEST_DIR/test3" stats >/dev/null 2>&1; then
-    log_pass "Concurrent reads: No corruption after 40 concurrent accesses"
+# Verify integrity: the 40 racing first opens imported the store exactly once
+COUNT=$($CLIPSTACK --storage-dir "$TEST_DIR/test3" export | jq -s 'length')
+BACKUPS=$(find "$TEST_DIR/test3" -maxdepth 1 -type d -name 'legacy-backup-*' | wc -l)
+if [[ "$COUNT" -eq 50 && "$BACKUPS" -eq 1 ]] && \
+    $CLIPSTACK --storage-dir "$TEST_DIR/test3" check >/dev/null 2>&1; then
+    log_pass "Concurrent reads: 40 racing first opens imported once, check passes"
 else
-    log_fail "Storage corrupted after concurrent reads"
+    log_fail "Concurrent first opens: $COUNT entries, $BACKUPS backups (expected 50 and 1)"
 fi
 
-# Test 4: Atomic writes during concurrent access
-log_info "Test 4: Atomic writes during concurrent access"
+# Test 4: Concurrent writers lose nothing
+log_info "Test 4: Concurrent writes"
 mkdir -p "$TEST_DIR/test4"
-ENTRIES4=()
 for i in $(seq 1 20); do
-    TS=$((1700000000000 + i * 1000))
-    ENTRY=$(create_entry "$TEST_DIR/test4" "atomic test $i" "$TS" "false")
-    ENTRIES4=("$ENTRY" "${ENTRIES4[@]}")
-done
-build_index "$TEST_DIR/test4" 100 "${ENTRIES4[@]}"
-
-# Run concurrent reads while modifying index
-for i in {1..10}; do
-    # Modify index
-    if [ $((i % 2)) -eq 0 ]; then
-        sed -i 's/"pinned":false/"pinned":true/' "$TEST_DIR/test4/index.json" 2>/dev/null || true
-    else
-        sed -i 's/"pinned":true/"pinned":false/' "$TEST_DIR/test4/index.json" 2>/dev/null || true
-    fi
-    # Concurrent reads
-    $CLIPSTACK --storage-dir "$TEST_DIR/test4" stats >/dev/null 2>&1 &
+    printf 'concurrent write %s' "$i" | $CLIPSTACK --storage-dir "$TEST_DIR/test4" copy >/dev/null 2>&1 &
     $CLIPSTACK --storage-dir "$TEST_DIR/test4" list --count 5 >/dev/null 2>&1 &
 done
 wait
 
-# Verify no temp files left
-TMP_COUNT=$(find "$TEST_DIR/test4" -name "*.tmp" 2>/dev/null | wc -l)
-if [[ "$TMP_COUNT" -eq 0 ]]; then
-    log_pass "Atomic writes: No .tmp files after concurrent access"
+COUNT=$($CLIPSTACK --storage-dir "$TEST_DIR/test4" export | jq -s 'length')
+if [[ "$COUNT" -eq 20 ]] && $CLIPSTACK --storage-dir "$TEST_DIR/test4" check >/dev/null 2>&1; then
+    log_pass "Concurrent writes: all 20 copies saved, check passes"
 else
-    log_fail "Found $TMP_COUNT orphaned .tmp files"
+    log_fail "Concurrent writes: $COUNT of 20 copies saved"
 fi
 
-# Test 5: Recovery after simulated crash
-log_info "Test 5: Recovery after simulated crash"
+# Test 5: Leftovers of a crashed old version are imported and backed up
+log_info "Test 5: Import after a simulated crash of the old version"
 mkdir -p "$TEST_DIR/test5"
 
 # Create valid entries
@@ -185,15 +171,16 @@ done
 echo "orphan temp" > "$TEST_DIR/test5/index.tmp"
 echo '{"max_entries":100' > "$TEST_DIR/test5/partial.tmp"
 
-# Access storage (should clean up temp files)
-$CLIPSTACK --storage-dir "$TEST_DIR/test5" recover >/dev/null 2>&1 || true
-$CLIPSTACK --storage-dir "$TEST_DIR/test5" stats >/dev/null 2>&1 || true
+# Access storage: the import moves the .tmp files into the backup with the rest
+RECOVER=$($CLIPSTACK --storage-dir "$TEST_DIR/test5" recover 2>/dev/null) || true
 
-TMP_COUNT=$(find "$TEST_DIR/test5" -name "*.tmp" 2>/dev/null | wc -l)
-if [[ "$TMP_COUNT" -eq 0 ]]; then
-    log_pass "Crash recovery: Temp files cleaned up on startup"
+TMP_COUNT=$(find "$TEST_DIR/test5" -maxdepth 1 -name "*.tmp" 2>/dev/null | wc -l)
+BACKED_UP=$(find "$TEST_DIR/test5" -mindepth 2 -path '*/legacy-backup-*/*.tmp' 2>/dev/null | wc -l)
+if [[ "$TMP_COUNT" -eq 0 && "$BACKED_UP" -eq 2 ]] && \
+    echo "$RECOVER" | $GREP -q "Recovery complete. 5 entries."; then
+    log_pass "Crash leftovers: 5 entries imported, temp files moved to the backup"
 else
-    log_fail "Found $TMP_COUNT temp files after recovery"
+    log_fail "Found $TMP_COUNT temp files in the store, $BACKED_UP in the backup; recover said: $RECOVER"
 fi
 
 # Test 6: Storage respects max_entries with many saves
@@ -212,11 +199,11 @@ build_index "$TEST_DIR/test6" 100 "${ENTRIES6[@]}"
 $CLIPSTACK --storage-dir "$TEST_DIR/test6" --max-entries 20 stats >/dev/null 2>&1
 
 # Verify pruning worked
-COUNT=$($GREP -c '"id"' "$TEST_DIR/test6/index.json" 2>/dev/null || echo 0)
-if [[ "$COUNT" -le 22 ]]; then
+COUNT=$($CLIPSTACK --storage-dir "$TEST_DIR/test6" --max-entries 20 export | jq -s 'length')
+if [[ "$COUNT" -eq 20 ]]; then
     log_pass "Storage pruning: 100 entries pruned to $COUNT (max 20)"
 else
-    log_fail "Pruning failed: $COUNT entries remain (expected <=22)"
+    log_fail "Pruning failed: $COUNT entries remain (expected 20)"
 fi
 
 echo ""

@@ -597,7 +597,9 @@ Built-in secret patterns, active when `builtin_secret_patterns = true`:
 - **Rust integration** (`tests/migration_cli.rs`, TestEnv): build a legacy store fixture in a temp dir, run `stats`, `list`, `export`, `check` and `recover`, and assert backup contents and modes.
 - **Shell E2E:**
   - `e2e_atomic_writes.sh` becomes the storage-integrity suite (import, backup, check, permissions); keep the file name so it's easy to find.
-  - `e2e_search.sh`, `e2e_pinned.sh`, `e2e_preview.sh` and `integration/test_v11_features.sh` switch their assertions to `export | jq -s`.
+  - `e2e_search.sh`, `e2e_pinned.sh`, `e2e_preview.sh` and `integration/test_v11_features.sh` switch their assertions to `export | jq -s` (content compared exactly inside jq with `--arg`). Several of their old checks only read back the fixture files the script itself had written; those now go through the binary. `e2e_preview.sh` builds its fixture JSON with `jq` (it wrote invalid JSON for content with quotes or backslashes), and `e2e_pinned.sh` uses `grep -F` instead of the obsolescent `fgrep`.
+  - `integration/test_component_interaction.sh`: 40 racing first opens must import once (one backup dir); the index.json-rewriting "atomic writes" test becomes 20 concurrent `copy` writers that must all be saved; the crash test checks the `.tmp` leftovers land in the backup and `recover` reports the count.
+  - `integration/test_v11_features.sh` test 8 now asserts that all 30 imported pins are kept (the import never drops data; `MAX_PINNED` applies when pinning).
   - `e2e_max_entries.sh` is unchanged apart from fixture import.
   - All of them use `tests/lib.sh` isolation.
 - **Real store:** never opened. One manual check, after the step merges and only with the user's go-ahead: `cp -a ~/.local/share/clipd /tmp/clipd-copy && clipstack --storage-dir /tmp/clipd-copy check`.

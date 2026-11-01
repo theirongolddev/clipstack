@@ -89,11 +89,11 @@ mkdir -p "$TEST_DIR/test1"
 ENTRY1=$(create_entry_with_content "$TEST_DIR/test1" "unique_preview_text here" "1700000001000")
 build_index "$TEST_DIR/test1" "$ENTRY1"
 
-# Verify preview text is in index
-if /bin/grep -q "unique_preview_text" "$TEST_DIR/test1/index.json"; then
+# Verify the imported entry's preview shows in list
+if $CLIPSTACK --storage-dir "$TEST_DIR/test1" list 2>/dev/null | /bin/grep -q "unique_preview_text"; then
     log_pass "Preview text stored correctly"
 else
-    log_fail "Preview text not found in index"
+    log_fail "Preview text not found in list"
 fi
 
 # Test 2: Search finds content-only match (beyond preview length)
@@ -105,16 +105,16 @@ CONTENT="${LONG_PREFIX}findme_content_term_here"
 ENTRY2=$(create_entry_with_content "$TEST_DIR/test2" "$CONTENT" "1700000002000")
 build_index "$TEST_DIR/test2" "$ENTRY2"
 
-# Verify search term is NOT in preview but IS in content file
-if /bin/grep -q "findme_content" "$TEST_DIR/test2/index.json"; then
+# Verify search term is NOT in the preview but IS in the stored content
+if $CLIPSTACK --storage-dir "$TEST_DIR/test2" list 2>/dev/null | /bin/grep -q "findme_content"; then
     log_fail "Content-only term should not be in preview (too far into content)"
 fi
 
-# Verify term exists in content file
-if /bin/grep -q "findme_content_term" "$TEST_DIR/test2/1700000002000.txt"; then
-    log_pass "Content-only term stored in content file"
+if $CLIPSTACK --storage-dir "$TEST_DIR/test2" export | \
+    jq -e -s --arg c "$CONTENT" 'length == 1 and .[0].content == $c' >/dev/null; then
+    log_pass "Content-only term stored in full content"
 else
-    log_fail "Content-only term not found in content file"
+    log_fail "Full content not stored"
 fi
 
 # Test 3: Multiple entries available for search
@@ -127,26 +127,26 @@ sleep 0.01
 ENTRY3C=$(create_entry_with_content "$TEST_DIR/test3" "third entry with gamma" "1700000005000")
 build_index "$TEST_DIR/test3" "$ENTRY3C" "$ENTRY3B" "$ENTRY3A"  # Newest first
 
-ENTRY_COUNT=$(jq '.entries | length' "$TEST_DIR/test3/index.json")
+ENTRY_COUNT=$($CLIPSTACK --storage-dir "$TEST_DIR/test3" export | jq -s 'length')
 [[ "$ENTRY_COUNT" -eq 3 ]] && \
     log_pass "Multiple entries stored ($ENTRY_COUNT)" || \
     log_fail "Expected 3 entries, got $ENTRY_COUNT"
 
-# Test 4: Index structure supports search (has preview field)
-log_info "Test 4: Index structure supports search"
-if jq -e '.entries[0].preview' "$TEST_DIR/test3/index.json" > /dev/null; then
-    log_pass "Entries have preview field for search"
+# Test 4: Search index built for imported entries
+log_info "Test 4: Search index covers imported entries"
+if $CLIPSTACK --storage-dir "$TEST_DIR/test3" check | /bin/grep -q "^Search index: ok"; then
+    log_pass "Search index consistent with entries"
 else
-    log_fail "Entries missing preview field"
+    log_fail "Search index check failed"
 fi
 
-# Test 5: Hash field present for deduplication
-log_info "Test 5: Hash field present for deduplication"
-if jq -e '.entries[0].hash' "$TEST_DIR/test3/index.json" > /dev/null; then
-    log_pass "Entries have hash field"
-else
-    log_fail "Entries missing hash field"
-fi
+# Test 5: Copying existing content again doesn't add a duplicate
+log_info "Test 5: Re-copied content is deduplicated"
+printf '%s' "first entry with alpha" | $CLIPSTACK --storage-dir "$TEST_DIR/test3" copy 2>/dev/null
+NEWEST=$($CLIPSTACK --storage-dir "$TEST_DIR/test3" export | jq -s -r 'length, .[-1].content')
+[[ "$NEWEST" == $'3\nfirst entry with alpha' ]] && \
+    log_pass "Duplicate moved to the top instead of added" || \
+    log_fail "Expected 3 entries with the re-copied one newest, got: $NEWEST"
 
 # Test 6: Stats command works with search-ready storage
 log_info "Test 6: Stats command works with storage"
@@ -164,12 +164,13 @@ else
     log_fail "List doesn't show entry previews"
 fi
 
-# Test 8: Content can be loaded for deep search
-log_info "Test 8: Content files loadable"
-CONTENT_FILES=$(find "$TEST_DIR/test3" -name "*.txt" | wc -l)
-[[ "$CONTENT_FILES" -eq 3 ]] && \
-    log_pass "All content files present ($CONTENT_FILES)" || \
-    log_fail "Expected 3 content files, got $CONTENT_FILES"
+# Test 8: Content is stored in the database, not loose files
+log_info "Test 8: Content imported into the database"
+LOOSE_FILES=$(find "$TEST_DIR/test3" -maxdepth 1 -name "*.txt" | wc -l)
+CONTENTS=$($CLIPSTACK --storage-dir "$TEST_DIR/test3" export | jq -s -c 'map(.content) | sort')
+[[ "$LOOSE_FILES" -eq 0 && "$CONTENTS" == '["first entry with alpha","second entry with beta","third entry with gamma"]' ]] && \
+    log_pass "All content in the database; legacy files moved to the backup" || \
+    log_fail "Expected 0 loose files and 3 stored contents, got $LOOSE_FILES and $CONTENTS"
 
 echo ""
 echo -e "${GREEN}All E2E search tests passed!${NC}"

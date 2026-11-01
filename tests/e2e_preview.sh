@@ -49,9 +49,10 @@ create_entry_with_content() {
     local size
     size=${#content}
 
-    # Output JSON entry (to be collected)
-    printf '{"id":"%s","timestamp":%s,"size":%d,"preview":"%s","hash":"%s","pinned":false}' \
-        "$ts" "$ts" "$size" "$preview" "$hash"
+    # Output JSON entry (to be collected); jq escapes quotes and backslashes
+    jq -nc --arg id "$ts" --argjson ts "$ts" --argjson size "$size" \
+        --arg preview "$preview" --arg hash "$hash" \
+        '{id: $id, timestamp: $ts, size: $size, preview: $preview, hash: $hash, pinned: false}'
 }
 
 # Build index from entries
@@ -84,6 +85,13 @@ fi
 
 log_info "Test directory: $TEST_DIR"
 
+# True if the store at $1 holds exactly one entry whose content is exactly $2
+# (imports the legacy files on first use)
+content_matches() {
+    $CLIPSTACK --storage-dir "$1" export | \
+        jq -e -s --arg c "$2" 'length == 1 and .[0].content == $c' >/dev/null
+}
+
 # Test 1: Multi-line content storage and retrieval
 log_info "Test 1: Multi-line content storage"
 mkdir -p "$TEST_DIR/test1"
@@ -95,17 +103,11 @@ Line 5: Fifth line - this should all be stored"
 ENTRY1=$(create_entry_with_content "$TEST_DIR/test1" "$MULTILINE_CONTENT" "1700000001000")
 build_index "$TEST_DIR/test1" "$ENTRY1"
 
-# Check content file exists
-if [ -f "$TEST_DIR/test1/1700000001000.txt" ]; then
-    log_pass "Content file created"
+if content_matches "$TEST_DIR/test1" "$MULTILINE_CONTENT"; then
+    log_pass "All lines imported and stored"
 else
-    log_fail "Content file not created"
+    log_fail "Multi-line content changed by the import"
 fi
-
-LINE_COUNT=$(wc -l < "$TEST_DIR/test1/1700000001000.txt")
-[[ "$LINE_COUNT" -ge 4 ]] && \
-    log_pass "All lines stored in content file ($LINE_COUNT lines)" || \
-    log_fail "Expected at least 4 lines, got $LINE_COUNT"
 
 # Test 2: Long content beyond preview length (for scroll testing)
 log_info "Test 2: Long content beyond preview length"
@@ -119,14 +121,13 @@ done
 ENTRY2=$(create_entry_with_content "$TEST_DIR/test2" "$LONG_CONTENT" "1700000002000")
 build_index "$TEST_DIR/test2" "$ENTRY2"
 
-STORED_LINES=$(wc -l < "$TEST_DIR/test2/1700000002000.txt")
-[[ "$STORED_LINES" -ge 200 ]] && \
-    log_pass "Long content fully stored ($STORED_LINES lines)" || \
-    log_fail "Long content truncated, expected 200+ lines, got $STORED_LINES"
+content_matches "$TEST_DIR/test2" "$LONG_CONTENT" && \
+    log_pass "Long content fully stored (200 lines)" || \
+    log_fail "Long content truncated or changed"
 
 # Verify preview is truncated but content is full
-PREVIEW_LEN=$(jq -r '.entries[0].preview | length' "$TEST_DIR/test2/index.json")
-CONTENT_LEN=$(wc -c < "$TEST_DIR/test2/1700000002000.txt")
+PREVIEW_LEN=$($CLIPSTACK --storage-dir "$TEST_DIR/test2" list | head -1 | wc -c)
+CONTENT_LEN=$($CLIPSTACK --storage-dir "$TEST_DIR/test2" export | jq -s '.[0].size')
 [[ "$CONTENT_LEN" -gt "$PREVIEW_LEN" ]] && \
     log_pass "Full content ($CONTENT_LEN bytes) larger than preview ($PREVIEW_LEN chars)" || \
     log_fail "Content should be larger than preview"
@@ -141,8 +142,8 @@ Line 4: Mixed content abc123"
 ENTRY3=$(create_entry_with_content "$TEST_DIR/test3" "$UNICODE_CONTENT" "1700000003000")
 build_index "$TEST_DIR/test3" "$ENTRY3"
 
-# Verify content is readable
-$CLIPSTACK --storage-dir "$TEST_DIR/test3" stats >/dev/null 2>&1 && \
+# Verify content is readable and unchanged
+content_matches "$TEST_DIR/test3" "$UNICODE_CONTENT" && \
     log_pass "Unicode content handled correctly" || \
     log_fail "Unicode content caused error"
 
@@ -156,10 +157,10 @@ Single: 'here'"
 ENTRY4=$(create_entry_with_content "$TEST_DIR/test4" "$SPECIAL_CONTENT" "1700000004000")
 build_index "$TEST_DIR/test4" "$ENTRY4"
 
-if [ -s "$TEST_DIR/test4/1700000004000.txt" ]; then
+if content_matches "$TEST_DIR/test4" "$SPECIAL_CONTENT"; then
     log_pass "Special characters handled without corruption"
 else
-    log_fail "Content file empty or missing"
+    log_fail "Special characters changed by the import"
 fi
 
 # Test 5: Very long lines (horizontal scroll test data)
@@ -172,10 +173,9 @@ Another short line"
 ENTRY5=$(create_entry_with_content "$TEST_DIR/test5" "$LONG_LINE_CONTENT" "1700000005000")
 build_index "$TEST_DIR/test5" "$ENTRY5"
 
-LINE_LEN=$(head -2 "$TEST_DIR/test5/1700000005000.txt" | tail -1 | wc -c)
-[[ "$LINE_LEN" -ge 500 ]] && \
-    log_pass "Long line preserved ($LINE_LEN chars)" || \
-    log_fail "Long line truncated, expected 500+ chars, got $LINE_LEN"
+content_matches "$TEST_DIR/test5" "$LONG_LINE_CONTENT" && \
+    log_pass "Long line preserved (500 chars)" || \
+    log_fail "Long line truncated or changed"
 
 # Test 6: Stats and list work with scrollable content
 log_info "Test 6: Stats works with scrollable content"
