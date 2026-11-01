@@ -4,6 +4,7 @@
 //! `--config` file is an error. Invalid values are config errors (exit 5 in
 //! Step 3), and messages name the bad key or pattern.
 
+pub use crate::daemon::capture::CaptureMode;
 use crate::storage::IngestPolicy;
 use anyhow::Result;
 use serde::Deserialize;
@@ -14,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub storage: StorageConfig,
+    pub capture: CaptureConfig,
+    pub socket: SocketConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -38,6 +41,43 @@ impl Default for StorageConfig {
         }
     }
 }
+
+/// `[capture]`: how the daemon sees new selections.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureConfig {
+    pub mode: CaptureMode,
+    /// How often polling reads the clipboard (also with `auto` after a fallback)
+    pub poll_interval_ms: u64,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self { mode: CaptureMode::Auto, poll_interval_ms: 250 }
+    }
+}
+
+/// `[socket]`: the daemon's Unix socket for remote copy (and paste).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SocketConfig {
+    pub enabled: bool,
+    /// Serve `PULL` (rpaste); off by default because it exposes the clipboard
+    pub allow_pull: bool,
+    /// Per-read/write timeout; a whole request gets twice this
+    pub timeout_ms: u64,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self { enabled: true, allow_pull: false, timeout_ms: 5000 }
+    }
+}
+
+/// Allowed `[capture] poll_interval_ms`.
+pub const POLL_INTERVAL_RANGE_MS: std::ops::RangeInclusive<u64> = 50..=5000;
+/// Allowed `[socket] timeout_ms`.
+pub const SOCKET_TIMEOUT_RANGE_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
 
 /// Where the config came from, for `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +151,7 @@ impl Config {
             }
         };
         let config = Self::parse(&text)
+            .and_then(|c| c.check_daemon_sections().map(|()| c))
             .and_then(|c| c.ingest_policy().map(|_| c))
             .map_err(|e| ConfigError(format!("{}: {}", path.display(), e.0)))?;
         let source = if explicit {
@@ -124,6 +165,27 @@ impl Config {
     /// Parse config text (unknown keys are rejected).
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
         toml::from_str(text).map_err(|e| ConfigError(e.to_string().trim_end().to_string()))
+    }
+
+    /// Validate the `[capture]` and `[socket]` sections.
+    pub fn check_daemon_sections(&self) -> Result<(), ConfigError> {
+        let interval = self.capture.poll_interval_ms;
+        if !POLL_INTERVAL_RANGE_MS.contains(&interval) {
+            return Err(ConfigError(format!(
+                "[capture] poll_interval_ms = {interval} must be between {} and {}",
+                POLL_INTERVAL_RANGE_MS.start(),
+                POLL_INTERVAL_RANGE_MS.end()
+            )));
+        }
+        let timeout = self.socket.timeout_ms;
+        if !SOCKET_TIMEOUT_RANGE_MS.contains(&timeout) {
+            return Err(ConfigError(format!(
+                "[socket] timeout_ms = {timeout} must be between {} and {}",
+                SOCKET_TIMEOUT_RANGE_MS.start(),
+                SOCKET_TIMEOUT_RANGE_MS.end()
+            )));
+        }
+        Ok(())
     }
 
     /// Validate the `[storage]` section and compile its patterns.
@@ -242,6 +304,61 @@ mod tests {
         assert_eq!(policy.pattern_count(), 1, "built-ins disabled");
         assert_eq!(policy.ignored_by("secret: hunter2"), Some(0));
         assert_eq!(policy.pattern_label(0), "ignore_patterns[0]");
+    }
+
+    #[test]
+    fn capture_and_socket_defaults() {
+        let config = Config::default();
+        assert_eq!(config.capture, CaptureConfig { mode: CaptureMode::Auto, poll_interval_ms: 250 });
+        assert_eq!(
+            config.socket,
+            SocketConfig { enabled: true, allow_pull: false, timeout_ms: 5000 }
+        );
+        assert_eq!(Config::parse("").unwrap(), config);
+    }
+
+    #[test]
+    fn parses_capture_and_socket_sections() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[capture]\nmode = \"poll\"\npoll_interval_ms = 50\n\
+             [socket]\nenabled = false\nallow_pull = true\ntimeout_ms = 200\n",
+        )
+        .unwrap();
+        let (config, _) = Config::load_path(&path, true).unwrap();
+        assert_eq!(config.capture, CaptureConfig { mode: CaptureMode::Poll, poll_interval_ms: 50 });
+        assert_eq!(config.socket, SocketConfig { enabled: false, allow_pull: true, timeout_ms: 200 });
+        for (text, mode) in [("auto", CaptureMode::Auto), ("watch", CaptureMode::Watch)] {
+            let config = Config::parse(&format!("[capture]\nmode = \"{text}\"\n")).unwrap();
+            assert_eq!(config.capture.mode, mode);
+        }
+        let err = Config::parse("[capture]\nmode = \"inotify\"\n").unwrap_err();
+        assert!(err.to_string().contains("inotify"), "{err}");
+        let err = Config::parse("[socket]\nport = 7779\n").unwrap_err();
+        assert!(err.to_string().contains("port"), "{err}");
+    }
+
+    #[test]
+    fn rejects_poll_interval_and_timeout_out_of_range() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for (text, key) in [
+            ("[capture]\npoll_interval_ms = 49\n", "poll_interval_ms"),
+            ("[capture]\npoll_interval_ms = 5001\n", "poll_interval_ms"),
+            ("[socket]\ntimeout_ms = 99\n", "timeout_ms"),
+            ("[socket]\ntimeout_ms = 60001\n", "timeout_ms"),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let err = Config::load_path(&path, true).unwrap_err();
+            assert!(err.to_string().contains(key), "{text}: {err}");
+        }
+        for text in ["[capture]\npoll_interval_ms = 50\n", "[capture]\npoll_interval_ms = 5000\n",
+                     "[socket]\ntimeout_ms = 100\n", "[socket]\ntimeout_ms = 60000\n"] {
+            std::fs::write(&path, text).unwrap();
+            assert!(Config::load_path(&path, true).is_ok(), "{text}");
+        }
     }
 
     #[test]

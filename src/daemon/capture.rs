@@ -4,7 +4,19 @@
 use crate::clipboard::Clipboard;
 use crate::storage::{IngestOutcome, Source, Storage};
 use anyhow::Result;
+use serde::Deserialize;
 use std::io::{self, Read};
+
+/// `[capture] mode`. `auto` watches and falls back to polling when the
+/// compositor lacks the data-control protocol; `watch` never polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureMode {
+    #[default]
+    Auto,
+    Watch,
+    Poll,
+}
 
 /// Handle one selection from `wl-paste --watch`: `state` is
 /// `CLIPBOARD_STATE` and `input` the selection's text. Never fails on bad
