@@ -286,3 +286,17 @@ fn help_and_completions_cover_the_new_commands() {
         }
     }
 }
+
+#[test]
+fn pick_copies_an_image_as_png() {
+    let env = TestEnv::new();
+    ok(&env, &["copy"], Some("text"));
+    let png = test_png(12, 9, b"pick");
+    env.put_image(&png);
+    env.set_clipboard("something else", &["text/plain"]);
+    // Debug builds only: pick entry 1 without the TUI or daemon autostart
+    let out = env.cmd().arg("pick").env("CLIPSTACK_TEST_PICK", "1").output().unwrap();
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(std::fs::read(env.fake_clip_dir.join("content")).unwrap(), png);
+    assert_eq!(std::fs::read_to_string(env.fake_clip_dir.join("types")).unwrap(), "image/png\n");
+}

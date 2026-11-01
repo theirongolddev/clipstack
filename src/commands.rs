@@ -2,6 +2,7 @@
 //! config, opens storage and dispatches here.
 
 use crate::cli::{Cli, CliError, EntryRef, Exit, LimitSource, resolve_max_entries};
+use crate::picker::Picked;
 use crate::storage::{self, ClipEntry, EntryId, IngestOutcome, Kind, ListOrder, Source, Storage};
 use std::collections::HashMap;
 use crate::{clipboard, config, daemon, image_cache, perms, png, protocol, util};
@@ -297,11 +298,19 @@ pub fn delete(storage: &Storage, reference: &EntryRef) -> Result<()> {
 /// window that had focus. Without wtype it still copies and exits 0.
 pub fn pick(storage: Storage, config: &config::PickerConfig, paste: bool) -> Result<()> {
     let paste = paste || config.paste_after_pick;
-    let Some(content) = choose(storage, config)? else {
+    let Some(picked) = choose(storage, config)? else {
         return Ok(());
     };
-    clipboard::Clipboard::system().copy(&content)?;
-    eprintln!("Copied {} bytes to clipboard", content.len());
+    match picked {
+        Picked::Text(content) => {
+            clipboard::Clipboard::system().copy(&content)?;
+            eprintln!("Copied {} bytes to clipboard", content.len());
+        }
+        Picked::Image(png) => {
+            clipboard::Clipboard::system().copy_bytes(&png, png::MIME)?;
+            eprintln!("Copied a PNG image ({}) to clipboard", util::format_size(png.len()));
+        }
+    }
     if paste {
         paste_into_focused_window(config)?;
     }
@@ -351,12 +360,15 @@ pub fn edit(storage: &Storage, reference: &EntryRef) -> Result<()> {
 
 /// The picker's choice. Debug builds take `CLIPSTACK_TEST_PICK=REF` instead,
 /// so tests can drive `pick` without a terminal or a daemon.
-fn choose(storage: Storage, config: &config::PickerConfig) -> Result<Option<String>> {
+fn choose(storage: Storage, config: &config::PickerConfig) -> Result<Option<Picked>> {
     #[cfg(debug_assertions)]
     if let Ok(reference) = std::env::var("CLIPSTACK_TEST_PICK") {
         let reference: EntryRef = reference.parse().map_err(|e: String| CliError::new(Exit::Usage, e))?;
         let entry = resolve(&storage, &reference)?;
-        return storage.load_content(entry.id).map(Some);
+        return Ok(Some(match entry.kind {
+            Kind::Image => Picked::Image(storage.load_image(entry.id)?),
+            Kind::Text => Picked::Text(storage.load_content(entry.id)?),
+        }));
     }
     crate::picker::pick(storage, config)
 }

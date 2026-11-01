@@ -12,7 +12,7 @@ mod text;
 
 use crate::config::PickerConfig;
 use crate::daemon::Daemon;
-use crate::storage::{ClipEntry, EntryId, IngestOutcome, ListOrder, Source, Storage};
+use crate::storage::{ClipEntry, EntryId, IngestOutcome, Kind, ListOrder, Source, Storage};
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
@@ -38,6 +38,15 @@ enum Outcome {
     Cancelled,
     /// Enter: this content goes to the clipboard
     Selected(String),
+    /// Enter on an image: this PNG goes to the clipboard
+    SelectedImage(Vec<u8>),
+}
+
+/// What the picker chose: text, or an image's PNG bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picked {
+    Text(String),
+    Image(Vec<u8>),
 }
 
 pub struct Picker {
@@ -46,6 +55,9 @@ pub struct Picker {
     search: SearchState,
     /// Wait after the last keystroke before searching
     debounce: Duration,
+    /// The image cache whose file goes when an image is deleted (`None` in
+    /// tests unless they set one, so they never touch the runtime dir)
+    image_dir: Option<std::path::PathBuf>,
 }
 
 impl Picker {
@@ -55,6 +67,7 @@ impl Picker {
             view: ViewState::default(),
             search: SearchState::default(),
             debounce: search::DEBOUNCE,
+            image_dir: None,
         };
 
         picker.update_filter();
@@ -238,10 +251,13 @@ impl Picker {
         let entry_id = self.selected_entry().map(|e| e.id);
 
         match entry_id {
-            Some(id) if self.data.cached_content(id).is_none() => match self.data.storage.load_content(id) {
-                Ok(content) => self.data.content_cache = Some((id, content)),
-                Err(_) => self.data.content_cache = None,
-            },
+            Some(id) if self.data.cached_content(id).is_none() => {
+                let image = self.selected_entry().filter(|e| e.kind == Kind::Image).map(image_description);
+                match image.map_or_else(|| self.data.storage.load_content(id), Ok) {
+                    Ok(content) => self.data.content_cache = Some((id, content)),
+                    Err(_) => self.data.content_cache = None,
+                }
+            }
             None => self.data.content_cache = None,
             _ => {}
         }
@@ -307,7 +323,10 @@ impl Picker {
 
     fn delete_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.selected_entry().cloned() {
-            let content = self.data.storage.load_content(entry.id)?;
+            let content = match entry.kind {
+                Kind::Image => Picked::Image(self.data.storage.load_image(entry.id)?),
+                Kind::Text => Picked::Text(self.data.storage.load_content(entry.id)?),
+            };
             let preview: String = entry.preview.chars().take(30).collect();
             let was_pinned = entry.pinned;
 
@@ -320,6 +339,11 @@ impl Picker {
 
             let row = self.selected_index().unwrap_or(0);
             self.data.storage.delete_entry(entry.id)?;
+            if entry.kind == Kind::Image
+                && let Some(dir) = &self.image_dir
+            {
+                crate::image_cache::remove_in(dir, entry.id);
+            }
             self.data.entries.retain(|e| e.id != entry.id);
             // The entry is gone: select whatever is now on its row
             self.view.selection = None;
@@ -337,7 +361,11 @@ impl Picker {
         if let Some(deleted) = self.data.last_deleted.take() {
             if deleted.deleted_at.elapsed() < UNDO_WINDOW {
                 let preview: String = deleted.entry.preview.chars().take(30).collect();
-                let restored = match self.data.storage.ingest(&deleted.content, Source::Picker, &[])? {
+                let restored = match &deleted.content {
+                    Picked::Text(text) => self.data.storage.ingest(text, Source::Picker, &[])?,
+                    Picked::Image(png) => self.data.storage.ingest_image(png, Source::Picker, &[])?,
+                };
+                let restored = match restored {
                     IngestOutcome::Inserted(entry) | IngestOutcome::Bumped(entry) => entry,
                     IngestOutcome::Skipped(reason) => {
                         let reason = self.data.storage.policy().describe_skip(&reason);
@@ -415,6 +443,9 @@ impl Picker {
             Action::Quit => return Ok(Some(Outcome::Cancelled)),
             Action::Select => {
                 if let Some(entry) = self.selected_entry() {
+                    if entry.kind == Kind::Image {
+                        return Ok(Some(Outcome::SelectedImage(self.data.storage.load_image(entry.id)?)));
+                    }
                     let content = self.data.storage.load_content(entry.id)?;
                     return Ok(Some(Outcome::Selected(content)));
                 }
@@ -479,11 +510,13 @@ impl Picker {
             }
             Action::PromptSubmit => self.submit_alias(),
             Action::PromptCancel => self.view.prompt = None,
-            Action::Edit => {
-                if let Some(entry) = self.selected_entry() {
-                    return Ok(Some(Outcome::Edit(entry.id)));
+            Action::Edit => match self.selected_entry() {
+                Some(entry) if entry.kind == Kind::Image => {
+                    self.view.set_status("Images can't be edited (Enter copies it)".to_string(), StatusLevel::Warning);
                 }
-            }
+                Some(entry) => return Ok(Some(Outcome::Edit(entry.id))),
+                None => {}
+            },
         }
         Ok(None)
     }
@@ -494,7 +527,7 @@ impl Picker {
         view.preview_scroll = view.preview_scroll.saturating_add_signed(lines).min(view.max_preview_scroll());
     }
 
-    pub fn run(&mut self) -> Result<Option<String>> {
+    pub fn run(&mut self) -> Result<Option<Picked>> {
         // Setup terminal
         let mut stdout = stdout();
         stdout.execute(EnterAlternateScreen)?;
@@ -538,7 +571,7 @@ impl Picker {
         outcome
     }
 
-    fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Option<String>> {
+    fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Option<Picked>> {
         loop {
             self.tick(Instant::now());
             terminal.draw(|f| self.render(f))?;
@@ -556,7 +589,8 @@ impl Picker {
                     outcome = self.edit_suspended(terminal, id)?;
                 }
                 match outcome {
-                    Some(Outcome::Selected(content)) => return Ok(Some(content)),
+                    Some(Outcome::Selected(content)) => return Ok(Some(Picked::Text(content))),
+                    Some(Outcome::SelectedImage(png)) => return Ok(Some(Picked::Image(png))),
                     Some(Outcome::Cancelled) => return Ok(None),
                     Some(Outcome::Edit(_)) | None => {}
                 }
@@ -607,6 +641,16 @@ fn daemon_spawn_program(
     current_exe.ok()
 }
 
+/// The preview pane's text for an image entry (images are not drawn).
+fn image_description(entry: &ClipEntry) -> String {
+    let (width, height) = (entry.width.unwrap_or(0), entry.height.unwrap_or(0));
+    format!(
+        "PNG image, {width}x{height} pixels, {}\n\nEnter copies the image; `clipstack get id:{} > file.png` saves it.",
+        crate::util::format_size(entry.size),
+        entry.id
+    )
+}
+
 /// Ensure daemon is running, silently spawning if needed
 fn ensure_daemon_running(storage_dir: &std::path::Path) {
     if Daemon::is_running() {
@@ -630,10 +674,11 @@ fn ensure_daemon_running(storage_dir: &std::path::Path) {
 
 /// Run the picker (starting the daemon if needed); the chosen content, or
 /// `None` if the user cancelled.
-pub fn pick(storage: Storage, config: &PickerConfig) -> Result<Option<String>> {
+pub fn pick(storage: Storage, config: &PickerConfig) -> Result<Option<Picked>> {
     ensure_daemon_running(storage.base_dir());
     let mut picker = Picker::new(storage)?;
     picker.debounce = config.search_debounce();
+    picker.image_dir = crate::image_cache::dir().ok();
     picker.run()
 }
 
@@ -829,6 +874,59 @@ pub(super) mod tests {
         press(&mut picker, "p");
         assert_eq!(status(&picker), "Unpinned (alias @work removed)");
         assert_eq!(picker.data.storage.by_alias("work").unwrap(), None);
+    }
+
+    /// Storage holding text "older" and then a 640x480 image (the newest).
+    fn storage_with_image() -> (TempDir, Storage, Vec<u8>) {
+        let (temp, storage) = create_test_storage(&["older"]);
+        let png = crate::png::test_png(640, 480, b"picker");
+        storage.ingest_image_at(&png, Source::Watch, &[], 10).unwrap();
+        (temp, storage, png)
+    }
+
+    #[test]
+    fn enter_on_an_image_selects_its_png() {
+        let (_temp, storage, png) = storage_with_image();
+        let mut picker = Picker::new(storage).unwrap();
+        assert_eq!(picker.selected_entry().unwrap().preview, "Image \u{b7} 640x480");
+        assert_eq!(key(&mut picker, KeyCode::Enter), Some(Outcome::SelectedImage(png)));
+    }
+
+    #[test]
+    fn e_on_an_image_explains_instead_of_editing() {
+        let (_temp, storage, _png) = storage_with_image();
+        let mut picker = Picker::new(storage).unwrap();
+        assert_eq!(press(&mut picker, "e"), None);
+        assert!(status(&picker).contains("can't be edited"), "{}", status(&picker));
+    }
+
+    #[test]
+    fn image_preview_describes_the_image() {
+        let (_temp, storage, png) = storage_with_image();
+        let mut picker = Picker::new(storage).unwrap();
+        picker.load_preview();
+        let id = picker.selected_entry().unwrap().id;
+        let text = picker.data.cached_content(id).expect("a preview text");
+        assert!(text.contains("640x480") && text.contains("PNG"), "{text}");
+        assert!(text.contains(&crate::util::format_size(png.len())), "{text}");
+    }
+
+    #[test]
+    fn deleting_an_image_can_be_undone_and_removes_its_cached_file() {
+        let (_temp, storage, png) = storage_with_image();
+        let mut picker = Picker::new(storage).unwrap();
+        let cache = TempDir::new().unwrap();
+        picker.image_dir = Some(cache.path().to_path_buf());
+        let id = picker.selected_entry().unwrap().id;
+        let cached = cache.path().join(format!("{id}.png"));
+        std::fs::write(&cached, &png).unwrap();
+
+        picker.delete_selected().unwrap();
+        assert!(!cached.exists(), "the cached file goes with the entry");
+        picker.undo_delete().unwrap();
+        let restored = picker.selected_entry().unwrap().clone();
+        assert_eq!((restored.width, restored.height), (Some(640), Some(480)));
+        assert_eq!(picker.data.storage.load_image(restored.id).unwrap(), png);
     }
 
     #[test]

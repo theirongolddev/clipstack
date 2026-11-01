@@ -11,7 +11,8 @@ pub const UNDO_WINDOW: Duration = Duration::from_secs(5);
 /// Deleted entry for undo functionality
 pub struct DeletedEntry {
     pub entry: ClipEntry,
-    pub content: String,
+    /// What `u` puts back: the text, or the image's PNG
+    pub content: super::Picked,
     pub was_pinned: bool, // Track pin state for restoration
     pub deleted_at: Instant,
 }

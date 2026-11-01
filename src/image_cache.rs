@@ -64,8 +64,14 @@ pub fn prune_dir(storage: &Storage, dir: &Path) {
 
 /// Remove the cached file of entry `id`, if any.
 pub fn remove(id: EntryId) {
-    let Ok(dir) = dir() else { return };
-    match std::fs::remove_file(file_path(&dir, id)) {
+    if let Ok(dir) = dir() {
+        remove_in(&dir, id);
+    }
+}
+
+/// `remove` from the cache at `dir`.
+pub fn remove_in(dir: &Path, id: EntryId) {
+    match std::fs::remove_file(file_path(dir, id)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => {
             eprintln!("[images] cannot remove the cached image of id:{id}: {e}");
         }
