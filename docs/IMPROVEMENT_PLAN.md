@@ -977,7 +977,8 @@ src/picker/actions.rs edit_in_editor(), paste_command()
 
 **[15] Wrap to pane width:**
 - `wrap_to_width(text, width) -> Vec<String>` uses `unicode-width = "0.2"` display widths (CJK = 2), the same version ratatui 0.29 uses.
-- It replaces the hard-coded 80 and is cached by `(entry_id, width, show_ws)`, recomputed when the frame width changes.
+- It replaces the hard-coded 80 and is cached by `(entry_id, width, show_ws)`, recomputed when the frame width changes. Tabs expand to stops of 4 columns; a character wider than the pane gets a row of its own.
+- List focus shows the top of the same wrapped rows that preview focus scrolls, so `[+N lines]` in the title counts wrapped rows.
 
 **[16] Compact time:** `format_compact_age(ts_ms, now_ms) -> String` produces exactly 4 columns, right-aligned: `  5s`, ` 12m`, `  3h`, ` 40d`, `999d`, capping at `999d`. The list uses `{:>4}`. `list` CLI output keeps the "5m ago" style.
 

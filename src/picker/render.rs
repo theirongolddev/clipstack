@@ -11,7 +11,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
 };
 use std::time::Duration;
@@ -173,76 +173,49 @@ impl Picker {
         );
     }
 
+    /// The selected entry wrapped to the pane. List focus shows its top;
+    /// preview focus scrolls through the same rows.
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
-        // Update preview_height for scroll calculations
-        self.view.preview_height = area.height.saturating_sub(2); // Account for borders
+        // Inside the border
+        self.view.preview_height = area.height.saturating_sub(2);
+        self.wrap_preview(area.width.saturating_sub(2));
 
         let view = &self.view;
-        // In Focus::Preview mode, render the scrollable preview lines
-        if view.focus == Focus::Preview && !view.preview_lines.is_empty() {
-            let visible_height = view.preview_height as usize;
-            let start = view.preview_scroll;
-            let end = (start + visible_height).min(view.preview_lines.len());
-            let visible_lines = &view.preview_lines[start..end];
+        let height = usize::from(view.preview_height);
+        let total = view.preview_lines.len();
+        let start = view.preview_scroll.min(total);
+        let end = (start + height).min(total);
+        let text = match self.selected_entry() {
+            None => "(no selection)".to_string(),
+            Some(_) if view.preview_key.is_none() => "(content unavailable)".to_string(),
+            Some(_) => view.preview_lines[start..end].join("\n"),
+        };
 
-            let preview_text = visible_lines.join("\n");
-
-            // Build title with scroll position
-            let title = if view.preview_lines.len() > visible_height {
-                format!(
-                    "[PREVIEW] Lines {}-{} of {} (Tab to exit)",
-                    start + 1,
-                    end,
-                    view.preview_lines.len()
-                )
+        let (title, border) = if view.focus == Focus::Preview {
+            let title = if total > height {
+                format!("[PREVIEW] Lines {}-{} of {} (Tab to exit)", start + 1, end, total)
             } else {
                 "[PREVIEW] Tab to exit".to_string()
             };
-
-            // Highlight border when in preview mode
-            let preview = Paragraph::new(preview_text).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(Style::default().fg(Color::Yellow)),
-            );
-
-            frame.render_widget(preview, area);
-            return;
-        }
-
-        // Normal preview rendering (Focus::List mode)
-        let (content, metadata) = if let Some(entry) = self.selected_entry() {
-            let content = self.data.cached_content(entry.id).unwrap_or("(loading...)");
-            let time = util::format_relative_time(entry.last_used);
-            let size = util::format_size(entry.size);
-            (content, format!("Preview - {} - {}", size, time))
+            (title, Color::Yellow)
         } else {
-            ("(no selection)", "Preview".to_string())
+            let mut title = match self.selected_entry() {
+                Some(entry) => format!(
+                    "Preview - {} - {}",
+                    util::format_size(entry.size),
+                    util::format_relative_time(entry.last_used)
+                ),
+                None => "Preview".to_string(),
+            };
+            if total > height {
+                title.push_str(&format!(" [+{} lines, Tab to scroll]", total - height));
+            }
+            (title, Color::Cyan)
         };
 
-        // Count lines and handle truncation
-        let lines: Vec<&str> = content.lines().collect();
-        let max_lines = view.preview_height as usize;
-        let truncated = lines.len() > max_lines;
-
-        let preview_text: String = lines.iter().take(max_lines).copied().collect::<Vec<_>>().join("\n");
-
-        let title = if truncated {
-            format!("{} [+{} lines, Tab to scroll]", metadata, lines.len() - max_lines)
-        } else {
-            metadata
-        };
-
-        let preview = Paragraph::new(preview_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .wrap(Wrap { trim: false });
-
+        let preview = Paragraph::new(text).block(
+            Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(border)),
+        );
         frame.render_widget(preview, area);
     }
 
@@ -379,6 +352,46 @@ mod tests {
         let mut picker = Picker::new(storage).unwrap();
         picker.view.set_status("★ Pinned".to_string(), StatusLevel::Success);
         assert_eq!(picker.status_duration(), Duration::from_secs(3));
+    }
+
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// Render `picker` into a `width` x 20 buffer and return its rows.
+    pub(in crate::picker) fn draw(picker: &mut Picker, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal.draw(|f| picker.render(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn preview_rewraps_on_resize() {
+        let (_temp, storage) = create_test_storage(&[&"x".repeat(150)]);
+        let mut picker = Picker::new(storage).unwrap();
+        for width in [60u16, 120, 60] {
+            let rows = draw(&mut picker, width);
+            // The preview takes 60% of the width; its border takes 2 columns
+            let inner = (width - width * 40 / 100 - 2) as usize;
+            let expect = 150usize.div_ceil(inner);
+            assert_eq!(picker.view.preview_lines.len(), expect, "width {width}");
+            assert_eq!(picker.view.preview_lines[0].len(), inner, "width {width}");
+            let pane = (width * 40 / 100) as usize;
+            let longest = rows.iter().map(|r| r.chars().skip(pane).filter(|&c| c == 'x').count()).max().unwrap();
+            assert_eq!(longest, inner, "a full row of x fills the pane at width {width}");
+        }
+    }
+
+    #[test]
+    fn preview_pane_and_scroll_use_the_same_lines() {
+        let (_temp, storage) = create_test_storage(&[&"y".repeat(2000)]);
+        let mut picker = Picker::new(storage).unwrap();
+        let rows = draw(&mut picker, 120);
+        let lines = picker.view.preview_lines.len();
+        let shown = picker.view.preview_height as usize;
+        assert!(lines > shown);
+        assert!(rows[3].contains(&format!("+{} lines", lines - shown)), "{}", rows[3]);
     }
 
     #[test]

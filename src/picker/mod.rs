@@ -172,31 +172,34 @@ impl Picker {
     }
 
     /// Load and wrap preview content for Focus::Preview mode
-    fn load_preview_content(&mut self) {
-        let entry = match self.selected_entry() {
-            Some(e) => e.clone(),
-            None => return,
+    /// Wrap the selected entry to `width` columns into `view.preview_lines`
+    /// (kept until the entry or the width changes). Another entry starts
+    /// at its top.
+    fn wrap_preview(&mut self, width: u16) {
+        self.load_preview();
+        let Some((id, content)) = &self.data.content_cache else {
+            self.view.preview_lines.clear();
+            self.view.preview_key = None;
+            return;
         };
-
-        if let Ok(content) = self.data.storage.load_content(entry.id) {
-            self.view.preview_lines = text::wrap_chars(&content, text::WRAP_WIDTH);
+        let key = (*id, width);
+        if self.view.preview_key == Some(key) {
+            return;
+        }
+        if self.view.preview_key.map(|(old, _)| old) != Some(*id) {
             self.view.preview_scroll = 0;
         }
+        self.view.preview_lines = text::wrap_to_width(content, width as usize);
+        self.view.preview_key = Some(key);
+        self.view.preview_scroll = self.view.preview_scroll.min(self.view.max_preview_scroll());
     }
 
     fn move_selection(&mut self, delta: isize) {
         let Some(current) = self.selected_index() else {
             return;
         };
-        let new_idx = current.saturating_add_signed(delta);
-
-        // Clear preview cache when selection changes
-        let before = self.view.selection;
-        self.select_index(new_idx);
-        if self.view.selection != before {
-            self.view.preview_lines.clear();
-            self.view.preview_scroll = 0;
-        }
+        // The preview is rewrapped (from the top) for the new entry at render
+        self.select_index(current.saturating_add_signed(delta));
         self.load_preview();
     }
 
@@ -361,12 +364,11 @@ impl Picker {
             Action::Undo => self.undo_delete()?,
             Action::TogglePin => self.toggle_pin_selected()?,
             Action::FocusPreview => {
-                self.load_preview_content();
                 self.view.focus = Focus::Preview;
+                self.view.preview_scroll = 0;
             }
             Action::FocusList => {
                 self.view.focus = Focus::List;
-                self.view.preview_lines.clear();
                 self.view.preview_scroll = 0;
             }
             Action::Scroll(lines) => self.scroll_preview(lines),
@@ -671,7 +673,7 @@ pub(super) mod tests {
         let (_temp, storage) = create_test_storage(&[&"x".repeat(200)]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
         // 200 chars / 80 wrap width = 2-3 lines
         assert!(picker.view.preview_lines.len() >= 2, "Long line should be wrapped");
@@ -682,7 +684,7 @@ pub(super) mod tests {
         let (_temp, storage) = create_test_storage(&["line1\nline2\nline3"]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
         let lines = &picker.view.preview_lines;
         assert_eq!(lines.len(), 3);
@@ -697,7 +699,7 @@ pub(super) mod tests {
         let mut picker = Picker::new(storage).unwrap();
 
         picker.view.preview_scroll = 50;
-        picker.load_preview_content();
+        picker.apply(Action::FocusPreview).unwrap();
 
         assert_eq!(picker.view.preview_scroll, 0);
     }
@@ -770,7 +772,7 @@ pub(super) mod tests {
         let (_temp, storage) = create_test_storage(&["日本語\n中文\n한국어"]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
         assert_eq!(picker.view.preview_lines.len(), 3);
     }
@@ -780,40 +782,45 @@ pub(super) mod tests {
         let (_temp, storage) = create_test_storage(&[&"a".repeat(1000)]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
-        // 1000 chars / 80 = 12-13 lines
-        assert!(picker.view.preview_lines.len() >= 12);
+        // 1000 columns / 80 = 13 lines
+        assert_eq!(picker.view.preview_lines.len(), 13);
     }
 
     #[test]
-    fn test_wrap_unicode_chars_not_bytes() {
-        // Test that Unicode lines are wrapped by character count, not byte count
-        // 50 Chinese characters = 150 bytes, but should NOT be wrapped at width 80
-        let content = "中".repeat(50);
+    fn test_wrap_unicode_by_display_width_not_bytes() {
+        // 40 CJK chars are 120 bytes but 80 columns: exactly one line at width 80
+        let content = "中".repeat(40);
         let (_temp, storage) = create_test_storage(&[&content]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
-        // 50 chars < 80 wrap_width, so should be exactly 1 line
-        // Before fix, this would be wrapped because 150 bytes > 80
-        assert_eq!(picker.view.preview_lines.len(), 1, "50 Unicode chars should not wrap at width 80");
-        assert_eq!(picker.view.preview_lines[0].chars().count(), 50);
+        assert_eq!(picker.view.preview_lines, [content]);
     }
 
     #[test]
     fn test_wrap_long_unicode_line() {
-        // 100 Chinese characters should wrap to 2 lines at width 80
+        // 100 CJK chars are 200 columns: 40 + 40 + 20 chars at width 80
         let content = "中".repeat(100);
         let (_temp, storage) = create_test_storage(&[&content]);
         let mut picker = Picker::new(storage).unwrap();
 
-        picker.load_preview_content();
+        picker.wrap_preview(80);
 
-        // 100 chars / 80 = 2 lines (80 + 20)
-        assert_eq!(picker.view.preview_lines.len(), 2, "100 Unicode chars should wrap to 2 lines at width 80");
-        assert_eq!(picker.view.preview_lines[0].chars().count(), 80);
-        assert_eq!(picker.view.preview_lines[1].chars().count(), 20);
+        let counts: Vec<_> = picker.view.preview_lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(counts, [40, 40, 20]);
+    }
+
+    #[test]
+    fn preview_rewraps_for_another_entry() {
+        let (_temp, storage) = create_test_storage(&["short", &"z".repeat(100)]);
+        let mut picker = Picker::new(storage).unwrap();
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines.len(), 2, "newest first: the long entry");
+        picker.apply(Action::Move(1)).unwrap();
+        picker.wrap_preview(80);
+        assert_eq!(picker.view.preview_lines, ["short"]);
     }
 }

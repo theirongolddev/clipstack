@@ -39,9 +39,14 @@ pub struct ViewState {
     pub status: Option<(String, StatusLevel, Instant)>,
     /// First key of a two-key command (`gg`, `dd`)
     pub pending: Option<char>,
-    pub preview_scroll: usize,  // Current scroll offset in preview
-    pub preview_lines: Vec<String>, // Cached wrapped lines of preview content
-    pub preview_height: u16,    // Available height for preview area
+    /// First preview row shown (non-zero only in preview focus)
+    pub preview_scroll: usize,
+    /// The selected entry's content wrapped to the pane, as drawn in both focuses
+    pub preview_lines: Vec<String>,
+    /// What `preview_lines` was made from: entry and pane width
+    pub preview_key: Option<(EntryId, u16)>,
+    /// Rows inside the preview border (set at each render)
+    pub preview_height: u16,
 }
 
 impl Default for ViewState {
@@ -57,6 +62,7 @@ impl Default for ViewState {
             pending: None,
             preview_scroll: 0,
             preview_lines: Vec::new(),
+            preview_key: None,
             preview_height: 10, // Updated dynamically during render
         }
     }
