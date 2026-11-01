@@ -3,7 +3,6 @@ use crate::perms;
 use crate::storage::{IngestOutcome, Source, Storage};
 use crate::util;
 use anyhow::{Context, Result};
-use fs2::FileExt;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -33,13 +32,7 @@ impl Daemon {
 
     /// Check if daemon is currently running by testing the lock file
     pub fn is_running() -> bool {
-        let lock_path = Self::lock_file_path();
-        if let Ok(file) = File::open(&lock_path) {
-            // Try to acquire exclusive lock - if fails, daemon is running
-            file.try_lock_exclusive().is_err()
-        } else {
-            false
-        }
+        lock_is_held(&Self::lock_file_path())
     }
 
     /// Read the PID recorded in a lock file
@@ -66,7 +59,7 @@ impl Daemon {
         // Acquire exclusive lock - fails if another daemon is running.
         let mut lock_file = open_lock_file(lock_path)?;
         lock_file
-            .try_lock_exclusive()
+            .try_lock()
             .context("Daemon already running (lock file is held)")?;
 
         // Record our PID so `clipstack kill` can signal us precisely
@@ -166,6 +159,17 @@ impl Daemon {
     }
 }
 
+/// Whether some process holds the exclusive lock on `lock_path`. The lock is
+/// `flock`-based (std `File::try_lock` on Linux), so a daemon from a version
+/// that locked with fs2 is detected too. A successful probe lock is released
+/// when the file closes.
+fn lock_is_held(lock_path: &Path) -> bool {
+    match File::open(lock_path) {
+        Ok(file) => matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        Err(_) => false,
+    }
+}
+
 /// Open (or create) the daemon lock file without truncating, so a failed
 /// attempt can't wipe the running daemon's PID. The file is made 0600 even if
 /// an older version created it world-readable.
@@ -238,6 +242,21 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, Source::Poll);
         assert_eq!(daemon.storage.load_content(entries[0].id).unwrap(), "copied text");
+    }
+
+    #[test]
+    fn lock_is_held_while_a_daemon_runs_and_released_on_drop() {
+        let dir = TempDir::new().unwrap();
+        let lock = dir.path().join("clipstack.lock");
+        assert!(!lock_is_held(&lock), "no lock file yet");
+
+        let daemon = test_daemon(&dir).unwrap();
+        assert!(lock_is_held(&lock));
+        assert!(lock_is_held(&lock), "checking doesn't steal or release it");
+
+        drop(daemon);
+        assert!(!lock_is_held(&lock));
+        let _again = test_daemon(&dir).expect("lock is free after the daemon exits");
     }
 
     #[test]
