@@ -18,8 +18,8 @@
 #
 # The overlay's colours come from omarchy's Commons (OMARCHY_PATH, default
 # /usr/share/omarchy). The harnesses load a copy of it in a temp HOME whose
-# current theme is a copy of the theme under test, so nothing here reads or
-# changes the user's theme settings, talks to the running omarchy-shell, the
+# current theme is a copy of the theme under test (read, never changed), so
+# nothing here changes the user's theme, talks to the running omarchy-shell, the
 # real clipstack binary or the real history.
 set -euo pipefail
 
@@ -34,7 +34,7 @@ while (($#)); do
       if [[ ${2:-} != "" && ${2:0:1} != "-" ]]; then render_dir=$2; shift; fi
       ;;
     -h|--help)
-      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
