@@ -267,7 +267,8 @@ impl Storage {
         // Check for duplicate - move existing entry to front instead of duplicating
         let mut index = self.load_index()?;
         if let Some(pos) = index.entries.iter().position(|e| e.hash == hash) {
-            let existing = index.entries.remove(pos);
+            let mut existing = index.entries.remove(pos);
+            existing.timestamp = timestamp; // Re-copy counts as most recent use
             index.entries.insert(0, existing.clone());
             self.save_index(&index)?;
             return Ok(existing);
@@ -598,6 +599,23 @@ mod tests {
         assert_eq!(index.entries[0].preview, "first"); // Now at front
         assert_eq!(index.entries[1].preview, "third");
         assert_eq!(index.entries[2].preview, "second");
+    }
+
+    #[test]
+    fn test_duplicate_refreshes_timestamp() {
+        let (storage, _dir) = test_storage();
+
+        let original = storage.save_entry("recopied").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let again = storage.save_entry("recopied").unwrap();
+
+        assert_eq!(again.id, original.id, "dedup keeps the same entry/file");
+        assert!(
+            again.timestamp > original.timestamp,
+            "re-copy should refresh the timestamp"
+        );
+        let index = storage.load_index().unwrap();
+        assert_eq!(index.entries[0].timestamp, again.timestamp, "persisted");
     }
 
     #[test]
