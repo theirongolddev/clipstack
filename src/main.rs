@@ -54,6 +54,9 @@ enum Commands {
     /// Run the clipboard monitoring daemon
     Daemon,
 
+    /// Stop the running daemon
+    Kill,
+
     /// Show storage statistics
     Stats,
 
@@ -163,6 +166,32 @@ fn main() -> Result<()> {
             ctrlc_handler(running);
 
             daemon.run()?;
+        }
+
+        Some(Commands::Kill) => {
+            if !daemon::Daemon::is_running() {
+                println!("Daemon is not running");
+                return Ok(());
+            }
+
+            // Use pkill to find and kill the daemon process
+            let status = std::process::Command::new("pkill")
+                .args(["-f", "clipstack daemon"])
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {
+                    println!("Daemon stopped");
+                }
+                Ok(_) => {
+                    // pkill returns non-zero if no process found
+                    println!("Daemon is not running");
+                }
+                Err(e) => {
+                    eprintln!("Failed to kill daemon: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
 
         Some(Commands::Stats) => {
